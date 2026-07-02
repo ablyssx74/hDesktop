@@ -1,11 +1,11 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O3 
+CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app
 
 
 # Target binary definitions
 GUI_TARGET = hdesktop
-VERSION = 1.0.1
+VERSION = 1.0.2
 PACKAGE_DIR := build/package
 
 # Shared target architectures
