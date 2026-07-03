@@ -473,58 +473,120 @@ void SyncDockWithRunningDeskbarApps() {
         currentX += separatorGapPadding;
     }
 
-         // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES (SYNTAX CORRECTED "HEY")
-        for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-            auto& activeTaskWin = fTaskbarWindows[w];
-            if (*activeTaskWin.openStateFlag == false) continue;
 
-            float size = dynamicWidths[evaluationSlotIdx];
-            HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 
-            if (realIconBounds.Contains(x, y)) {
-                fShowMainMenu = false;
-                std::cout << "\n========================================" << std::endl;
-                std::cout << "[SYSTEM CALL FIX] Toggling App via 'hey' Scripting: " << activeTaskWin.title << std::endl;
-                std::cout << "[SYSTEM CALL FIX] Cached Minimized State: " << (activeTaskWin.isMinimized ? "YES" : "NO") << std::endl;
+    // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+        auto& activeTaskWin = fTaskbarWindows[w];
+        if (*activeTaskWin.openStateFlag == false) continue;
 
-                char systemCmdBuffer[512]; 
+        float size = dynamicWidths[evaluationSlotIdx];
+        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+
+        // SINGLE, DE-DUPLICATED HITBOX CONDITION
+        if (realIconBounds.Contains(x, y)) {
+            fShowMainMenu = false;
+            std::cout << "\n========================================" << std::endl;
+            std::cout << "[SYSTEM CALL FIX] Toggling App via 'hey' Scripting: " << activeTaskWin.title << std::endl;
+            std::cout << "[SYSTEM CALL FIX] Cached Minimized State: " << (activeTaskWin.isMinimized ? "YES" : "NO") << std::endl;
+
+            // --- 100% SECURE TRACKER BYPASS AND SAFETY CHECK ---
+            bool isTracker = false;
+            app_info appInfo;
+            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
+                if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
+                    isTracker = true;
+                }
+            }
+
+            if (isTracker) {
+                char safeTrackerCmdBuffer[256];
+                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 
                 if (activeTaskWin.isMinimized == false) {
-                    std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
+                    // ACTION A: Tracker windows are currently visible -> HIDE THEM
+                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
                     
- 
-                    std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-                        "hey \"%s\" Set Minimize of Window 0 to true &", 
-                        activeTaskWin.title.c_str());
-                    
-                    std::system(systemCmdBuffer); 
+                    // Minimize Window 1 and up to ensure the Desktop sheet (Window 0) stays completely active
+                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
+                    std::system(safeTrackerCmdBuffer);
                     
                     be_roster->ActivateApp(-1);
-                    
-                    activeTaskWin.isMinimized = true; 
+                    activeTaskWin.isMinimized = true;
                 } 
                 else {
-                    std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
+                    // ACTION B: Tracker is minimized or completely empty -> WAKE / SPAWN IT
+                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
                     
+                    // 1. Bring Tracker application team to the foreground
                     be_roster->ActivateApp(activeTaskWin.teamId);
                     
-                    std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-                        "hey \"%s\" Set Minimize of Window 0 to false &", 
-                        activeTaskWin.title.c_str());
+                    // 2. Unminimize any folder views that might already be sleeping at index 1
+                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
+                    std::system(safeTrackerCmdBuffer);
+
+                    // 3. Always broadcast a native open request. If a folder was already open, Tracker 
+                    // safely ignores this. If Tracker had 0 windows open, this instantly spawns /boot/home.
+                    if (trackerMessenger.IsValid()) {
+                        BEntry homeEntry("/boot/home");
+                        entry_ref homeRef;
+                        if (homeEntry.GetRef(&homeRef) == B_OK) {
+                            BMessage openMsg(B_REFS_RECEIVED);
+                            openMsg.AddRef("refs", &homeRef);
+                            trackerMessenger.SendMessage(&openMsg);
+                        }
+                    }
                     
-                    std::system(systemCmdBuffer);
-                    
-                    activeTaskWin.isMinimized = false; 
+                    activeTaskWin.isMinimized = false;
                 }
-                
+
                 std::cout << "========================================\n" << std::endl;
-                return; 
+                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
             }
-            currentX += size + padding;
-            evaluationSlotIdx++;
+            // -----------------------------------------------------------
+
+            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
+            char systemCmdBuffer[512]; 
+
+            if (activeTaskWin.isMinimized == false) {
+                std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
+                
+                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+                    "hey \"%s\" Set Minimize of Window 0 to true &", 
+                    activeTaskWin.title.c_str());
+                
+                std::system(systemCmdBuffer); 
+                be_roster->ActivateApp(-1);
+                activeTaskWin.isMinimized = true; 
+            } 
+            else {
+                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
+                
+                be_roster->ActivateApp(activeTaskWin.teamId);
+                
+                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+                    "hey \"%s\" Set Minimize of Window 0 to false &", 
+                    activeTaskWin.title.c_str());
+                
+                std::system(systemCmdBuffer);
+                activeTaskWin.isMinimized = false; 
+            }
+            
+            std::cout << "========================================\n" << std::endl;
+            return; 
         }
-	} 	
-                	
+        
+        currentX += size + padding;
+        evaluationSlotIdx++;
+    }
+}
+
+
+
+
+     
 
     void HandleMouseInput(int x, int y, Uint32 buttonState) {
         fMouseX = x; fMouseY = y;
@@ -1829,7 +1891,7 @@ int main(int argc, char* argv[]) {
     
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.2"; 
+    const char* localVersion = "v1.0.3"; 
 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
