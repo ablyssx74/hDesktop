@@ -2,33 +2,32 @@
 #include <SDL2/SDL_opengl.h>
 #include <GL/glu.h>
 
-#include <Bitmap.h>
-#include <IconUtils.h>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <ctime>
+
+#include <OS.h>
+#include <Roster.h>
+#include <AppKit.h>     
+
 #include <File.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <Path.h>
 #include <NodeInfo.h>
-
-#include <iostream>
-#include <vector>
-#include <string>
-
-#include <View.h>
-#include <Font.h>
-#include <InterfaceDefs.h>
-#include <cmath>
-#include <Roster.h>
-#include <ctime>
 #include <TranslationUtils.h>
 
-#include <OS.h>
-#include <AppKit.h>
-#include <StorageKit.h>
-#include <vector>
-#include <string>
-#include <AppServerLink.h> 
 #include <Window.h>
+#include <View.h>
+#include <Bitmap.h>
+#include <IconUtils.h>
+#include <Font.h>
+#include <InterfaceDefs.h>
+
+#include <AppServerLink.h> 
+
 
 // =========================================================================
 // MODERN OPENGL FRAMEBUFFER EXTENSION PROTOTYPES FOR HAIKU OS
@@ -85,7 +84,8 @@ struct TaskbarItem {
     bool isMinimized;        
     bool* openStateFlag;     
     bool* minimizeStateFlag; 
-    team_id teamId;         
+    team_id teamId;     
+    int stableActiveFrameCount = 0;     
 };
 
 
@@ -250,6 +250,18 @@ public:
     }
 
 void SyncDockWithRunningDeskbarApps() {
+	// --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
+    // =================================================================
+    for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
+        // Look inside your existing TaskbarItem layout parameters
+        if (fTaskbarWindows[i].icon.id > 0) {
+            // Force OpenGL to instantly liberate the graphic texture memory allocations
+            glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
+            fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
+        }
+    }
+	
+	
     // 1. Keep a local backup so we don't blow away our click modifications
     std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
     fTaskbarWindows.clear();
@@ -304,27 +316,48 @@ void SyncDockWithRunningDeskbarApps() {
             openApp.icon = LoadIconFromNode(path.Path(), 128); 
             openApp.teamId = id; 
 
-            // --- FIXED STATE RESTORE LAYER WITH FOREGROUND CHECK ---
+            // --- FIXED STATE RESTORE LAYER WITH DEBOUNCE TRACKING ---
             bool foundOldInstance = false;
+            int oldActiveFrames = 0; // Initialize local counter
+            bool oldMinimizedState = true;
+
             for (const auto& oldWin : oldTaskbarWindows) {
                 if (oldWin.teamId == id) {
-                    openApp.isMinimized = oldWin.isMinimized;
+                    oldMinimizedState = oldWin.isMinimized;
+                    // Safely carry over your existing stability metrics if present
+                    oldActiveFrames = oldWin.stableActiveFrameCount;
                     foundOldInstance = true;
                     break;
                 }
             }
 
+            openApp.isMinimized = oldMinimizedState;
+            openApp.stableActiveFrameCount = oldActiveFrames;
 
-            if (!foundOldInstance || activeTeamId == id) {
-                if (activeTeamId == id) {
+            // Evaluate if this specific team is currently flagged as active by the OS
+            if (activeTeamId == id) {
+                openApp.stableActiveFrameCount++;
+                
+                // ANTI-FLASHING TRIGGER: Only restore to vibrant color if the app 
+                // remains the active foreground team for more than 2 scan cycles (~800ms)
+                if (openApp.stableActiveFrameCount >= 2) {
                     openApp.isMinimized = false;
-                } 
-
-                else if (activeTeamId == be_app->Team()) {
-                    openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
-                } 
-                else {
-                    openApp.isMinimized = true;
+                } else {
+                    openApp.isMinimized = oldMinimizedState; // Smooth over short background spikes
+                }
+            } else {
+                // If it is not the active app, decrement the counter smoothly
+                if (openApp.stableActiveFrameCount > 0) {
+                    openApp.stableActiveFrameCount--;
+                } else {
+                    // Fall back to your original baseline layer assignment logic safely
+                    if (!foundOldInstance) {
+                        if (activeTeamId == be_app->Team()) {
+                            openApp.isMinimized = true;
+                        } else {
+                            openApp.isMinimized = true;
+                        }
+                    }
                 }
             }
 
@@ -1590,17 +1623,19 @@ team_id GetRealFrontTeam() {
 
         // 3. Performance Check: Only rebuild the texture when a minute ticks over!
         if (currentTimeStr != fLastClockTimeString) {
-            // Delete the old text texture handle from GPU VRAM if it exists
+            fLastClockTimeString = currentTimeStr;
+            
+            // FIXED: Safety clear pass guarantees no old texture handle leaks, 
+            // regardless of startup execution states or double allocations!
             if (fClockTexture.id != 0) {
                 glDeleteTextures(1, &fClockTexture.id);
                 fClockTexture.id = 0;
             }
-
-            fLastClockTimeString = currentTimeStr;
             
             // Rasterize the fresh time stamp into an anti-aliased OpenGL text map
             fClockTexture = RenderTextToTexture(fLastClockTimeString.c_str(), &fClockWidth, &fClockHeight);
         }
+
     }
 
 
