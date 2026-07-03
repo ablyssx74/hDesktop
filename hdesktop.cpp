@@ -28,7 +28,7 @@
 #include <vector>
 #include <string>
 #include <AppServerLink.h> 
-
+#include <Window.h>
 
 // =========================================================================
 // MODERN OPENGL FRAMEBUFFER EXTENSION PROTOTYPES FOR HAIKU OS
@@ -829,7 +829,7 @@ void SyncDockWithRunningDeskbarApps() {
             currentX += (separatorGapPadding / 2.0f) + padding;
         }
 
-        // STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
+           // STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
         for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
             auto& activeTaskWin = fTaskbarWindows[w];
             if (*activeTaskWin.openStateFlag == false) continue; // Skip rendering completely if the window was closed!
@@ -838,13 +838,60 @@ void SyncDockWithRunningDeskbarApps() {
             float scale = dynamicScales[renderingSlotIdx];
             HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 
-            // A. Draw active task window application vector icon thumbnail
+            // -----------------------------------------------------------------
+            // 1. REFRESH VISIBILITY STATE NATIVELY (SAFE SEGREGATED HYBRID)
+            // -----------------------------------------------------------------
+            if (activeTaskWin.title == "Tracker") {
+                // TRACKER EXCLUSIVITY: Preserve your original working strategy.
+                // Do not override 'isMinimized' using global counts or cached threads.
+                // Let your verified click-handling states manage Tracker's visibility.
+            } 
+            else {
+                // GENERAL APPLICATIONS: Keep the fast thread execution checks 
+                // that handle title bar dimming and ghosting perfectly for other apps.
+                bool generalAppIsVisible = false;
+                thread_info info;
+                int32 cookie = 0;
+                while (get_next_thread_info(activeTaskWin.teamId, &cookie, &info) == B_OK) {
+                    BString threadName(info.name);
+                    
+                    if (info.state == B_THREAD_RUNNING || info.state == B_THREAD_READY) {
+                        if (threadName.IFindFirst("window") >= 0 || 
+                            threadName.IFindFirst("loop") >= 0 || 
+                            threadName.IFindFirst("render") >= 0 || 
+                            threadName.Compare(activeTaskWin.title.c_str()) == 0) {
+                            generalAppIsVisible = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Check system-wide foreground focus
+                app_info activeAppInfo;
+                bool isCurrentlyForeground = false;
+                if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+                    if (activeAppInfo.team == activeTaskWin.teamId) {
+                        isCurrentlyForeground = true;
+                    }
+                }
+
+                // Smoothly toggle the state for non-Tracker applications
+                if (isCurrentlyForeground) {
+                    activeTaskWin.isMinimized = false;
+                } else {
+                    activeTaskWin.isMinimized = !generalAppIsVisible;
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // 2. APPLY GL_COLOR GRAY-OUT FILTER BASED ON ACCURATE FLAGS
+            // -----------------------------------------------------------------
             if (activeTaskWin.icon.id != 0) {
                 glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
                 
-                // FIXED VISUAL LOGIC CHANNEL: Read the local flag directly instead of an unstable pointer address link
                 if (activeTaskWin.isMinimized == true) {
-                    glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
+                    // Dim down the icons cleanly using a matte transparent filter if minimized
+                    glColor4f(0.35f, 0.35f, 0.35f, 0.45f * (scale > 0.0f ? 1.0f : 1.0f)); 
                 } else {
                     glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Bright full opacity active focus
                 }
@@ -858,7 +905,9 @@ void SyncDockWithRunningDeskbarApps() {
                 glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
             }
 
-            // B. Draw an active native glowing mini ledger stripe indicator line below active windows
+            // -----------------------------------------------------------------
+            // 3. DRAW GLOWING ACTIVE HIGH-LIGHT SEGMENT UNDER VISIBLE WINDOWS
+            // -----------------------------------------------------------------
             glDisable(GL_TEXTURE_2D);
             if (activeTaskWin.isMinimized == false) {
                 // Bright glowing electric blue highlight segment line for focused open panels
@@ -874,6 +923,7 @@ void SyncDockWithRunningDeskbarApps() {
             renderingSlotIdx++;
         }
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
+
 
 
 
@@ -1891,7 +1941,7 @@ int main(int argc, char* argv[]) {
     
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.3"; 
+    const char* localVersion = "v1.0.4"; 
 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
@@ -1909,6 +1959,9 @@ int main(int argc, char* argv[]) {
     bool needsRender = true; 
 
     while (appExecuting) {
+
+        // Track if a click layer correction is needed on this master tick
+        bool clickTriggeredThisFrame = false; 
 
         if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
             do {
@@ -1929,7 +1982,11 @@ int main(int argc, char* argv[]) {
                     desktopEngine.HandleMouseInput(mouseX, mouseY, buttons);
 
                     if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN && 
-                        incomingEventPackage.button.button == SDL_BUTTON_LEFT) {
+                        (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
+                         incomingEventPackage.button.button == SDL_BUTTON_RIGHT)) {
+                        
+                        // Set our flag instead of running heavy loops right inside the poll block
+                        clickTriggeredThisFrame = true; 
                         desktopEngine.HandleMouseClick(mouseX, mouseY);
                     }
                     
@@ -1942,10 +1999,46 @@ int main(int argc, char* argv[]) {
             } while (SDL_PollEvent(&incomingEventPackage)); 
         }
 
+        // --- OPTIMIZED FLICKER CONTROL BLOCK ---
+        // This fires exactly ONCE per master tick instead of looping endlessly for every sub-event packet
+        if (clickTriggeredThisFrame) {
+            if (be_app != nullptr && be_app->Lock()) {
+                BWindow* ourSDLWindow = nullptr;
+                BWindow* trackerDesktopWindow = nullptr;
+                int32 windowCount = be_app->CountWindows();
+                
+                for (int32 i = 0; i < windowCount; i++) {
+                    BWindow* haikuWindow = be_app->WindowAt(i);
+                    if (haikuWindow != nullptr && haikuWindow->Lock()) {
+                        if (strcmp(haikuWindow->Title(), "Haiku GL Desktop Sandbox Workspace Engine Container") == 0) {
+                            ourSDLWindow = haikuWindow;
+                        }
+                        else if (strcmp(haikuWindow->Title(), "Desktop") == 0) {
+                            trackerDesktopWindow = haikuWindow;
+                        }
+                        haikuWindow->Unlock();
+                    }
+                }
+                
+                // Execute the singular, clean depth assertion step
+                if (ourSDLWindow != nullptr && ourSDLWindow->Lock()) {
+                    if (trackerDesktopWindow != nullptr) {
+                        ourSDLWindow->SendBehind(trackerDesktopWindow);
+                    } else {
+                        ourSDLWindow->SendBehind(nullptr);
+                    }
+                    ourSDLWindow->Unlock();
+                }
+                be_app->Unlock();
+            }
+        }
+        // --- END OF OPTIMIZATION ---
+
         uint32 currentTime = SDL_GetTicks();
 
-        if (currentTime - lastMetricsUpdateTime >= 1000 || lastMetricsUpdateTime == 0) {
 
+
+        if (currentTime - lastMetricsUpdateTime >= 1000 || lastMetricsUpdateTime == 0) {
             lastMetricsUpdateTime = currentTime;
             needsRender = true; 
         }
