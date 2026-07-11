@@ -1,7 +1,7 @@
 /*
  * Copyright 2026, Kris Beazley hDesktop@epluribusunix.net
  * All rights reserved. Distributed under the terms of the MIT license.
- */
+ */ 
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
@@ -17,6 +17,7 @@
 #include <Node.h>
 #include <iostream>
 #include <vector>
+#include <algorithm>
 #include <string>
 #include <View.h>
 #include <Font.h>
@@ -51,6 +52,12 @@ class HaikuAppDrawerWindow;
 HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
 BWindow* gActiveConfigInstance = nullptr; 
 
+
+std::map<team_id, int32> gInvisibleStreak;
+std::map<team_id, int32> gVisibleStreak;
+
+const int32 kThresholdMinimize = 1;   
+const int32 kThresholdMaximize = 33;  
 
 // =========================================================================
 // NATIVE CONFIGURATION PANEL CANVAS (FUNCTIONAL UI IMPLEMENTATION)
@@ -223,61 +230,76 @@ public:
         Invalidate(); 
     }
 
-    void ScanSystemDirectories() {
-        const char* paths[] = { "/boot/system/apps", "/boot/system/preferences" };
-        for (int p = 0; p < 2; p++) {
-            BDirectory dir(paths[p]);
-            if (dir.InitCheck() != B_OK) continue;
-
-            BEntry entry;
-            while (dir.GetNextEntry(&entry) == B_OK) {
-                char name[B_FILE_NAME_LENGTH];
-                if (entry.GetName(name) != B_OK) continue;
-
-                DrawerItem* item = new DrawerItem();
-                item->name = name;
-                entry.GetRef(&item->ref);
-                
-                // Allocate native 32x32 color matrix profile
-                item->icon = new BBitmap(BRect(0, 0, 31, 31), B_RGBA32);
-                
-                bool iconLoaded = false;
-                
-                // --- CONDITION A: ENTRY IS A SUB-DIRECTORY/FOLDER ---
-                if (entry.IsDirectory()) {
-                    // Fetch the standard Haiku platform folder icon via the system MIME database
-                    BMimeType folderMime("application/x-vnd.Be-directory");
-                    if (folderMime.InitCheck() == B_OK) {
-                        if (folderMime.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
-                            iconLoaded = true;
-                        }
-                    }
-                }
-                // --- CONDITION B: ENTRY IS A REGULAR FILE/BINARY ---
-                else {
-                    BNodeInfo nodeInfo;
-                    BNode node(&entry);
-                    if (nodeInfo.SetTo(&node) == B_OK) {
-                        if (nodeInfo.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
-                            iconLoaded = true;
-                        }
-                    }
-                }
-
-                // If both native lookups failed to fetch an asset, apply a safe global generic fallback
-                if (!iconLoaded) {
-                    BMimeType genericMime("application/octet-stream");
-                    if (genericMime.InitCheck() != B_OK || genericMime.GetIcon(item->icon, B_LARGE_ICON) != B_OK) {
-                        // If everything fails, clean up the pointer safely to avoid ghost boxes
-                        delete item->icon;
-                        item->icon = nullptr;
-                    }
-                }
-                
-                fItemsList.AddItem(item);
-            }
-        }
+    static bool CompareDrawerItems(const DrawerItem* a, const DrawerItem* b) {
+        BString nameA(a->name);
+        BString nameB(b->name);
+        return nameA.ICompare(nameB) < 0;
     }
+
+	void ScanSystemDirectories() {
+	    // 1. Temporary storage to hold items before sorting them
+	    std::vector<DrawerItem*> temporarySortedVector;
+	
+	    const char* paths[] = { "/boot/system/apps", "/boot/system/preferences" };
+	    for (int p = 0; p < 2; p++) {
+	        BDirectory dir(paths[p]);
+	        if (dir.InitCheck() != B_OK) continue;
+	
+	        BEntry entry;
+	        while (dir.GetNextEntry(&entry) == B_OK) {
+	            char name[B_FILE_NAME_LENGTH];
+	            if (entry.GetName(name) != B_OK) continue;
+	
+	            DrawerItem* item = new DrawerItem();
+	            item->name = name;
+	            entry.GetRef(&item->ref);
+	            
+	            // Allocate native 32x32 color matrix profile
+	            item->icon = new BBitmap(BRect(0, 0, 31, 31), B_RGBA32);
+	            
+	            bool iconLoaded = false;
+	            
+	            // --- CONDITION A: ENTRY IS A SUB-DIRECTORY/FOLDER ---
+	            if (entry.IsDirectory()) {
+	                BMimeType folderMime("application/x-vnd.Be-directory");
+	                if (folderMime.InitCheck() == B_OK) {
+	                    if (folderMime.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
+	                        iconLoaded = true;
+	                    }
+	                }
+	            }
+	            // --- CONDITION B: ENTRY IS A REGULAR FILE/BINARY ---
+	            else {
+	                BNodeInfo nodeInfo;
+	                BNode node(&entry);
+	                if (nodeInfo.SetTo(&node) == B_OK) {
+	                    if (nodeInfo.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
+	                        iconLoaded = true;
+	                    }
+	                }
+	            }
+	
+	            if (!iconLoaded) {
+	                BMimeType genericMime("application/octet-stream");
+	                if (genericMime.InitCheck() != B_OK || genericMime.GetIcon(item->icon, B_LARGE_ICON) != B_OK) {
+	                    delete item->icon;
+	                    item->icon = nullptr;
+	                }
+	            }
+	            
+	            // Collect the pointers inside our sorting array vector structure instead of immediate list push
+	            temporarySortedVector.push_back(item);
+	        }
+	    }
+	
+	    // 2. Perform Case-Insensitive Alphabetical Sorting across the entire combined list
+	    std::sort(temporarySortedVector.begin(), temporarySortedVector.end(), CompareDrawerItems);
+	
+	    // 3. Move the perfectly organized pointers into your native Haiku BList canvas architecture
+	    for (size_t i = 0; i < temporarySortedVector.size(); ++i) {
+	        fItemsList.AddItem(temporarySortedVector[i]);
+	    }
+	}
 
     virtual void Draw(BRect updateRect) {
         // =========================================================================
@@ -1097,8 +1119,14 @@ public:
 	                    // ACTION B: Tracker is minimized or completely empty -> WAKE / SPAWN IT
 	                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
 	                    
-	                    // 1. Bring Tracker application team to the foreground
-	                    be_roster->ActivateApp(activeTaskWin.teamId);
+	                    // PE & TRACKER FIX: Query the roster using its signature to grab the true parent team.
+	                    // This ensures ActivateApp targets the real master window thread.
+	                    app_info realTrackerInfo;
+	                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
+	                        be_roster->ActivateApp(realTrackerInfo.team);
+	                    } else {
+	                        be_roster->ActivateApp(activeTaskWin.teamId);
+	                    }
 	                    
 	                    // 2. Unminimize any folder views that might already be sleeping at index 1
 	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
@@ -1142,7 +1170,14 @@ public:
 	            else {
 	                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
 	                
-	                be_roster->ActivateApp(activeTaskWin.teamId);
+	                // PE & GENERAL THREAD FIX: Use the running app info from the active team to find 
+	                // the official master team registration ID, bypasses child thread faults for Pe.
+	                app_info targetAppInfo;
+	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
+	                    be_roster->ActivateApp(targetAppInfo.team);
+	                } else {
+	                    be_roster->ActivateApp(activeTaskWin.teamId);
+	                }
 	                
 	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
 	                    "hey \"%s\" Set Minimize of Window 0 to false &", 
@@ -1159,6 +1194,9 @@ public:
 	        currentX += size + padding;
 	        evaluationSlotIdx++;
 	    }
+
+
+
 	
 	    // =========================================================================
 	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (CLOCK -> TRASH BIN -> CPU)
