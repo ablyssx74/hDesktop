@@ -49,6 +49,145 @@
 
 class HaikuAppDrawerWindow; 
 HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
+BWindow* gActiveConfigInstance = nullptr; 
+
+
+// =========================================================================
+// NATIVE CONFIGURATION PANEL CANVAS (FUNCTIONAL UI IMPLEMENTATION)
+// =========================================================================
+class ConfigView : public BView {
+public:
+    ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
+        SetViewColor(rgb_color{24, 24, 28, 255}); // Matte dark background
+    }
+
+    virtual void Draw(BRect updateRect) {
+        float canvasWidth = Bounds().Width();
+
+        // 1. Render Window Header Context Title
+        SetFont(be_bold_font);
+        SetFontSize(14.0f);
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        
+        BString headerStr("hdesktop settings");
+        float titleWidth = StringWidth(headerStr.String());
+        DrawString(headerStr.String(), BPoint((canvasWidth - titleWidth) / 2.0f, 30.0f));
+
+        // 2. Draw Decorative Header Separator line
+        SetHighColor(rgb_color{50, 52, 60, 255}); 
+        StrokeLine(BPoint(15.0f, 45.0f), BPoint(canvasWidth - 15.0f, 45.0f));
+
+        // Get live mouse position for interactive buttons
+        BPoint cursorPoint;
+        uint32 transitButtons;
+        GetMouse(&cursorPoint, &transitButtons, false);
+        SetDrawingMode(B_OP_ALPHA);
+
+        // 3. Define the Interactive "Shutdown App" Button Metrics
+        BRect shutdownBtnRect(25.0f, 65.0f, canvasWidth - 25.0f, 100.0f);
+        
+        if (shutdownBtnRect.Contains(cursorPoint)) {
+            // Hot red alert hover glow for severe option block
+            SetHighColor(rgb_color{220, 60, 60, 45});
+            FillRect(shutdownBtnRect);
+            SetHighColor(rgb_color{255, 90, 90, 255}); // Glowing text tone
+        } else {
+            SetHighColor(rgb_color{35, 36, 42, 255}); // Inset card background
+            FillRect(shutdownBtnRect);
+            SetHighColor(rgb_color{210, 100, 100, 255}); // Warn red text tone
+        }
+        StrokeRect(shutdownBtnRect);
+        
+        // Render the text center-aligned inside the button container box
+        SetFont(be_bold_font);
+        SetFontSize(12.0f);
+        BString shutdownText("Shutdown App");
+        float shutdownTextW = StringWidth(shutdownText.String());
+        DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 87.0f));
+
+        // 4. Render "Other Config Options Coming Soon..." placeholder below
+        SetFont(be_plain_font);
+        SetFontSize(11.0f);
+        SetHighColor(rgb_color{110, 120, 135, 255}); // Dim slate text
+        
+        BString soonText("Other Config Options Coming Soon...");
+        float soonTextW = StringWidth(soonText.String());
+        DrawString(soonText.String(), BPoint((canvasWidth - soonTextW) / 2.0f, 135.0f));
+
+        // 5. Standard Window Control "Close" button tracking metrics at footer
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, Bounds().Height() - 45.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, Bounds().Height() - 15.0f);
+        
+        if (closeBtnRect.Contains(cursorPoint)) {
+            SetHighColor(rgb_color{100, 120, 160, 45});
+            FillRect(closeBtnRect);
+            SetHighColor(rgb_color{140, 175, 230, 255});
+        } else {
+            SetHighColor(rgb_color{40, 42, 48, 255});
+            FillRect(closeBtnRect);
+            SetHighColor(rgb_color{150, 160, 175, 255});
+        }
+        StrokeRect(closeBtnRect);
+        
+        BString btnText("close");
+        float btnTextW = StringWidth(btnText.String());
+        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, Bounds().Height() - 25.0f));
+    }
+
+    virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
+        Invalidate(); // Smooth real-time color highlights on cursor shift
+    }
+
+    virtual void MouseDown(BPoint point) {
+        float canvasWidth = Bounds().Width();
+        
+        BRect shutdownBtnRect(25.0f, 65.0f, canvasWidth - 25.0f, 100.0f);
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, Bounds().Height() - 45.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, Bounds().Height() - 15.0f);
+        
+        // Target Action A: Complete System Termination Request Intercepted
+        if (shutdownBtnRect.Contains(point)) {
+            std::cout << "[Config Panel] Shutdown option clicked! Terminating application context." << std::endl;
+            if (be_app) {
+                be_app->PostMessage(B_QUIT_REQUESTED);
+            }
+            return;
+        }
+
+        // Target Action B: Simple Configuration Overlay Dismissal
+        if (closeBtnRect.Contains(point)) {
+            if (Window()) {
+                Window()->Quit(); // Dismiss configuration panel shell safely
+            }
+            return;
+        }
+    }
+};
+
+// =========================================================================
+// NATIVE CONFIGURATION MANAGEMENT BWINDOW OVERLAY
+// =========================================================================
+class HaikuConfigWindow : public BWindow {
+public:
+    HaikuConfigWindow(BRect centralAnchor)
+        : BWindow(BRect(0, 0, 420, 220), "hdesktop Configuration",
+                  B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
+        
+        // Center the layout frame inside the screen space coordinates of the active app drawer
+        float targetX = centralAnchor.left + (centralAnchor.Width() - 420.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 220.0f) / 2.0f;
+        MoveTo(targetX, targetY);
+
+        ConfigView* configView = new ConfigView(Bounds());
+        AddChild(configView);
+    }
+
+    virtual ~HaikuConfigWindow() {
+        gActiveConfigInstance = nullptr; // Reset address register safely on destruction
+    }
+};
+
 
 // =========================================================================
 // NATIVE BVIEW CARD GRID HOLDER (FULL WIDTH PROFILE)
@@ -72,16 +211,17 @@ public:
     ~DrawerView() {
         for (int32 i = 0; i < fItemsList.CountItems(); i++) {
             DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
-            delete item->icon;
-            delete item;
+            if (item) {
+                delete item->icon;
+                delete item;
+            }
         }
     }
     
-   virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
+    virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
         // Force the app cell grid canvas to instantly refresh as your cursor glides across choices
         Invalidate(); 
     }
-
 
     void ScanSystemDirectories() {
         const char* paths[] = { "/boot/system/apps", "/boot/system/preferences" };
@@ -139,22 +279,78 @@ public:
         }
     }
 
-
     virtual void Draw(BRect updateRect) {
+        // =========================================================================
+        // NEW STRUCTURAL HEADER SECTION
+        // =========================================================================
+        float canvasWidth = Bounds().Width();
+        
+        // 1. Draw Centered Title Text
+        SetFont(be_bold_font);
+        SetFontSize(16.0f);
+        SetHighColor(rgb_color{220, 225, 235, 255}); // Clean crisp white/silver
+        
+        BString titleStr("hdesktop");
+        float titleWidth = StringWidth(titleStr.String());
+        BPoint titlePos((canvasWidth - titleWidth) / 2.0f, 30.0f);
+        DrawString(titleStr.String(), titlePos);
+
+        // 2. Define Action Icon Boundary Metrics (Exit Left, Config Right)
+        BRect exitIconRect(30.0f, 45.0f, 61.0f, 76.0f);
+        BRect configIconRect(canvasWidth - 62.0f, 45.0f, canvasWidth - 31.0f, 76.0f);
+
+        // Fetch active cursor coordinates for interface tracking
+        BPoint cursorPoint;
+        uint32 transitButtons;
+        GetMouse(&cursorPoint, &transitButtons, false);
+
+        SetDrawingMode(B_OP_ALPHA);
+
+        // 3. Draw Exit Button (Left Side)
+        if (exitIconRect.Contains(cursorPoint)) {
+            SetHighColor(rgb_color{230, 75, 75, 45}); // Soft red hover glow
+            FillRect(exitIconRect.InsetBySelf(-4, -4));
+            SetHighColor(rgb_color{255, 90, 90, 255});
+        } else {
+            SetHighColor(rgb_color{200, 70, 70, 220}); // Muted red vector
+        }
+        StrokeLine(BPoint(exitIconRect.left, exitIconRect.top), BPoint(exitIconRect.right, exitIconRect.bottom));
+        StrokeLine(BPoint(exitIconRect.left, exitIconRect.bottom), BPoint(exitIconRect.right, exitIconRect.top));
+
+        // 4. Draw Config Gear Button (Right Side)
+        if (configIconRect.Contains(cursorPoint)) {
+            SetHighColor(rgb_color{100, 120, 160, 50}); // Slate hover glow
+            FillRect(configIconRect.InsetBySelf(-4, -4));
+            SetHighColor(rgb_color{150, 180, 230, 255});
+        } else {
+            SetHighColor(rgb_color{130, 140, 160, 200}); // Muted slate vector
+        }
+        StrokeRect(configIconRect);
+        StrokeEllipse(configIconRect.InsetByCopy(6, 6));
+
+
+        // 5. Draw Separator Line Accent
+        SetHighColor(rgb_color{50, 52, 60, 255}); // Sleek dark baseline border
+        StrokeLine(BPoint(20.0f, 90.0f), BPoint(canvasWidth - 20.0f, 90.0f));
+        SetHighColor(rgb_color{120, 130, 150, 20}); // Soft ambient highlight
+        StrokeLine(BPoint(20.0f, 91.0f), BPoint(canvasWidth - 20.0f, 91.0f));
+
+        // =========================================================================
+        // ADJUSTED APPLICATION GRID SECTION
+        // =========================================================================
         float itemW = 100.0f;
         float itemH = 110.0f;
         float startX = 30.0f;
-        float startY = 30.0f;
+        float startY = 115.0f; // Shifted safely down below the separator layout line
         float spacingX = 24.0f;
         float spacingY = 20.0f;
 
         int32 cols = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
         if (cols < 1) cols = 1;
 
-        // Fetch active cursor coordinates relative to our scroll canvas context area
-        BPoint cursorPoint;
-        uint32 transitButtons;
-        GetMouse(&cursorPoint, &transitButtons, false); // Real-time mouse position track
+        // Reset tracking mode back for icon card hover calculations
+        SetFont(be_plain_font);
+        SetFontSize(11.0f);
 
         // =========================================================================
         // BACKLIGHT HOVER HIGHLIGHT FILTER PASS
@@ -168,23 +364,17 @@ public:
 
             BRect itemBounds(x, y, x + itemW, y + itemH);
             
-            // If the cursor glides inside this specific application block, draw the glow card!
             if (itemBounds.Contains(cursorPoint)) {
                 SetDrawingMode(B_OP_ALPHA);
-                
-                // Draw soft translucent glowing backlight rectangle behind the shortcut target
-                // Light slate overlay with ~12% opacity matches premium interfaces beautifully
                 SetHighColor(rgb_color{100, 110, 140, 30}); 
                 FillRect(itemBounds);
-                
-                // Add crisp outline tracing borders around the hovered choice card
                 SetHighColor(rgb_color{130, 145, 180, 70});
                 StrokeRect(itemBounds);
             }
         }
 
         // =========================================================================
-        // INDIVIDUAL ICON AND STRING LABEL RENDERING PASS (YOUR ORIGINAL RENDERING CODE)
+        // INDIVIDUAL ICON AND STRING LABEL RENDERING PASS
         // =========================================================================
         for (int32 i = 0; i < fItemsList.CountItems(); i++) {
             DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
@@ -206,8 +396,7 @@ public:
             DrawString(truncatedName.String(), BPoint(x + (itemW / 2.0f) - (textW / 2.0f), y + 80.0f));
         }
 
-
-        // Dynamically update inner container tracking height ceilings so scrolling limits scale cleanly
+        // Dynamically update inner container height tracking with header offset
         int32 colsRecalc = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
         if (colsRecalc < 1) colsRecalc = 1;
         int32 totalRows = (fItemsList.CountItems() + colsRecalc - 1) / colsRecalc;
@@ -219,10 +408,43 @@ public:
     }
 
     virtual void MouseDown(BPoint point) {
+        float canvasWidth = Bounds().Width();
+        
+        // Define Action Header Click Target Boundaries
+        BRect exitIconRect(30.0f, 45.0f, 61.0f, 76.0f);
+        BRect configIconRect(canvasWidth - 62.0f, 45.0f, canvasWidth - 31.0f, 76.0f);
+
+        // 1. Process Exit Button Trigger Click
+        if (exitIconRect.Contains(point)) {
+            std::cout << "[Native Drawer] Exit Action Intercepted. Closing popup container." << std::endl;
+            if (Window()) {
+                Window()->Quit(); 
+            }
+            return;
+        }
+
+
+        // 2. Process Configuration Button Trigger Click
+        if (configIconRect.Contains(point)) {
+            std::cout << "[Native Drawer] Config Menu Click Hook Executed." << std::endl;
+            
+            if (gActiveConfigInstance == nullptr && Window()) {
+                // Instantiate the sub-panel, centering it smoothly within the app drawer's viewport bounds
+                gActiveConfigInstance = new HaikuConfigWindow(Window()->Frame());
+                gActiveConfigInstance->Show();
+            } else if (gActiveConfigInstance != nullptr) {
+                // If the panel is already open, pull it to the front instead of duplicating it
+                gActiveConfigInstance->Activate(true);
+            }
+            return;
+        }
+
+
+        // 3. Process Standard Grid Icon Coordinates
         float itemW = 100.0f;
         float itemH = 110.0f;
         float startX = 30.0f;
-        float startY = 30.0f;
+        float startY = 115.0f; // Matched with the new Draw offset to fix grid registration alignment
         float spacingX = 24.0f;
         float spacingY = 20.0f;
 
@@ -242,7 +464,6 @@ public:
                 std::cout << "[Native Drawer] Selected Item Hook: " << item->name.String() << std::endl;
                 be_roster->Launch(&item->ref);
                 
-                // FIXED CLOSE OVERRIDE: Destroys the drawer window instance instantly on launcher execution click
                 if (Window()) {
                     Window()->Quit(); 
                 }
@@ -250,6 +471,7 @@ public:
             }
         }
     }
+
 };
 
 // =========================================================================
@@ -2055,7 +2277,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.5"; 
+    const char* localVersion = "v1.0.6"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
