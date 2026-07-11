@@ -41,7 +41,7 @@
 #include <cstdlib> 
 #include <ScrollView.h>
 #include <Screen.h>
-
+#include <map>
 
 
 
@@ -287,12 +287,10 @@ public:
     }
     
     virtual ~HaikuAppDrawerWindow() {
-        std::cout << "[Native Window] Destructor executing. Resetting state handle..." << std::endl;
         gActiveDrawerInstance = nullptr;
     }
 };
 
-//-----------------------------------------------------      
 
 // =========================================================================
 // MODERN OPENGL FRAMEBUFFER EXTENSION PROTOTYPES FOR HAIKU OS
@@ -346,10 +344,10 @@ struct BrowserFileItem {
 struct TaskbarItem {
     std::string title;       
     HaikuTexture icon;       
-    bool isMinimized;        // We will update this dynamically using the real app state!
+    bool isMinimized;       
     bool* openStateFlag;     
     bool* minimizeStateFlag; 
-    team_id teamId;          // ADDED: Track the real native Haiku Process Team ID
+    team_id teamId;       
 };
 
 
@@ -536,58 +534,36 @@ BString GetActiveHaikuWallpaperPath() {
 class HaikuGlDesktopEngine {
 public:
     HaikuGlDesktopEngine(int width, int height) : fWidth(width), fHeight(height) {
-    	fFBOSizeW = width;
-        fFBOSizeH = height;
-        fBgColorR = 0.20f; fBgColorG = 0.42f; fBgColorB = 0.58f; 
-        
-        fWindowPos = { 300.0f, 200.0f }; // Places the window cleanly on screen!
-        fIsDragging = false;
-        fDragOffsetX = 0.0f;
-        fDragOffsetY = 0.0f;
 
-        // Define initial window dimensions
-        fWindowWidth = 450.0f;
-        fWindowHeight = 300.0f;
-        fTabWidth = 140.0f;  // Shorter yellow tab width to mimic "ScreenSaver" proportions
-        fTabHeight = 21.0f;  // Sleeker vertical height matching the native decorator
-
+        fBgColorR = 0.20f; fBgColorG = 0.42f; fBgColorB = 0.58f;         
         fMouseX = 0;
         fMouseY = 0;
         
-        fTrashTooltipTexId = 0; // FIXED name parameter match
+        fTrashTooltipTexId = 0; 
 		fTrashTextGenerated = false;
 		fTrashTooltipW = 0;
 		fTrashTooltipH = 0;
 
         fHaikuMenuIcon = LoadIconFromNode("/boot/system/apps/AboutSystem", 128);
         fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
-        //fWallpaperTexture = LoadWallpaperViaTranslationKit("/boot/system/data/hdesktop/background/background.png");
         
         BString capturedWallpaper = GetActiveHaikuWallpaperPath();
         fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
-		
-		status_t result = ForceActiveWallpaperMode(3);
+
         // =========================================================================
-        // INITIALIZE SYSTEM MONITOR AND WINDOW STATE UTILITIES
+        // INITIALIZE SYSTEM MONITOR 
         // =========================================================================
-        fWindowIsOpen = true;
-        fWindowIsMinimized = false;
+
         fLastCpuPulseTime = SDL_GetTicks();
-
-        fNavigatorIcon = LoadIconFromNode("/boot/system/preferences/Tracker", 128);
-        //fNavigatorText = RenderTextToTexture("Navigator", &fNavigatorTextW, &fNavigatorTextH);
-
         for (int i = 0; i < 40; ++i) {
             fCpuHistory[i] = 0.0f;
         }
-
         system_info info;
         if (get_system_info(&info) == B_OK) {
             fPrevTotalTicks = 0;
             fPrevActiveTicks = 0;
             cpu_info* cpuInfos = new cpu_info[info.cpu_count];
             if (get_cpu_info(0, info.cpu_count, cpuInfos) == B_OK) {
-                // FIX: Changed 'i' to 'c' to match the loop control variable
                 for (uint32_t c = 0; c < info.cpu_count; ++c) {
                     fPrevActiveTicks += cpuInfos[c].active_time;
                 }
@@ -595,81 +571,7 @@ public:
             delete[] cpuInfos;
         }
 
-		  /*      
-        // =========================================================================
-        // READ THE LIVE HAIKU DESKTOP DIRECTORY ENTRIES FOR THE DOCK
-        // =========================================================================
-        BDirectory desktopDir("/boot/home/Desktop");
-        if (desktopDir.InitCheck() == B_OK) {
-            BEntry entry;
-            int iconDimension = 128; // Base icon size
 
-            while (desktopDir.GetNextEntry(&entry) == B_OK) {
-                DesktopIconItem item;                
-                char nameBuf[B_FILE_NAME_LENGTH];
-                entry.GetName(nameBuf);
-                item.name = nameBuf;
-                item.isFolder = entry.IsDirectory();
-                BPath path;
-                entry.GetPath(&path);                
-                item.texture = LoadIconFromNode(path.Path(), iconDimension);                
-                int textW = 0, textH = 0;
-                item.textTexture = RenderTextToTexture(item.name.c_str(), &textW, &textH);
-                item.bounds = { 0.0f, 0.0f, 0.0f, 0.0f };
-                item.textBounds = { 0.0f, 0.0f, 0.0f, 0.0f };                
-                fDesktopItems.push_back(item);
-            }
-        }
-        */
-        // =========================================================================
-        // INITIALIZE LIVE FILESYSTEM TRACKER BROWSER WINDOW
-        // =========================================================================
-        RefreshWindowDirectory("/boot/home");
-
-        
-        // =========================================================================
-        // INITIALIZE CUSTOM START MENU TYPOGRAPHY LABELS
-        // =========================================================================
-        fMenuTextApps     = RenderTextToTexture("Applications", &fMenuTextAppsW, &fMenuTextAppsH);
-        fMenuTextPrefs    = RenderTextToTexture("Preferences",  &fMenuTextPrefsW,  &fMenuTextPrefsH);
-        fMenuTextShutdown = RenderTextToTexture("Exit",   &fMenuTextShutdownW, &fMenuTextShutdownH);
-
-
-        // =========================================================================
-        // INITIALIZE ACTIVE WINDOW NODES INTO THE TASKBAR VECTOR ARRAY
-        // =========================================================================
-        TaskbarItem navTask;
-        navTask.title = "Navigator";
-        navTask.icon = fNavigatorIcon; // Borrow the sharp Tracker dog asset texture
-        navTask.openStateFlag = &fWindowIsOpen;
-        navTask.minimizeStateFlag = &fWindowIsMinimized;
-        
-        fTaskbarWindows.push_back(navTask);
-
-
-        // =========================================================================
-        // INITIALIZE OFFSCREEN CANVAS FRAMEBUFFER (FBO)
-        // =========================================================================
-        // This generates distinct hardware IDs so your FBO can't overwrite texture 0!
-        glGenFramebuffers(1, &fWindowFBO);
-        glBindFramebuffer(GL_FRAMEBUFFER, fWindowFBO);
-
-        glGenTextures(1, &fWindowRenderTexture);
-        glBindTexture(GL_TEXTURE_2D, fWindowRenderTexture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, fFBOSizeW, fFBOSizeH, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
-        
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fWindowRenderTexture, 0);
-
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            std::cerr << "[GL FBO ERROR] Offscreen preview surface initialization failed!" << std::endl;
-        }
-
-        // Drop the binding back to standard monitor space immediately
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glBindTexture(GL_TEXTURE_2D, 0);
     } // End of complete class constructor
 
 
@@ -721,9 +623,10 @@ public:
 	        team_id id = (team_id)(addr_t)teamList.ItemAt(i);
 	        
 	        app_info info;
+	        // Hide background apps and/or other apps we don't want to see.
 	        if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
 	            if ((info.flags & B_BACKGROUND_APP) != 0) continue;
-	            if (strcmp(info.signature, "application/x-vnd.YourCloneSignature") == 0) continue;
+	            if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
 	
 	            std::string appSignature(info.signature);
 	            bool isDuplicate = false;
@@ -741,7 +644,7 @@ public:
 	            entry.GetName(nameBuf);
 	            std::string appTitle(nameBuf);
 	
-	            if (appTitle == "Deskbar" || appTitle == "app_server" || appTitle == "input_server") {
+	            if (appTitle == "Deskbar") {
 	                continue;
 	            }
 	
@@ -796,33 +699,7 @@ public:
 	    // Sync global mouse variables to match click coordinates
 	    fMouseX = x; 
 	    fMouseY = y;
-	
-	    // =========================================================================
-	    // MAIN MENU DRAWER ROW ELEMENT CLICK ROUTER
-	    // =========================================================================
-	    if (fShowMainMenu && fMainMenuBounds.Contains(x, y)) {
-	        float stepY = 30.0f;
-	        float exitRowTop = fMainMenuBounds.top + (stepY * 2.0f);
-	        float exitRowBottom = exitRowTop + stepY;
-	
-	        if (static_cast<float>(y) >= exitRowTop && static_cast<float>(y) <= exitRowBottom) {
-	            std::cout << "[Main Menu] Intercepted Exit Option Click. Posting SDL_QUIT Event..." << std::endl;
-	            
-	            SDL_Event quitEvent;
-	            quitEvent.type = SDL_QUIT;
-	            SDL_PushEvent(&quitEvent);
-	            
-	            BWindow* nativeWin = be_app->WindowAt(0);
-	            if (nativeWin != nullptr && nativeWin->Lock()) {
-	                nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-	                nativeWin->ResizeBy(0, -220.0f);
-	                nativeWin->MoveBy(0, 220.0f);
-	                nativeWin->Unlock();
-	            }
-	            fShowMainMenu = false;
-	            return;
-	        }
-	    }
+
 	
 	    // =========================================================================
 	    // DOCK GEOMETRY & LAYER PRE-CALCULATIONS (EXACT MATCH FOR RENDERFRAME)
@@ -908,10 +785,7 @@ public:
 	    dockPlate.bottom = fHeight - dockMarginBottom;
 	    dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
 	
-	    bool clickIsInsideOpenMenu = false;
-	    if (fShowMainMenu && fMainMenuBounds.Contains(x, y)) {
-	        clickIsInsideOpenMenu = true;
-	    }
+
 	
 	    // =========================================================================
 	    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
@@ -928,39 +802,18 @@ public:
 	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
 	            
             if (i == 0) {
-                if (gActiveDrawerInstance != nullptr) {
-                    std::cout << "[Dock Leaf] Second Leaf Click Intercepted. Closing Active Dashboard..." << std::endl;
-                    
+                if (gActiveDrawerInstance != nullptr) {                    
                     if (gActiveDrawerInstance->Lock()) {
-                        gActiveDrawerInstance->Quit(); // Destroys window and automatically fires the destructor!
+                        gActiveDrawerInstance->Quit(); 
                     }
                 } 
-                else {
-                    std::cout << "[Dock Leaf] First Leaf Click Intercepted. Invoking Native Dashboard..." << std::endl;
-                    
+                else {                   
                     gActiveDrawerInstance = new HaikuAppDrawerWindow(fHeight);
                     gActiveDrawerInstance->Show();
                 }
                 
                 fShowMainMenu = false; 
-            } else {
-
-                // --- FIXED INTERCEPT CHANNELS ---
-                // App shortcuts launchers code blocks remain untouched and clean...
-
-                fShowMainMenu = false;
-                size_t itemIdx = i - 1;
-                
-                BEntry entry;
-                BDirectory desktopDir("/boot/home/Desktop");
-                if (desktopDir.InitCheck() == B_OK && desktopDir.FindEntry(fDesktopItems[itemIdx].name.c_str(), &entry) == B_OK) {
-                    entry_ref ref;
-                    if (entry.GetRef(&ref) == B_OK) {
-                        std::cout << "[Dock Launch] Launching system file shortcut: " << fDesktopItems[itemIdx].name << std::endl;
-                        be_roster->Launch(&ref);
-                    }
-                }
-            }
+            } 
             return;
         }
 
@@ -1103,20 +956,14 @@ public:
 	        }
 	        fShowMainMenu = false;
 	
-	        // --- CASE 1: LEFT CLICK (STANDARD OPEN ACTION) ---
 	        if (button == SDL_BUTTON_LEFT) {
-	            std::cout << "[Dock Tray] Trash Left-Click: Launching Tracker Window..." << std::endl;
 	            std::system("/boot/system/Tracker /boot/trash &");
 	            return;
 	        }
 	        
-	        // --- CASE 2: RIGHT CLICK (NATIVE EMPTY TRASH) ---
 	        else if (button == SDL_BUTTON_RIGHT) {
-	            std::cout << "[Dock Tray] Trash Right-Click: Invoking Native Trash Emptying Service..." << std::endl;
-	            
-	            // Clean, official Haiku mechanism to purge deleted items safely.
 	            std::system("trash --empty &"); 
-	            fLastTrashCheckTime = 0; // Force immediate asset refresh on next update pass!
+	            fLastTrashCheckTime = 0; 
 	            return;
 	        }
 	    }
@@ -1126,62 +973,12 @@ public:
 
                 	
 
-    void HandleMouseInput(int x, int y, Uint32 buttonState) {
+    void HandleMouseInput(int x, int y, Uint32 buttonState) {    	
         fMouseX = x; fMouseY = y;
-
-        float titleBarHeight = 16.0f;
-        float currentTabHeight = 22.0f;
-
-        HaikuRect activeTab = { fWindowPos.x + 4.0f, fWindowPos.y - titleBarHeight - currentTabHeight, fWindowPos.x + 4.0f + fTabWidth, fWindowPos.y - titleBarHeight };
-        HaikuRect leftDrop = { fWindowPos.x - 4.0f, activeTab.top, fWindowPos.x, fWindowPos.y + 4.0f };
-
-        bool leftButtonDown = (buttonState & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-
-        if (leftButtonDown) {
-            // =========================================================================
-            // ACTIVE RESIZE GRAB TRACKING LOOP
-            // =========================================================================
-            if (fIsResizing) {
-                float deltaX = x - fResizeStartX;
-                float deltaY = y - fResizeStartY;
-                
-                fWindowWidth  = fResizeStartWidth + deltaX;
-                fWindowHeight = fResizeStartHeight + deltaY;
-                
-                // Enforce safety floor layout dimension constraints
-                if (fWindowWidth < 250.0f)  fWindowWidth = 250.0f;
-                if (fWindowHeight < 180.0f) fWindowHeight = 180.0f;
-                
-                // Keep the max scroll track offset calculated dynamically
-                float totalListHeight = fBrowserItems.size() * 30.0f;
-                float canvasHeight = fWindowHeight - 4.0f - 20.0f;
-                fMaxScrollOffset = totalListHeight - canvasHeight;
-                if (fMaxScrollOffset < 0.0f) fMaxScrollOffset = 0.0f;
-            }
-            // STANDARD WINDOW DRAGGING LOOP
-            else if (fIsDragging) {
-                fWindowPos.x = x - fDragOffsetX;
-                fWindowPos.y = y - fDragOffsetY;
-            }
-            else {
-                // If clicked but not dragging or resizing yet, check entry vectors
-                if (activeTab.Contains(x, y) || leftDrop.Contains(x, y)) {
-                    fIsDragging = true;
-                    fDragOffsetX = x - fWindowPos.x;
-                    fDragOffsetY = y - fWindowPos.y;
-                }
-            }
-        } else {
-            fIsDragging = false;
-            fIsResizing = false; // Release resize state safely when mouse is let go
-        }
-
-        // Workspace dismiss click checking for the start menu...
-        if (leftButtonDown && !fIsDragging && !fIsResizing) {
-            if (fShowMainMenu && !fMainMenuBounds.Contains(x, y)) {
-                if (y < fHeight - 140.0f) fShowMainMenu = false;
-            }
-        }
+        fIsResizing = false;
+       if (fShowMainMenu && !fMainMenuBounds.Contains(x, y)) {
+           if (y < fHeight - 140.0f) fShowMainMenu = false;
+       }        
     }
 
 
@@ -1304,8 +1101,6 @@ public:
         // to find the precise real-time width required for the clock, trash, and CPU graph.
         float baseTrashSize = 48.0f; // Synchronized full scale match!
         float trashScale = 1.0f;
-
-        // CRITICAL FIX: Base the horizontal calculation on your actual rendering start offset
         float currentPredictX = 20.0f; 
         
         // 1. Accumulate dynamic width of left shortcuts zone
@@ -1383,9 +1178,7 @@ public:
         // =========================================================================
 
         glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        
-       // float cornerRadius = 15.0f;
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);        
         DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, 0.4f); 
         DrawOutlineRoundedRect(dockPlate, cornerRadius, 0.15f, 0.15f, 0.15f, 0.8f);
         
@@ -1458,28 +1251,97 @@ public:
 		
 		// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-		    auto& activeTaskWin = fTaskbarWindows[w];
-		    
-		    // SAFE HYBRID FIX FOR TRACKER:
-		    // Never skip rendering Tracker even if a generic state or global count claims it is closed.
-		    // This keeps the Tracker icon anchored and prevents the cascade that terminates the desktop team.
-		    if (activeTaskWin.title == "Tracker") {
-		        // Enforce Tracker to always stay alive on the dock visual plane
-		        *activeTaskWin.openStateFlag = true; 
-		    } else {
-		        // Standard check for TV, IceWeasel, and all other general applications
-		        if (*activeTaskWin.openStateFlag == false) continue; 
-		    }
-		
+		    auto& activeTaskWin = fTaskbarWindows[w];		
 		    float size = dynamicWidths[renderingSlotIdx];
-		    // float scale = dynamicScales[renderingSlotIdx];
 		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+		
+		
+            if (activeTaskWin.title == "Trackerx") {
+                // TRACKER EXCLUSIVITY: Preserve your original working strategy.
+                // Do not override 'isMinimized' using global counts or cached threads.
+                // Let your verified click-handling states manage Tracker's visibility.
+            } 
+            else {
+				
+                 // GENERAL APPLICATIONS: Keep the fast thread execution checks 
+                bool generalAppIsVisible = false;
+                thread_info info;
+                int32 cookie = 0;
+                while (get_next_thread_info(activeTaskWin.teamId, &cookie, &info) == B_OK) {
+                    BString threadName(info.name);
+                    
+                    if (info.state == B_THREAD_RUNNING || info.state == B_THREAD_READY) {
+                        if (threadName.IFindFirst("window") >= 0 || 
+                            threadName.IFindFirst("loop") >= 0 || 
+                            threadName.IFindFirst("render") >= 0 || 
+                            threadName.Compare(activeTaskWin.title.c_str()) == 0) {
+                            generalAppIsVisible = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Check system-wide foreground focus
+                app_info activeAppInfo;
+                bool isCurrentlyForeground = false;
+                if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+                    if (activeAppInfo.team == activeTaskWin.teamId) {
+                        isCurrentlyForeground = true;
+                    }
+                }
+
+                // --- BALANCED ASYMMETRICAL LATCH SAFETY GUARD ---
+                static std::map<team_id, int32> invisibleStreak;
+                static std::map<team_id, int32> visibleStreak;
+                
+                // ASYMMETRICAL BALANCING:
+                const int32 THRESHOLD_MINIMIZE = 1; 
+                const int32 THRESHOLD_MAXIMIZE = 33; 
+
+                bool nextState = activeTaskWin.isMinimized;
+
+                if (isCurrentlyForeground) {
+                    invisibleStreak[activeTaskWin.teamId] = 0;
+                    visibleStreak[activeTaskWin.teamId] = 0;
+                    nextState = false;
+                } else {
+                    if (!generalAppIsVisible) {
+                        invisibleStreak[activeTaskWin.teamId]++;
+                        visibleStreak[activeTaskWin.teamId] = 0;
+                        
+                        bool quickBackgroundCheck = false;
+                        if (activeAppInfo.team == activeTaskWin.teamId) {
+                            quickBackgroundCheck = (activeAppInfo.flags & B_BACKGROUND_APP);
+                        }
+
+                        if (quickBackgroundCheck || invisibleStreak[activeTaskWin.teamId] >= THRESHOLD_MINIMIZE) {
+                            nextState = true;
+                        }
+                    } else {
+                        visibleStreak[activeTaskWin.teamId]++;
+                        invisibleStreak[activeTaskWin.teamId] = 0;
+                        
+                        // Icon will only un-dim if the app threads stay awake continuously 
+                        // for 20 frames, filtering out temporary spikes completely.
+                        if (visibleStreak[activeTaskWin.teamId] >= THRESHOLD_MAXIMIZE) {
+                            nextState = false;
+                        }
+                    }
+                }
+
+                // Smoothly toggle the state for non-Tracker applications
+                activeTaskWin.isMinimized = nextState;
+
+          
+            }
+                
+                
+                
 		
 		    // A. Draw active task window application vector icon thumbnail
 		    if (activeTaskWin.icon.id != 0) {
 		        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
 		        
-		        // Use your stable local flag logic from Code 1 to eliminate flickering
 		        if (activeTaskWin.isMinimized == true) {
 		            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
 		        } else {
@@ -1511,7 +1373,7 @@ public:
 		    renderingSlotIdx++;
 		}
 		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
-
+		
 
 
 
@@ -1544,7 +1406,7 @@ public:
             currentX += fClockWidth;
         }
         
-            // =========================================================================
+        // =========================================================================
         // 6C. DRAW HAIKU TRASH BIN (RIGHT OF THE CLOCK)
         // =========================================================================
         // THROTTLED FILE SYSTEM SCANNER: Automatically re-query live node twice per second
@@ -1767,297 +1629,7 @@ public:
                 glDisable(GL_TEXTURE_2D);
             }
         }
-        glDisable(GL_BLEND);
-        
-        return;
-        
-        // =========================================================================
-        // 11. DRAW CUSTOM INTERNAL SEMI-TRANSPARENT MAIN MENU OVERLAY WITH TEXT
-        // =========================================================================
-        if (fShowMainMenu) {
-            // =========================================================================
-            // REVERT VIEWPORT MATCH: Keep your original stable canvas scaling intact!
-            // =========================================================================
-            glViewport(0, 0, fWidth, fHeight); 
-
-            // Enable blending for transparent overlay drawing layers
-            glEnable(GL_BLEND); 
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-            // Draw your semi-translucent light grey menu panel box backing
-            glColor4f(0.847f, 0.847f, 0.847f, 0.85f); 
-            glBegin(GL_QUADS);
-                glVertex2f(fMainMenuBounds.left,  fMainMenuBounds.top);   glVertex2f(fMainMenuBounds.right, fMainMenuBounds.top);
-                glVertex2f(fMainMenuBounds.right, fMainMenuBounds.bottom); glVertex2f(fMainMenuBounds.left,  fMainMenuBounds.bottom);
-            glEnd();
-
-            // Draw crisp dark framing perimeter border outline line around the card
-            glColor4f(0.196f, 0.196f, 0.196f, 0.9f); glLineWidth(1.0f);
-            glBegin(GL_LINE_LOOP);
-                glVertex2f(fMainMenuBounds.left,  fMainMenuBounds.top);   glVertex2f(fMainMenuBounds.right, fMainMenuBounds.top);
-                glVertex2f(fMainMenuBounds.right, fMainMenuBounds.bottom); glVertex2f(fMainMenuBounds.left,  fMainMenuBounds.bottom);
-            glEnd();
-
-            // Draw soft upper illumination border stripe line highlight segment
-            glColor4f(1.0f, 1.0f, 1.0f, 0.6f);
-            glBegin(GL_LINE_STRIP);
-                glVertex2f(fMainMenuBounds.left + 1.0f,  fMainMenuBounds.bottom - 1.0f);
-                glVertex2f(fMainMenuBounds.left + 1.0f,  fMainMenuBounds.top + 1.0f);
-                glVertex2f(fMainMenuBounds.right - 1.0f, fMainMenuBounds.top + 1.0f);
-            glEnd();
-
-            // Draw individual matte gray separator shelf divider lines
-            glColor4f(0.6f, 0.6f, 0.6f, 0.4f); float stepY = 30.0f;
-            glBegin(GL_LINES);
-                for (float y = fMainMenuBounds.top + stepY; y < fMainMenuBounds.bottom; y += stepY) {
-                    glVertex2f(fMainMenuBounds.left + 4.0f,  y); glVertex2f(fMainMenuBounds.right - 4.0f, y);
-                }
-            glEnd();
-
-            glEnable(GL_TEXTURE_2D);
-            glColor4f(0.0f, 0.0f, 0.0f, 1.0f); // Crisp high-contrast black font ink filter
-            float textIndentX = fMainMenuBounds.left + 12.0f;
-
-            // Map and bind Row 1 Text: Apps Option
-            if (fMenuTextApps.id != 0) {
-                float y1 = fMainMenuBounds.top + (stepY / 2.0f) - (fMenuTextAppsH / 2.0f);
-                glBindTexture(GL_TEXTURE_2D, fMenuTextApps.id);
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textIndentX, y1);
-                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textIndentX + fMenuTextAppsW, y1);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textIndentX + fMenuTextAppsW, y1 + fMenuTextAppsH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textIndentX, y1 + fMenuTextAppsH);
-                glEnd();
-            }
-            // Map and bind Row 2 Text: Preferences Option
-            if (fMenuTextPrefs.id != 0) {
-                float y2 = fMainMenuBounds.top + stepY + (stepY / 2.0f) - (fMenuTextPrefsH / 2.0f);
-                glBindTexture(GL_TEXTURE_2D, fMenuTextPrefs.id);
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textIndentX, y2);
-                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textIndentX + fMenuTextPrefsW, y2);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textIndentX + fMenuTextPrefsW, y2 + fMenuTextPrefsH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textIndentX, y2 + fMenuTextPrefsH);
-                glEnd();
-            }
-            // Map and bind Row 3 Text: Shutdown/Exit Option
-            if (fMenuTextShutdown.id != 0) {
-                float y3 = fMainMenuBounds.top + (stepY * 2.0f) + (stepY / 2.0f) - (fMenuTextShutdownH / 2.0f);
-                glBindTexture(GL_TEXTURE_2D, fMenuTextShutdown.id);
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textIndentX, y3);
-                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textIndentX + fMenuTextShutdownW, y3);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textIndentX + fMenuTextShutdownW, y3 + fMenuTextShutdownH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textIndentX, y3 + fMenuTextShutdownH);
-                glEnd();
-            }
-            glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D); glDisable(GL_BLEND);
-        }
-        else {
-            // Re-enforce clean baseline layout matching dimensions when menu collapses
-            glViewport(0, 0, fWidth, fHeight);
-        }
-
-        
-        
-
-		
-        // =========================================================================
-        // 7. DRAGGABLE & RESIZABLE WINDOW PASSTHROUGH (WITH EXTENDED CONTROLS)
-        // =========================================================================
-        if (fWindowIsOpen && !fWindowIsMinimized) {
-            HaikuRect winWin = { fWindowPos.x, fWindowPos.y, fWindowPos.x + fWindowWidth, fWindowPos.y + fWindowHeight };
-            
-            float titleBarHeight = 16.0f;
-            float currentTabWidth = 140.0f;
-            float currentTabHeight = 22.0f;
-            HaikuRect topExtenderBar = { winWin.left, winWin.top - titleBarHeight, winWin.right, winWin.top };
-            HaikuRect winTab = { winWin.left + 4.0f, topExtenderBar.top - currentTabHeight, winWin.left + 4.0f + currentTabWidth, topExtenderBar.top };
-            HaikuRect leftDropOverlap = { winWin.left - 4.0f, winTab.top, winWin.left, topExtenderBar.top + 4.0f };
-            
-            float statusBarHeight = 20.0f;
-            float scrollbarWidth = 14.0f; 
-            
-            HaikuRect panelCanvas = { winWin.left + 4.0f, winWin.top + 4.0f, winWin.right - 4.0f - scrollbarWidth, winWin.bottom - 4.0f - statusBarHeight };
-            HaikuRect statusTrayBox = { winWin.left + 4.0f, panelCanvas.bottom + 2.0f, winWin.right - 4.0f, winWin.bottom - 4.0f };
-
-            // Draw Window Background Panels Fills
-            DrawFilledRect(topExtenderBar, 0.443f, 0.474f, 0.643f); 
-            DrawFilledRect(winWin, 0.847f, 0.847f, 0.847f);         
-            DrawFilledRect(winTab, 1.0f, 0.796f, 0.0f);             
-            DrawFilledRect(leftDropOverlap, 1.0f, 0.796f, 0.0f);    
-            DrawFilledRect(panelCanvas, 0.95f, 0.95f, 0.95f);       
-            DrawFilledRect(statusTrayBox, 0.847f, 0.847f, 0.847f);  
-
-            // Purple Beveled Scrollbar Track
-            HaikuRect scrollTrack = { panelCanvas.right + 2.0f, panelCanvas.top, winWin.right - 4.0f, panelCanvas.bottom };
-            DrawFilledRect(scrollTrack, 0.90f, 0.90f, 0.92f);
-            
-            float totalListHeight = fBrowserItems.size() * 30.0f;
-            float viewportHeight = panelCanvas.bottom - panelCanvas.top;
-            float thumbHeight = viewportHeight;
-            if (totalListHeight > 0.0f) thumbHeight = (viewportHeight / totalListHeight) * viewportHeight;
-            if (thumbHeight < 20.0f) thumbHeight = 20.0f;
-            if (thumbHeight > viewportHeight) thumbHeight = viewportHeight;
-
-            float thumbTopOffset = 0.0f;
-            if (fMaxScrollOffset > 0.0f) thumbTopOffset = (fScrollOffset / fMaxScrollOffset) * (viewportHeight - thumbHeight);
-
-            HaikuRect purpleScrollThumb = { scrollTrack.left, scrollTrack.top + thumbTopOffset, scrollTrack.right, scrollTrack.top + thumbTopOffset + thumbHeight };
-            DrawFilledRect(purpleScrollThumb, 0.52f, 0.44f, 0.74f); 
-            HaikuRect thumbBevelInner = { purpleScrollThumb.left + 1.0f, purpleScrollThumb.top + 1.0f, purpleScrollThumb.right - 1.0f, purpleScrollThumb.bottom - 1.0f };
-            DrawFilledRect(thumbBevelInner, 0.64f, 0.56f, 0.85f); 
-
-            glColor3f(0.196f, 0.196f, 0.196f); glLineWidth(1.0f);
-            glBegin(GL_LINE_LOOP);
-                glVertex2f(purpleScrollThumb.left, purpleScrollThumb.top); glVertex2f(purpleScrollThumb.right, purpleScrollThumb.top);
-                glVertex2f(purpleScrollThumb.right, purpleScrollThumb.bottom); glVertex2f(purpleScrollThumb.left, purpleScrollThumb.bottom);
-            glEnd();
-
-            // =========================================================================
-            // ADDED: DRAW CUSTOM PURPLE BEVELED CORNER GRAB-HANDLE WINDOW RESIZER
-            // =========================================================================
-            float handleSize = 14.0f;
-            HaikuRect resizeGrip = { winWin.right - handleSize, winWin.bottom - handleSize, winWin.right, winWin.bottom };
-            
-            // Draw beautiful Purple-Lavender accent triangle
-            glBegin(GL_TRIANGLES);
-                glColor4f(0.64f, 0.56f, 0.85f, 1.0f); glVertex2f(resizeGrip.right, resizeGrip.top);
-                glColor4f(0.52f, 0.44f, 0.74f, 1.0f); glVertex2f(resizeGrip.left,  resizeGrip.bottom);
-                glColor4f(0.38f, 0.30f, 0.60f, 1.0f); glVertex2f(resizeGrip.right, resizeGrip.bottom);
-            glEnd();
-
-            // Fine diagonal details lines running through handle core
-            glColor3f(0.196f, 0.196f, 0.196f);
-            glBegin(GL_LINES);
-                glVertex2f(resizeGrip.right - 4.0f, resizeGrip.top + 4.0f); glVertex2f(resizeGrip.left + 4.0f, resizeGrip.bottom - 4.0f);
-                glVertex2f(resizeGrip.right - 8.0f, resizeGrip.top + 8.0f); glVertex2f(resizeGrip.left + 8.0f, resizeGrip.bottom - 8.0f);
-            glEnd();
-
-            // Directory file entries list rendering logic
-            glEnable(GL_BLEND); glEnable(GL_TEXTURE_2D);
-            if (fPathTextTexture.id != 0) {
-                glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-                float px = topExtenderBar.left + 8.0f; float py = topExtenderBar.top + (titleBarHeight / 2.0f) - (fPathTextH / 2.0f);
-                glBindTexture(GL_TEXTURE_2D, fPathTextTexture.id);
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(px, py); glTexCoord2f(1.0f, 0.0f); glVertex2f(px + fPathTextW, py);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(px + fPathTextW, py + fPathTextH); glTexCoord2f(0.0f, 1.0f); glVertex2f(px, py + fPathTextH);
-                glEnd();
-            }
-            if (fStatusTextTexture.id != 0) {
-                glColor4f(0.0f, 0.0f, 0.0f, 1.0f);
-                float sx = statusTrayBox.left + 6.0f; float sy = statusTrayBox.top + (statusBarHeight / 2.0f) - (fStatusTextH / 2.0f);
-                glBindTexture(GL_TEXTURE_2D, fStatusTextTexture.id);
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(sx, sy); glTexCoord2f(1.0f, 0.0f); glVertex2f(sx + fStatusTextW, sy);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(sx + fStatusTextW, sy + fStatusTextH); glTexCoord2f(0.0f, 1.0f); glVertex2f(sx, sy + fStatusTextH);
-                glEnd();
-            }
-            glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-
-            glEnable(GL_SCISSOR_TEST);
-            glScissor((int)panelCanvas.left, (int)(fHeight - panelCanvas.bottom), (int)panelCanvas.Width(), (int)(panelCanvas.bottom - panelCanvas.top));
-            float rowY = panelCanvas.top + 6.0f - fScrollOffset;
-            float rowHeight = 30.0f;
-
-            for (size_t i = 0; i < fBrowserItems.size(); ++i) {
-                auto& item = fBrowserItems[i];
-                item.clickBounds = { panelCanvas.left + 2.0f, rowY, panelCanvas.right - 2.0f, rowY + rowHeight };
-
-                if (rowY + rowHeight >= panelCanvas.top && rowY <= panelCanvas.bottom) {
-                    if (item.clickBounds.Contains(fMouseX, fMouseY)) {
-                        DrawFilledRect(item.clickBounds, 0.85f, 0.90f, 1.0f, 0.5f);
-                    }
-                    if (item.icon.id != 0) {
-                        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, item.icon.id); glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-                        glBegin(GL_QUADS);
-                            glTexCoord2f(0.0f, 0.0f); glVertex2f(panelCanvas.left + 12.0f, rowY + 3.0f);
-                            glTexCoord2f(1.0f, 0.0f); glVertex2f(panelCanvas.left + 12.0f + 24.0f, rowY + 3.0f);
-                            glTexCoord2f(1.0f, 1.0f); glVertex2f(panelCanvas.left + 12.0f + 24.0f, rowY + 3.0f + 24.0f);
-                            glTexCoord2f(0.0f, 1.0f); glVertex2f(panelCanvas.left + 12.0f, rowY + 3.0f + 24.0f);
-                        glEnd();
-                        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-                    }
-                    if (item.textTex.id != 0) {
-                        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, item.textTex.id); glColor4f(0.0f, 0.0f, 0.0f, 1.0f);
-                        float textYPos = rowY + (rowHeight / 2.0f) - (item.textH / 2.0f);
-                        glBegin(GL_QUADS);
-                            glTexCoord2f(0.0f, 0.0f); glVertex2f(panelCanvas.left + 44.0f, textYPos);
-                            glTexCoord2f(1.0f, 0.0f); glVertex2f(panelCanvas.left + 44.0f + item.textW, textYPos);
-                            glTexCoord2f(1.0f, 1.0f); glVertex2f(panelCanvas.left + 44.0f + item.textW, textYPos + item.textH);
-                            glTexCoord2f(0.0f, 1.0f); glVertex2f(panelCanvas.left + 44.0f, textYPos + item.textH);
-                        glEnd();
-                        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-                    }
-                }
-                rowY += rowHeight;
-            }
-            glDisable(GL_SCISSOR_TEST);
-
-            // =========================================================================
-            // 8. HEADER CONTROLS (WITH NEW INTERMEDIATE MAXIMIZE BOX PLACEMENT)
-            // =========================================================================
-            float btnW = 14.0f; float btnH = 12.0f;
-            float barCenterY = topExtenderBar.top + (topExtenderBar.bottom - topExtenderBar.top) / 2.0f;
-
-            HaikuRect closeBoxBtn = { winWin.right - 6.0f - btnW, barCenterY - (btnH / 2.0f), winWin.right - 6.0f, barCenterY + (btnH / 2.0f) };
-            DrawFilledRect(closeBoxBtn, 0.847f, 0.847f, 0.847f);
-
-            // Maximize Toggle button position sitting between close and minimize controls
-            HaikuRect maxToggleBtn = { closeBoxBtn.left - 4.0f - btnW, closeBoxBtn.top, closeBoxBtn.left - 4.0f, closeBoxBtn.bottom };
-            DrawFilledRect(maxToggleBtn, 0.847f, 0.847f, 0.847f);
-
-            HaikuRect zoomToggleBtn = { maxToggleBtn.left - 4.0f - btnW, maxToggleBtn.top, maxToggleBtn.left - 4.0f, maxToggleBtn.bottom };
-            DrawFilledRect(zoomToggleBtn, 0.847f, 0.847f, 0.847f);
-
-            // Charcoal Structural Trims
-            glColor3f(0.196f, 0.196f, 0.196f); glLineWidth(1.0f);
-            glBegin(GL_LINE_STRIP);
-                glVertex2f(leftDropOverlap.left, leftDropOverlap.bottom); glVertex2f(leftDropOverlap.left, winTab.top); 
-                glVertex2f(winTab.right, winTab.top); glVertex2f(winTab.right, topExtenderBar.top);
-                glVertex2f(topExtenderBar.right, topExtenderBar.top); glVertex2f(winWin.right, winWin.bottom);
-                glVertex2f(winWin.left, winWin.bottom); glVertex2f(winWin.left, leftDropOverlap.bottom);
-            glEnd();
-
-            glBegin(GL_LINES);
-                glVertex2f(winWin.left, topExtenderBar.top); glVertex2f(winTab.right, topExtenderBar.top);
-                glVertex2f(statusTrayBox.left, statusTrayBox.top); glVertex2f(statusTrayBox.right, statusTrayBox.top);
-                glVertex2f(scrollTrack.left, scrollTrack.top); glVertex2f(scrollTrack.left, scrollTrack.bottom);
-                glVertex2f(resizeGrip.left, resizeGrip.top); glVertex2f(resizeGrip.right, resizeGrip.top); // Separator line for resizer handle
-            glEnd();
-
-            glBegin(GL_LINE_LOOP); glVertex2f(closeBoxBtn.left, closeBoxBtn.top); glVertex2f(closeBoxBtn.right, closeBoxBtn.top); glVertex2f(closeBoxBtn.right, closeBoxBtn.bottom); glVertex2f(closeBoxBtn.left, closeBoxBtn.bottom); glEnd();
-            glBegin(GL_LINE_LOOP); glVertex2f(maxToggleBtn.left,   maxToggleBtn.top);   glVertex2f(maxToggleBtn.right,   maxToggleBtn.top);   glVertex2f(maxToggleBtn.right,   maxToggleBtn.bottom);   glVertex2f(maxToggleBtn.left,   maxToggleBtn.bottom);   glEnd();
-            glBegin(GL_LINE_LOOP); glVertex2f(zoomToggleBtn.left,  zoomToggleBtn.top);  glVertex2f(zoomToggleBtn.right,  zoomToggleBtn.top);  glVertex2f(zoomToggleBtn.right,  zoomToggleBtn.bottom);  glVertex2f(zoomToggleBtn.left,  zoomToggleBtn.bottom);  glEnd();
-
-            // Inner header control markings icons lines
-            glBegin(GL_LINES);
-                // Close button 'X'
-                glVertex2f(closeBoxBtn.left + 3.0f, closeBoxBtn.top + 2.0f); glVertex2f(closeBoxBtn.right - 3.0f, closeBoxBtn.bottom - 2.0f);
-                glVertex2f(closeBoxBtn.right - 3.0f, closeBoxBtn.top + 2.0f); glVertex2f(closeBoxBtn.left + 3.0f, closeBoxBtn.bottom - 2.0f);
-                // Maximize button internal box indicator frame shape
-                glVertex2f(maxToggleBtn.left + 3.0f, maxToggleBtn.top + 2.0f); glVertex2f(maxToggleBtn.right - 3.0f, maxToggleBtn.top + 2.0f);
-                glVertex2f(maxToggleBtn.right - 3.0f, maxToggleBtn.top + 2.0f); glVertex2f(maxToggleBtn.right - 3.0f, maxToggleBtn.bottom - 2.0f);
-                glVertex2f(maxToggleBtn.right - 3.0f, maxToggleBtn.bottom - 2.0f); glVertex2f(maxToggleBtn.left + 3.0f, maxToggleBtn.bottom - 2.0f);
-                glVertex2f(maxToggleBtn.left + 3.0f, maxToggleBtn.bottom - 2.0f); glVertex2f(maxToggleBtn.left + 3.0f, maxToggleBtn.top + 2.0f);
-                // Minimize button single bar dash line
-                glVertex2f(zoomToggleBtn.left + 3.0f, zoomToggleBtn.bottom - 4.0f); glVertex2f(zoomToggleBtn.right - 3.0f, zoomToggleBtn.bottom - 4.0f);
-            glEnd();
-
-            glColor3f(1.0f, 1.0f, 1.0f);
-            glBegin(GL_LINE_STRIP);
-                glVertex2f(winWin.left + 1.0f, winWin.bottom - 1.0f); glVertex2f(winWin.left + 1.0f, winWin.top + 1.0f);
-                glVertex2f(winWin.right - 1.0f, winWin.top + 1.0f);
-            glEnd();
-            
-            glColor3f(0.6f, 0.6f, 0.6f);
-            glBegin(GL_LINE_LOOP);
-                glVertex2f(panelCanvas.left, panelCanvas.top); glVertex2f(panelCanvas.right, panelCanvas.top);
-                glVertex2f(panelCanvas.right, panelCanvas.bottom); glVertex2f(panelCanvas.left, panelCanvas.bottom);
-            glEnd();
-            glDisable(GL_BLEND);
-        }
+        glDisable(GL_BLEND);       
 
     } // Exact functional closing brace of RenderFrame() method!
 
@@ -2065,25 +1637,6 @@ public:
 
 
 private:
-
-team_id GetRealFrontTeam() {
-    team_id frontTeam = -1;
-    
-    // We send message token 8 (AS_GET_FRONT_TEAM / AS_GET_ACTIVE_TEAM variant)
-    // to query the app_server directly about the top window layout stack holder
-    BPrivate::AppServerLink link;
-    link.StartMessage(8); 
-    link.Flush();
-    
-    // Read the synchronous response packet from the window manager stream
-    if (link.Read<team_id>(&frontTeam) != B_OK) {
-        frontTeam = -1;
-    }
-    
-    return frontTeam;
-}
-
-
 
     void UpdateGlobalCpuLoadTracker() {
         uint32 currentTicks = SDL_GetTicks();
@@ -2129,156 +1682,8 @@ team_id GetRealFrontTeam() {
         fCpuHistoryIndex = (fCpuHistoryIndex + 1) % 40;
     }
 
-       void RefreshWindowDirectory(const std::string& directoryPath) {
-        fCurrentPath = directoryPath;
-        
-        // 1. Clear out old directory item text textures to prevent VRAM memory leaks
-        for (auto& item : fBrowserItems) {
-            if (item.textTex.id != 0) glDeleteTextures(1, &item.textTex.id);
-        }
-        fBrowserItems.clear();
-
-        // Clear out old path and status textures if they exist
-        if (fPathTextTexture.id != 0)   { glDeleteTextures(1, &fPathTextTexture.id); fPathTextTexture.id = 0; }
-        if (fStatusTextTexture.id != 0) { glDeleteTextures(1, &fStatusTextTexture.id); fStatusTextTexture.id = 0; }
-
-        // Reset our vertical scroll position back to the top of the pane safely!
-        fScrollOffset = 0.0f;
-
-        // 2. Open directory path nodes using Haiku's native file system engine
-        BDirectory dir(fCurrentPath.c_str());
-        if (dir.InitCheck() != B_OK) return;
-
-        // Prepend parent directory ".." hop link shortcut
-        if (fCurrentPath != "/") {
-            BrowserFileItem parentItem;
-            parentItem.name = ".. [Parent Directory]";
-            parentItem.isFolder = true;
-            size_t lastSlash = fCurrentPath.find_last_of('/');
-            parentItem.fullPath = (lastSlash == 0) ? "/" : fCurrentPath.substr(0, lastSlash);
-            parentItem.icon = LoadIconFromNode("/boot/system/preferences/Tracker", 24);
-            parentItem.textTex = RenderTextToTexture(parentItem.name.c_str(), &parentItem.textW, &parentItem.textH);
-            fBrowserItems.push_back(parentItem);
-        }
-
-        BEntry entry;
-        int folderCount = 0;
-        int fileCount = 0;
-
-        while (dir.GetNextEntry(&entry) == B_OK) {
-            BrowserFileItem item;
-            char nameBuf[B_FILE_NAME_LENGTH];
-            entry.GetName(nameBuf);
-            item.name = nameBuf;
-            item.isFolder = entry.IsDirectory();
-
-            if (item.isFolder) folderCount++; else fileCount++;
-
-            BPath path;
-            entry.GetPath(&path);
-            item.fullPath = path.Path();
-
-            item.icon = LoadIconFromNode(item.fullPath.c_str(), 24);
-            item.textTex = RenderTextToTexture(item.name.c_str(), &item.textW, &item.textH);
-
-            fBrowserItems.push_back(item);
-        }
-
-        // =========================================================================
-        // BAKE THE TITLE BAR PATH AND BOTTOM STATUS BAR TEXT TEXTURES
-        // =========================================================================
-        std::string pathLabel = "Path: " + fCurrentPath;
-        fPathTextTexture = RenderTextToTexture(pathLabel.c_str(), &fPathTextW, &fPathTextH);
-
-        // Format a native tracking string summary: e.g., "9 items (2 folders, 7 files)"
-        char statusBuffer[128];
-        snprintf(statusBuffer, sizeof(statusBuffer), "%ld items (%d folder%s, %d file%s)",
-                 fBrowserItems.size(), 
-                 folderCount, (folderCount == 1 ? "" : "s"), 
-                 fileCount, (fileCount == 1 ? "" : "s"));
-        fStatusTextTexture = RenderTextToTexture(statusBuffer, &fStatusTextW, &fStatusTextH);
-
-        // Calculate maximum vertical scroll limits based on row distribution
-        float totalListHeight = fBrowserItems.size() * 30.0f;
-        float canvasHeight = fWindowHeight - 8.0f - 20.0f; // Inner box viewport height minus padding
-        fMaxScrollOffset = totalListHeight - canvasHeight;
-        if (fMaxScrollOffset < 0.0f) fMaxScrollOffset = 0.0f; // No scrolling needed if list fits!
-    }
 
 
-        void RenderWindowContentsToFBO() {
-        glBindFramebuffer(GL_FRAMEBUFFER, fWindowFBO);
-        glViewport(0, 0, fFBOSizeW, fFBOSizeH);
-
-        // Clear the inside of the window texture with a clean, native light gray base surface
-        glClearColor(0.847f, 0.847f, 0.847f, 1.0f); // Matched to native Haiku gray panel color
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        
-        // =========================================================================
-        // FIX: MATCH ORTHOGRAPHIC MATRIX PATH TO NATIVE SCREEN EXPECTATIONS
-        // =========================================================================
-        // Flipping the bottom/top parameters from (0, size) to (size, 0) compensates 
-        // for OpenGL's default texture inversion, aligning everything with the window!
-        gluOrtho2D(0.0, fFBOSizeW, fFBOSizeH, 0.0);
-        
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-
-        // --- DRAW THE DYNAMIC ACTIVE GRAPHIC CONTENT ---
-        float timeTick = (float)SDL_GetTicks() * 0.001f;
-        
-        glLineWidth(2.0f);
-        glBegin(GL_LINES);
-            for (int i = 0; i < fFBOSizeW; i += 40) {
-                float dynamicOffset = std::sin(timeTick + (i * 0.01f)) * 30.0f; // Amplified waves!
-                
-                // Blue line strands
-                glColor3f(0.2f, 0.5f, 0.9f); 
-                glVertex2f((float)i, 0.0f);
-                glVertex2f((float)i + dynamicOffset, (float)fFBOSizeH);
-
-                // Red line strands
-                glColor3f(0.9f, 0.3f, 0.3f); 
-                glVertex2f(0.0f, (float)i);
-                glVertex2f((float)fFBOSizeW, (float)i + dynamicOffset);
-            }
-        glEnd();
-
-        // =========================================================================
-        // FIXED CLEANUP LAYER: ISOLATE THE TRUE BOTTOM TASKBAR VIEWPORT GRID
-        // =========================================================================
-        // Drop back to the standard hardware screen framebuffer
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        
-        // Restrict rendering explicitly inside our 140px bar panel strip container
-        glViewport(0, 0, fWidth, 140); 
-        
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        
-        // Map ONLY the absolute bottom 140-pixel strip coordinates of the screen space
-        float taskbarTopCoordinate    = static_cast<float>(fHeight) - 140.0f;
-        float taskbarBottomCoordinate = static_cast<float>(fHeight);
-        
-        gluOrtho2D(0.0, static_cast<float>(fWidth), taskbarBottomCoordinate, taskbarTopCoordinate);
-        
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-    }
-
-    // Framebuffer Object tracking metrics
-    GLuint fWindowFBO = 0;
-    GLuint fWindowRenderTexture = 0;
-    
-    // Virtual resolution of our inner window canvas panel (e.g., 512x512)
-    //int fFBOSizeW = 512;
-    //int fFBOSizeH = 512;
-    
-    int fFBOSizeW;
-    int fFBOSizeH;
 
     HaikuTexture LoadWallpaperViaTranslationKit(const char* filepath) {
         HaikuTexture tex;
@@ -2496,8 +1901,6 @@ team_id GetRealFrontTeam() {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
-
-
             glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA, targetSize, targetSize, 0, GL_BGRA, GL_UNSIGNED_BYTE, haikuBitmap->Bits());
         }
         
@@ -2509,13 +1912,6 @@ team_id GetRealFrontTeam() {
     int fWidth, fHeight;
     float fBgColorR, fBgColorG, fBgColorB;
     HaikuRect fDeskbarBounds;
-
-    HaikuPoint fWindowPos;
-    float fWindowWidth, fWindowHeight;
-    float fTabWidth, fTabHeight;
-    
-    bool fIsDragging;
-    float fDragOffsetX, fDragOffsetY;
 
     // Vector list array tracking real system files dynamically
     std::vector<DesktopIconItem> fDesktopItems;
@@ -2533,17 +1929,8 @@ team_id GetRealFrontTeam() {
     HaikuTexture fHaikuTrashIcon;
     
     bool      fShowMainMenu = false;
-    HaikuRect fMainMenuBounds = { 0.0f, 0.0f, 0.0f, 0.0f };
-    
-    HaikuTexture fMenuTextApps;
-    int          fMenuTextAppsW = 0, fMenuTextAppsH = 0;
-
-    HaikuTexture fMenuTextPrefs;
-    int          fMenuTextPrefsW = 0, fMenuTextPrefsH = 0;
-
-    HaikuTexture fMenuTextShutdown;
-    int          fMenuTextShutdownW = 0, fMenuTextShutdownH = 0;
-    
+    HaikuRect fMainMenuBounds = { 0.0f, 0.0f, 0.0f, 0.0f };    
+  
     std::string fCurrentPath;
     std::vector<BrowserFileItem> fBrowserItems;
     
@@ -2553,23 +1940,6 @@ team_id GetRealFrontTeam() {
     
     float fScrollOffset = 0.0f;
     float fMaxScrollOffset = 0.0f;
-
-    // Dynamic Navigation Path Text Layer
-    HaikuTexture fPathTextTexture;
-    int          fPathTextW = 0, fPathTextH = 0;
-
-    // Bottom Status Bar Count Text Layer
-    HaikuTexture fStatusTextTexture;
-    int          fStatusTextW = 0, fStatusTextH = 0;
-    
-   // Window Functional States
-    bool fWindowIsOpen = true;
-    bool fWindowIsMinimized = false;
-
-    // Dedicated Navigator Dock Icon Sizing Sockets
-    HaikuTexture fNavigatorIcon;
-    HaikuTexture fNavigatorText;
-    int          fNavigatorTextW = 0, fNavigatorTextH = 0;
 
     // CPU Global Graph Pulse Metrics (Ring Buffer tracking the last 40 seconds)
     float fCpuHistory[40] = { 0.0f };
@@ -2621,7 +1991,6 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // Set target rendering pipeline attributes to clean legacy OpenGL standards
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -2638,16 +2007,11 @@ int main(int argc, char* argv[]) {
 
     int screenWidth  = currentDisplayMode.w;
     int screenHeight = currentDisplayMode.h;
-
-    // =========================================================================
-    // WINDOW GEOMETRY HEIGHT REFINEMENT (140px TALL SLIM BAR)
-    // =========================================================================
     int dockPanelW = screenWidth;
-    int dockPanelH = 160; // Safely holds magnifying icons and tooltips!
+    int dockPanelH = 160; 
     int dockPanelX = 0;
     int dockPanelY = screenHeight - dockPanelH;
 
-    // Instantiate a localized borderless panel strip resting at the screen bottom
     SDL_Window* window = SDL_CreateWindow(
         "Haiku Desktop Taskbar Overlay Component",
         dockPanelX, dockPanelY,
@@ -2661,53 +2025,7 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return -1;
     }
-    
-    
-    // =========================================================================
-    // NATIVE SYSTEM WORKSPACE ROUTING: LOCKED DESKTOP LAYER SHIELD (FIXED)
-    // =========================================================================
-    SDL_SysWMinfo wmInfo;
-    SDL_VERSION(&wmInfo.version); // Initializing framework version packet handshake payload
-
-    if (SDL_GetWindowWMInfo(window, &wmInfo)) {
-        // Extract the first data address block directly from the info payload memory.
-        // This completely skips anonymous union identifier name differences across SDL2 branches.
-        void* rawWindowPointer = nullptr;
-        std::memcpy(&rawWindowPointer, &wmInfo.info, sizeof(void*));
-        
-        BWindow* haikuWindow = reinterpret_cast<BWindow*>(rawWindowPointer);
-        
-        if (haikuWindow != nullptr) {
-            std::cout << "[Native System] Intercepted raw BWindow instance layer pointer safely." << std::endl;
-            
-            // Gain safe synchronous window thread locking authorization
-            if (haikuWindow->Lock()) {
-                // Force the app_server compositor to pin this canvas layer beneath your workspace apps.
-                // Value 2 maps explicitly to the background look/feel behavior type in Haiku
-                haikuWindow->SetFeel(static_cast<window_feel>(2)); 
-                
-                // COMBINE CRITICAL MODIFIER FLAGS (FIXES ACTIVE LOSS OF FOCUS BUG)
-                // - B_AVOID_FOCUS (0x00020000): Tells the window compositor to deny activation requests entirely.
-                // - B_NOT_ANCHORED_ON_ACTIVATE (0x00010000): Ensures workspace shifting leaves this canvas pristine.
-                uint32 originalFlags = haikuWindow->Flags();
-                uint32 desktopShellFlags = 0x00020000 | 0x00010000;
-                
-                haikuWindow->SetFlags(originalFlags | desktopShellFlags);
-                
-                haikuWindow->Unlock();
-                std::cout << "[Native System] Desktop constraints applied! Focus tracking secured." << std::endl;
-            }
-        }
-    } else {
-        std::cerr << "[Native System Failure] Could not route window handle context: " << SDL_GetError() << std::endl;
-    }
-    // =========================================================================
-
-
-
-    
-    
-    
+     
 
     SDL_GLContext glContext = SDL_GL_CreateContext(window);
     if (!glContext) {
@@ -2717,59 +2035,27 @@ int main(int argc, char* argv[]) {
     }
     
 
-
-
-    // =========================================================================
-    // LOAD MODERN FBO GRAPHICS DRIVER COMMAND SYMBOLS FOR THE NVIDIA CARD
-    // =========================================================================
-    glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)SDL_GL_GetProcAddress("glGenFramebuffers");
-    glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)SDL_GL_GetProcAddress("glBindFramebuffer");
-    glFramebufferTexture2D = (PFNGLFRAMEBUFFERTEXTURE2DPROC)SDL_GL_GetProcAddress("glFramebufferTexture2D");
-    glCheckFramebufferStatus = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)SDL_GL_GetProcAddress("glCheckFramebufferStatus");
-
-    // Quick verification safety check
-    if (!glGenFramebuffers || !glBindFramebuffer || !glFramebufferTexture2D || !glCheckFramebufferStatus) {
-        std::cerr << "[GL ERROR] The loaded graphics driver doesn't support FBOs!" << std::endl;
-        SDL_GL_DeleteContext(glContext);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return -1;
-    }
-    // =========================================================================
-
     SDL_GL_SetSwapInterval(1);
-
-
-    // =========================================================================
-    // CRITICAL STEPS: THE 2D COORDINATE TRANSLATION MAPPER CONVERSION
-    // =========================================================================
-    // Configure viewport rendering constraints to our updated 140px height strip
     glViewport(0, 0, screenWidth, 160);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     
-    // --- PERFECT WALLPAPER RE-STITCH ALIGNMENT MATH ---
-    // We clip the matrix boundary to map ONLY the bottom strip of the screen.
-    // This allows your wallpaper texture to match the system desktop perfectly!
+    // --- WALLPAPER RE-STITCH ALIGNMENT MATH ---
     float panelTopY    = static_cast<float>(screenHeight) - 160.0f;
     float panelBottomY = static_cast<float>(screenHeight);
     
-    gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);
-    
+    gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
     glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    
-    // Instantiate our unified Drawing Workspace Engine Controller Class
+    glLoadIdentity();    
     HaikuGlDesktopEngine desktopEngine(screenWidth, screenHeight);
-
-
     bool appExecuting = true;
     SDL_Event incomingEventPackage;
     
+    
+    // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
     const char* localVersion = "v1.0.5"; 
-
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -2781,7 +2067,7 @@ int main(int argc, char* argv[]) {
    }
     
 
-      // =========================================================================
+    // =========================================================================
     // RENDER-ON-DEMAND EVENT PIPELINE (DROPS CPU TO ~0%)
     // =========================================================================
     uint32 lastRosterScanTime = 0;
