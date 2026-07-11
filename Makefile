@@ -1,11 +1,11 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/develop/headers/private/interface
+CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app
 
 
 # Target binary definitions
 GUI_TARGET = hdesktop
-VERSION = 1.0.4
+VERSION = 1.0.5
 PACKAGE_DIR := build/package
 
 # Shared target architectures
@@ -69,10 +69,10 @@ release: all
 	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
 	mkdir -p $(PACKAGE_DIR)/apps
 	mkdir -p $(PACKAGE_DIR)/bin
-	mkdir -p $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/
+	#mkdir -p $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
-	cp background.png $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/
+	#cp background.png $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/
 	ln -s /boot/system/apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s /boot/system/apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
 	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-1-$(ARCH).hpkg	
