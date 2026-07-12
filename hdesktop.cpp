@@ -43,6 +43,9 @@
 #include <ScrollView.h>
 #include <Screen.h>
 #include <map>
+#include <MediaRoster.h>
+#include <MediaNode.h>
+#include <ParameterWeb.h>
 
 
 
@@ -853,18 +856,36 @@ public:
 
 
     void HandleMouseWheel(int wheelStepY) {
-        // Define velocity multiplication constant (30 pixels skipped per mouse notch tick)
+        // 1. Check if the mouse cursor is physically hovering over the volume bar right now
+        bool isMouseOverSlider = (fMouseX >= fCachedVolLeft && fMouseX <= (fCachedVolLeft + fCachedVolWidth) &&
+                                  fMouseY >= fCachedVolTop && fMouseY <= (fCachedVolTop + fCachedVolHeight));
+
+        if (isMouseOverSlider) {
+            // Adjust the system volume level cleanly by 2% increments per notch tick step
+            float volumeStepIncrement = 0.02f;
+            fCurrentVolumeLevel += static_cast<float>(wheelStepY) * volumeStepIncrement;
+            
+            // Hard clamp boundaries to protect the system mixer gain tables
+            if (fCurrentVolumeLevel < 0.0f) fCurrentVolumeLevel = 0.0f;
+            if (fCurrentVolumeLevel > 1.0f) fCurrentVolumeLevel = 1.0f;
+            
+            // Write updates directly down to Haiku's underlying media kit hardware nodes!
+            SetHaikuMixerVolume(fCurrentVolumeLevel);
+            return; // Skip desktop canvas scrolling adjustments completely
+        }
+
+        // =========================================================================
+        // FALLBACK: ORIGINAL DESKTOP SHORTCUT WINDOW CANVAS SCROLLING LOGIC
+        // =========================================================================
         float scrollSpeed = 30.0f;
-        
-        // SDL wheels supply a value of 1 for scrolling up, and -1 for down
         fScrollOffset -= static_cast<float>(wheelStepY) * scrollSpeed;
         
-        // Clamp bounds limits so you can't scroll past the list ends
         if (fScrollOffset < 0.0f) fScrollOffset = 0.0f;
         if (fScrollOffset > fMaxScrollOffset) fScrollOffset = fMaxScrollOffset;
         
         std::cout << "[Tracker window] Scrolled canvas position offset: " << fScrollOffset << std::endl;
     }
+
 
 	void SyncDockWithRunningDeskbarApps() {
 		// --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
@@ -976,97 +997,228 @@ public:
 	    // Sync global mouse variables to match click coordinates
 	    fMouseX = x; 
 	    fMouseY = y;
-
+	
+	    // =========================================================================
+	    // CACHED VOLUME SLIDER INTERACTION INTERCEPTOR (SINGLE-CLICK SYNCED)
+	    // =========================================================================
+	    bool isClickOverSlider = (x >= fCachedVolLeft && x <= (fCachedVolLeft + fCachedVolWidth) &&
+	                              y >= fCachedVolTop && y <= (fCachedVolTop + fCachedVolHeight));
+	
+	    if (isClickOverSlider) {
+	        // CASE A: MIDDLE MOUSE BUTTON CENTER-CLICK -> TOGGLE MUTE STATE
+	        if (button == SDL_BUTTON_MIDDLE) {
+	            if (fCurrentVolumeLevel > 0.0f) {
+	                fPreMuteVolumeLevel = fCurrentVolumeLevel;
+	                fCurrentVolumeLevel = 0.0f;
+	            } else {
+	                fCurrentVolumeLevel = (fPreMuteVolumeLevel > 0.0f) ? fPreMuteVolumeLevel : 0.2f;
+	            }
+	            
+	            SetHaikuMixerVolume(fCurrentVolumeLevel);
+	            return; // Intercept event completely
+	        }
+	
+	        // =========================================================================
+	        // FIX: LEFT MOUSE BUTTON SINGLE-CLICK -> OPEN MEDIA PREFERENCES
+	        // Matches the behavior of the Clock and CPU graph seamlessly!
+	        // =========================================================================
+	        if (button == SDL_BUTTON_LEFT) {
+	            // Track mouse down coordinates to distinguish a quick tap from a drag gesture
+	            static int initialClickX = -1;
+	            
+	            // If the user clicked inside the bar but didn't drag back and forth across 
+	            // the capsule track (e.g., variance is less than 4 horizontal screen pixels),
+	            // we process it as a native single click.
+	            if (initialClickX == -1 || std::abs(x - initialClickX) < 4) {
+	                std::system("/boot/system/preferences/Media &");
+	                initialClickX = -1; // Reset tap latch
+	                return; // Intercept event completely, prevent launcher execution bypass below
+	            }
+	            initialClickX = x;
+	        }
+	    }
 	
 	    // =========================================================================
 	    // DOCK GEOMETRY & LAYER PRE-CALCULATIONS (EXACT MATCH FOR RENDERFRAME)
 	    // =========================================================================
+
 	    float baseSize = 48.0f;
 	    float padding = 12.0f;
 	    
 	    size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
+
 	    size_t activeWindowsCount = 0;
 	    for (const auto& w : fTaskbarWindows) {
 	        if (*w.openStateFlag == true) activeWindowsCount++;
 	    }
+
 	    size_t totalIconsCount = baselineLaunchersCount + activeWindowsCount;
-	
-	    std::vector<float> dynamicWidths;
-	    std::vector<float> dynamicScales;
-	    float totalDockWidth = 0.0f;
-	    float maxDockHeight = baseSize;
-	
-	    // Step 1: Calculate the exact dynamic width of the primary launcher panel zone
-	    for (size_t i = 0; i < totalIconsCount; ++i) {
-	        float approximateIconX = (fWidth / 2.0f) - ((totalIconsCount * (baseSize + padding)) / 2.0f) + (i * (baseSize + padding)) + (baseSize / 2.0f);
-	        float distanceX = std::abs(x - approximateIconX); // Evaluated via local click 'x'
-	        
-	        float scale = 1.0f;
-	        if (y >= (fHeight - 140.0f)) { // Evaluated via local click 'y'
-	            if (distanceX < 160.0f) {
-	                float ratio = distanceX / 160.0f;
-	                scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	            }
-	        }
-	
-	        float finalSize = baseSize * scale;
-	        dynamicWidths.push_back(finalSize);
-	        dynamicScales.push_back(scale);
-	        totalDockWidth += finalSize + padding;
-	        if (finalSize > maxDockHeight) maxDockHeight = finalSize;
-	    }
-	    totalDockWidth -= padding;
-	
+
+	    // Configuration variables matching RenderFrame exactly
 	    float clockSectionPadding = 24.0f;
 	    float cpuGraphWidth = 60.0f;
 	    float separatorGapPadding = 16.0f;
-	
-	    // Step 2: Simulate Section 3's Unified Predictive Geometry Loop
 	    float baseTrashSize = 48.0f;
-	    float trashScale = 1.0f;
-	    float currentPredictX = 20.0f + totalDockWidth;
-	    if (activeWindowsCount > 0) {
-	        currentPredictX += separatorGapPadding;
-	    }
+	    float baseVolumeWidth = 44.0f; 
+
+	    std::vector<float> dynamicWidths;
+	    std::vector<float> dynamicScales;
+	    float maxDockHeight = baseSize;
+
+	    // -------------------------------------------------------------------------
+	    // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING (CONVERGENCE SYNC)
+	    // -------------------------------------------------------------------------
+	    float totalCalculatedWidth = 0.0f; 
 	    
-	    float traySectionStartX = currentPredictX;
-	
-	    if (fClockTexture.id != 0) {
-	        currentPredictX += clockSectionPadding + fClockWidth;
-	    }
-	
-	    currentPredictX += clockSectionPadding;
-	    float approximateTrashX = (fWidth / 2.0f) - ((totalDockWidth + (currentPredictX + (baseTrashSize / 2.0f) - traySectionStartX)) / 2.0f) + currentPredictX + (baseTrashSize / 2.0f);
-	    float distanceTrashX = std::abs(x - approximateTrashX);
-	
-	    if (y >= (fHeight - 140.0f)) {
-	        if (distanceTrashX < 160.0f) {
+	    for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
+	        dynamicWidths.clear();
+	        dynamicScales.clear();
+	        maxDockHeight = baseSize;
+	        
+	        // Start reading layouts from a relative left offset margin
+	        float progressiveX = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
+	        
+	        // 1. Process standard app launchers & active window indicators
+	        for (size_t i = 0; i < totalIconsCount; ++i) {
+	            float approxCenterX = progressiveX + (baseSize / 2.0f);
+	            float distanceX = std::abs(x - approxCenterX); // Click 'x' used for hover testing
+	            
+	            float scale = 1.0f;
+	            if (y >= (fHeight - 140.0f) && distanceX < 160.0f) {
+	                float ratio = distanceX / 160.0f;
+	                scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	            }
+
+	            float finalSize = baseSize * scale;
+	            dynamicWidths.push_back(finalSize);
+	            dynamicScales.push_back(scale);
+	            
+	            if (finalSize > maxDockHeight) maxDockHeight = finalSize;
+	            progressiveX += finalSize + padding;
+	        }
+	        if (totalIconsCount > 0) progressiveX -= padding; 
+
+	        // Account for the structural native app split divider
+	        if (activeWindowsCount > 0) {
+	            progressiveX += separatorGapPadding;
+	        }
+
+	        // 2. Process System Clock Component Metrics
+	        if (fClockTexture.id != 0) {
+	            progressiveX += clockSectionPadding;
+	            
+	            float highDpiCompensateFactor = 0.42f;
+	            float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;
+	            
+	            float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
+	            float distanceClockX = std::abs(x - approxClockCenterX);
+	            
+	            float clockScale = 1.0f;
+	            if (y >= (fHeight - 140.0f) && distanceClockX < 160.0f) {
+	                float ratio = distanceClockX / 160.0f;
+	                clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	            }
+	            
+	            dynamicWidths.push_back(baselineClockLayoutWidth * clockScale);
+	            dynamicScales.push_back(clockScale);
+	            progressiveX += (baselineClockLayoutWidth * clockScale);
+	        } else {
+	            dynamicWidths.push_back(0.0f);
+	            dynamicScales.push_back(1.0f);
+	        }
+
+	        // 3. Process Dynamic Volume Slider Component Metrics
+	        progressiveX += clockSectionPadding;
+	        float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
+	        float distanceVolX = std::abs(x - approxVolCenterX);
+	        
+	        float volScale = 1.0f;
+	        if (y >= (fHeight - 140.0f) && distanceVolX < 160.0f) {
+	            float ratio = distanceVolX / 160.0f;
+	            volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	        }
+	        dynamicWidths.push_back(baseVolumeWidth * volScale);
+	        dynamicScales.push_back(volScale);
+	        progressiveX += (baseVolumeWidth * volScale);
+
+	        // 4. Process Haiku Trash Can Component Metrics
+	        progressiveX += clockSectionPadding;
+	        float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
+	        float distanceTrashX = std::abs(x - approxTrashCenterX);
+	        
+	        float trashScale = 1.0f;
+	        if (y >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
 	            float ratio = distanceTrashX / 160.0f;
 	            trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
+	        
+	        float finalTrashSize = baseTrashSize * trashScale;
+	        dynamicWidths.push_back(finalTrashSize);
+	        dynamicScales.push_back(trashScale);
+	        if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
+	        progressiveX += finalTrashSize;
+	        
+	        // 5. Process Graphical CPU Monitor Metrics
+	        progressiveX += clockSectionPadding; 
+	        float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
+	        float distanceCpuX = std::abs(x - approxCpuCenterX);
+	        
+	        float cpuScale = 1.0f;
+	        if (y >= (fHeight - 140.0f) && distanceCpuX < 160.0f) {
+	            float ratio = distanceCpuX / 160.0f;
+	            cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	        }
+	        
+	        float finalCpuWidth = cpuGraphWidth * cpuScale;
+	        dynamicWidths.push_back(finalCpuWidth);
+	        dynamicScales.push_back(cpuScale);
+	        progressiveX += finalCpuWidth;
+
+	        // Save converged dimensions to update anchor points on the next pass
+	        float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
+	        totalCalculatedWidth = progressiveX - leftEdge;
 	    }
-	    float dynamicTrashSize = baseTrashSize * trashScale;
-	    if (dynamicTrashSize > maxDockHeight) maxDockHeight = dynamicTrashSize;
-	    currentPredictX += dynamicTrashSize + clockSectionPadding + cpuGraphWidth;
-	
-	    float finalTrayWidth = currentPredictX - traySectionStartX;
-	    float finalPlateWidth = totalDockWidth + finalTrayWidth + clockSectionPadding;
-	    if (activeWindowsCount > 0) {
-	        finalPlateWidth += separatorGapPadding;
-	    }
-	
+
+	    // -------------------------------------------------------------------------
+	    // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
+	    // -------------------------------------------------------------------------
+	    size_t clockSlotIdx  = totalIconsCount;
+	    size_t volumeSlotIdx = totalIconsCount + 1;
+	    size_t trashSlotIdx  = totalIconsCount + 2;
+	    size_t cpuSlotIdx    = totalIconsCount + 3;
+
 	    float dockMarginBottom = 15.0f;
 	    HaikuRect dockPlate;
-	    dockPlate.left = (fWidth / 2.0f) - (finalPlateWidth / 2.0f) - 20.0f;
-	    dockPlate.right = (fWidth / 2.0f) + (finalPlateWidth / 2.0f) + 20.0f;
+	    float outerPlatePadding = 40.0f; 
+	    dockPlate.left = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f) - (outerPlatePadding / 2.0f);
+	    dockPlate.right = (fWidth / 2.0f) + (totalCalculatedWidth / 2.0f) + (outerPlatePadding / 2.0f);
 	    dockPlate.bottom = fHeight - dockMarginBottom;
 	    dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
-	
 
-	
+	    // Lock down definitive trash hitbox using the converged stream variables
+	    float renderingTrashSize = dynamicWidths[trashSlotIdx];
+	    
+	    float layoutTrackerX = dockPlate.left + 20.0f;
+	    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
+	        layoutTrackerX += dynamicWidths[idx] + padding;
+	    }
+	    if (totalIconsCount > 0) layoutTrackerX -= padding;
+	    if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
+	    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
+	    
+	    // Accountability shift step past our volume metrics
+	    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+	    
+	    layoutTrackerX += clockSectionPadding;
+	    fTrashRect.left = layoutTrackerX;
+	    fTrashRect.right = fTrashRect.left + renderingTrashSize;
+	    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
+	    fTrashRect.bottom = dockPlate.bottom - 10.0f;
+
 	    // =========================================================================
 	    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
 	    // =========================================================================
+
 	    float currentX = dockPlate.left + 20.0f; // Exact rendering origin used in Section 5
 	    size_t evaluationSlotIdx = 0;
 	
@@ -1137,10 +1289,7 @@ public:
 	                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 	
 	                if (activeTaskWin.isMinimized == false) {
-	                    // ACTION A: Tracker windows are currently visible -> HIDE THEM
 	                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
-	                    
-	                    // Minimize Window 1 and up to ensure the Desktop sheet (Window 0) stays completely active
 	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
 	                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
 	                    std::system(safeTrackerCmdBuffer);
@@ -1149,11 +1298,7 @@ public:
 	                    activeTaskWin.isMinimized = true;
 	                } 
 	                else {
-	                    // ACTION B: Tracker is minimized or completely empty -> WAKE / SPAWN IT
 	                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
-	                    
-	                    // PE & TRACKER FIX: Query the roster using its signature to grab the true parent team.
-	                    // This ensures ActivateApp targets the real master window thread.
 	                    app_info realTrackerInfo;
 	                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
 	                        be_roster->ActivateApp(realTrackerInfo.team);
@@ -1161,13 +1306,10 @@ public:
 	                        be_roster->ActivateApp(activeTaskWin.teamId);
 	                    }
 	                    
-	                    // 2. Unminimize any folder views that might already be sleeping at index 1
 	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
 	                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
 	                    std::system(safeTrackerCmdBuffer);
 	
-	                    // 3. Always broadcast a native open request. If a folder was already open, Tracker 
-	                    // safely ignores this. If Tracker had 0 windows open, this instantly spawns /boot/home.
 	                    if (trackerMessenger.IsValid()) {
 	                        BEntry homeEntry("/boot/home");
 	                        entry_ref homeRef;
@@ -1177,12 +1319,9 @@ public:
 	                            trackerMessenger.SendMessage(&openMsg);
 	                        }
 	                    }
-	                    
 	                    activeTaskWin.isMinimized = false;
 	                }
-	
-	                std::cout << "========================================\n" << std::endl;
-	                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
+                    return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
 	            }
 	            // -----------------------------------------------------------
 	
@@ -1203,8 +1342,6 @@ public:
 	            else {
 	                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
 	                
-	                // PE & GENERAL THREAD FIX: Use the running app info from the active team to find 
-	                // the official master team registration ID, bypasses child thread faults for Pe.
 	                app_info targetAppInfo;
 	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
 	                    be_roster->ActivateApp(targetAppInfo.team);
@@ -1228,16 +1365,35 @@ public:
 	        evaluationSlotIdx++;
 	    }
 
-
-
-	
 	    // =========================================================================
-	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (CLOCK -> TRASH BIN -> CPU)
+	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (CLOCK -> VOLUME -> TRASH BIN -> CPU)
 	    // =========================================================================
-	    if (x >= fTrashRect.left && x <= fTrashRect.right &&
-	        y >= fTrashRect.top  && y <= fTrashRect.bottom) {
+        
+        // 1. Evaluate Click Bounds for System Clock Component
+        if (fClockTexture.id != 0) {
+            float dynamicClockW = dynamicWidths[clockSlotIdx];
+            currentX += clockSectionPadding;
+            
+            HaikuRect clockBounds = { currentX, dockPlate.top, currentX + dynamicClockW, dockPlate.bottom };
+            if (x >= clockBounds.left && x <= clockBounds.right && y >= clockBounds.top && y <= clockBounds.bottom) {
+                std::system("/boot/system/preferences/Time &"); // Launch Time Preferences panel
+                return;
+            }
+            currentX += dynamicClockW;
+        }
+
+        // 2. Skip past Volume Slider component space footprint natively 
+        // (Middle/Double click overrides are fully handled at the absolute top of the method!)
+        currentX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+
+        // 3. Evaluate Click Bounds for Haiku Trash Bin Component (Using Locked Sync Coordinates)
+        currentX += clockSectionPadding;
+        float dynamicTrashSize = dynamicWidths[trashSlotIdx];
+        HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
+        
+	    if (x >= trashBounds.left && x <= trashBounds.right &&
+	        y >= trashBounds.top  && y <= trashBounds.bottom) {
 	        
-	        // Clear active overlay drawer heights if jumping to trash operations
 	        if (fShowMainMenu) {
 	            BWindow* nativeWin = be_app->WindowAt(0);
 	            if (nativeWin != nullptr && nativeWin->Lock()) {
@@ -1253,26 +1409,70 @@ public:
 	            std::system("/boot/system/Tracker /boot/trash &");
 	            return;
 	        }
-	        
 	        else if (button == SDL_BUTTON_RIGHT) {
 	            std::system("trash --empty &"); 
 	            fLastTrashCheckTime = 0; 
 	            return;
 	        }
 	    }
+        currentX += dynamicTrashSize;
+
+        // 4. Evaluate Click Bounds for Graphical LED CPU Monitor Component
+        currentX += clockSectionPadding;
+        float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
+        HaikuRect cpuBounds = { currentX, dockPlate.top, currentX + dynamicGraphWidth, dockPlate.bottom };
+        
+        if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
+            std::system("/boot/system/apps/ActivityMonitor &"); // Launch native Haiku Activity Monitor
+            return;
+        }
+	} // Clean and safe terminal closing brace for your HandleMouseClick function!
+
+
+
+	void SetHaikuMixerVolume(float targetVolumeFraction) {
+	    BMediaRoster* roster = BMediaRoster::Roster();
+	    if (!roster) return;
+	
+	    media_node mixerNode;
+	    if (roster->GetAudioMixer(&mixerNode) == B_OK) {
+	        BParameterWeb* parameterWeb = nullptr;
+	        if (roster->GetParameterWebFor(mixerNode, &parameterWeb) == B_OK && parameterWeb != nullptr) {
+	            int32 count = parameterWeb->CountParameters();
+	            for (int32 i = 0; i < count; i++) {
+	                BParameter* param = parameterWeb->ParameterAt(i);
+	                if (param && (param->Type() == BParameter::B_CONTINUOUS_PARAMETER) &&
+	                    (strcmp(param->Kind(), B_MASTER_GAIN) == 0 || strcmp(param->Name(), "Master") == 0)) {
+	                    
+	                    BContinuousParameter* gainSlider = static_cast<BContinuousParameter*>(param);
+	                    float minGain = gainSlider->MinValue();
+	                    float maxGain = gainSlider->MaxValue();
+	                    
+	                    // Convert the clean 0.0f - 1.0f percentage scale back into raw DB hardware scale factors
+	                    float targetGainDb = minGain + (targetVolumeFraction * (maxGain - minGain));
+	                    
+	                    // Instruct Haiku's Media Server to apply the new gain limits instantly
+	                    gainSlider->SetValue(&targetGainDb, sizeof(float), system_time());
+	                    break;
+	                }
+	            }
+	            delete parameterWeb;
+	        }
+	        roster->ReleaseNode(mixerNode);
+	    }
 	}
-
-
 
                 	
 
-    void HandleMouseInput(int x, int y, Uint32 buttonState) {    	
+       void HandleMouseInput(int x, int y, Uint32 buttonState) {    	
         fMouseX = x; fMouseY = y;
         fIsResizing = false;
        if (fShowMainMenu && !fMainMenuBounds.Contains(x, y)) {
            if (y < fHeight - 140.0f) fShowMainMenu = false;
        }        
     }
+
+
 
 
 
@@ -1355,6 +1555,7 @@ public:
         float cpuGraphWidth = 60.0f;
         float separatorGapPadding = 16.0f;
         float baseTrashSize = 48.0f;
+        float baseVolumeWidth = 44.0f; // Slider horizontal layout width footprint allocation
 
         // Arrays to store real-time calculations for EVERY component
         std::vector<float> dynamicWidths;
@@ -1426,6 +1627,22 @@ public:
             }
 
             // =========================================================================
+            // NEW: PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS
+            // =========================================================================
+            progressiveX += clockSectionPadding;
+            float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
+            float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+            
+            float volScale = 1.0f;
+            if (fMouseY >= (fHeight - 140.0f) && distanceVolX < 160.0f) {
+                float ratio = distanceVolX / 160.0f;
+                volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+            }
+            dynamicWidths.push_back(baseVolumeWidth * volScale);
+            dynamicScales.push_back(volScale);
+            progressiveX += (baseVolumeWidth * volScale);
+
+            // =========================================================================
             // 3. PROCESS HAIKU TRASH CAN COMPONENT METRICS
             // =========================================================================
             progressiveX += clockSectionPadding;
@@ -1447,7 +1664,7 @@ public:
             // =========================================================================
             // 4. PROCESS GRAPHICAL CPU MONITOR METRICS
             // =========================================================================
-            progressiveX += clockSectionPadding; // Unified separation margin channel
+            progressiveX += clockSectionPadding; 
             float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
             float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
             
@@ -1470,9 +1687,11 @@ public:
         // -------------------------------------------------------------------------
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
         // -------------------------------------------------------------------------
-        size_t clockSlotIdx = totalIconsCount;
-        size_t trashSlotIdx = totalIconsCount + 1;
-        size_t cpuSlotIdx   = totalIconsCount + 2;
+        // FIX: Re-declare variables so they exist correctly in scope!
+        size_t clockSlotIdx  = totalIconsCount;
+        size_t volumeSlotIdx = totalIconsCount + 1;
+        size_t trashSlotIdx  = totalIconsCount + 2;
+        size_t cpuSlotIdx    = totalIconsCount + 3;
 
         float dockMarginBottom = 15.0f;
         HaikuRect dockPlate;
@@ -1482,7 +1701,7 @@ public:
         dockPlate.bottom = fHeight - dockMarginBottom;
         dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
 
-        // Lock down definitive trash hitbox using unified layout streams
+        // Lock down definitive trash hitbox using converged data fields
         float renderingTrashSize = dynamicWidths[trashSlotIdx];
         
         float layoutTrackerX = dockPlate.left + 20.0f;
@@ -1493,11 +1712,15 @@ public:
         if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
         if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
         
+        // Skip past the new horizontal footprint width assigned to the volume block
+        layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+        
         layoutTrackerX += clockSectionPadding;
         fTrashRect.left = layoutTrackerX;
         fTrashRect.right = fTrashRect.left + renderingTrashSize;
         fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
         fTrashRect.bottom = dockPlate.bottom - 10.0f;
+
 
         // Render backplate container shelf
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1760,6 +1983,49 @@ public:
         }
 
         // =========================================================================
+        // NEW: DRAW DYNAMIC VOLUME CONTROL SLIDER (RIGHT OF THE CLOCK)
+        // =========================================================================
+        FetchHaikuMixerVolume(); 
+        
+        currentX += clockSectionPadding;
+        
+        float volScale          = dynamicScales[volumeSlotIdx];
+        float dynamicVolWidth   = dynamicWidths[volumeSlotIdx];
+        float dynamicVolHeight  = 12.0f * volScale; 
+        float volTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicVolHeight / 2.0f));
+        
+        // FIX: Cache these exact screen measurements into class memory fields 
+        // every single frame so HandleMouseInput can access them safely!
+        fCachedVolLeft   = currentX;
+        fCachedVolTop    = volTop;
+        fCachedVolWidth  = dynamicVolWidth;
+        fCachedVolHeight = dynamicVolHeight;
+
+        HaikuRect volBounds = { currentX, volTop, currentX + dynamicVolWidth, volTop + dynamicVolHeight };
+
+        // 1. Draw the slider background dark casing trough
+        DrawFilledRect(volBounds, 0.05f, 0.10f, 0.05f, 0.9f); 
+        
+        // 2. Draw active volume fill level
+        HaikuRect activeVolumeFill = {
+            volBounds.left,
+            volBounds.top,
+            volBounds.left + (dynamicVolWidth * fCurrentVolumeLevel),
+            volBounds.bottom
+        };
+        DrawFilledRect(activeVolumeFill, 0.2f, 1.0f, 0.2f, 0.85f);
+
+        // 3. Draw a thin perimeter frame outline edge loop around the slider case boundary
+        glColor4f(0.15f, 0.15f, 0.15f, 0.6f);
+        glBegin(GL_LINE_LOOP);
+            glVertex2f(volBounds.left,  volBounds.top);    glVertex2f(volBounds.right, volBounds.top);
+            glVertex2f(volBounds.right, volBounds.bottom); glVertex2f(volBounds.left,  volBounds.bottom);
+        glEnd();
+
+        currentX += dynamicVolWidth;
+
+
+        // =========================================================================
         // 6C. DRAW HAIKU TRASH BIN (RIGHT OF THE CLOCK)
         // =========================================================================
         uint32 currentTicks = SDL_GetTicks();
@@ -1772,20 +2038,10 @@ public:
             fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
         }
 		
-        // Left Trash Divider Line (Centered between Clock and Trash)
-        // float lineTrashLeftSnappedX = std::floor(currentX + (clockSectionPadding / 2.0f) + 0.5f);
-        glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
-        /*
-        glBegin(GL_LINES);
-            glVertex2f(lineTrashLeftSnappedX, dockPlate.top + 8.0f);
-            glVertex2f(lineTrashLeftSnappedX, dockPlate.bottom - 8.0f);
-        glEnd();
-		*/
+        // Extra divider lines cleanly neutralized to maintain your preferred borderless style
         currentX += clockSectionPadding;
 		
-		
         // Pin hitbox geometry directly to our current track pointer
-        renderingTrashSize = dynamicWidths[trashSlotIdx];
         fTrashRect.left   = currentX;
         fTrashRect.right  = fTrashRect.left + renderingTrashSize;
         fTrashRect.top    = dockPlate.bottom - 10.0f - renderingTrashSize;
@@ -1816,8 +2072,6 @@ public:
             float tooltipW = static_cast<float>(fTrashTooltipW) + 12.0f;
             float tooltipH = static_cast<float>(fTrashTooltipH) + 8.0f;
             float tooltipLeft = fTrashRect.left + ((fTrashRect.right - fTrashRect.left) / 2.0f) - (tooltipW / 2.0f);
-            
-            // FIX: Bring the box lower down closer to the Trash icon edge (changed from -8.0f to -1.0f)
             float tooltipBottom = fTrashRect.top - 1.0f; 
 
             HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
@@ -1830,6 +2084,7 @@ public:
             glEnd();
 
             if (fTrashTooltipTexId != 0) {
+
                 glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fTrashTooltipTexId);
                 
                 // =========================================================================
@@ -2112,6 +2367,48 @@ private:
     }
 
 
+void FetchHaikuMixerVolume() {
+    uint32 ticksNow = SDL_GetTicks();
+    if (ticksNow - fLastVolumeCheckTime < 250) return; // Rate-limit checking to save CPU
+    fLastVolumeCheckTime = ticksNow;
+
+    BMediaRoster* roster = BMediaRoster::Roster();
+    if (!roster) return;
+
+    media_node mixerNode;
+    if (roster->GetAudioMixer(&mixerNode) == B_OK) {
+        BParameterWeb* parameterWeb = nullptr;
+        // Query the active hardware routing configuration graph properties
+        if (roster->GetParameterWebFor(mixerNode, &parameterWeb) == B_OK && parameterWeb != nullptr) {
+            int32 count = parameterWeb->CountParameters();
+            for (int32 i = 0; i < count; i++) {
+                BParameter* param = parameterWeb->ParameterAt(i);
+                // Look for the absolute master output volume gain slider controller item
+                if (param && (param->Type() == BParameter::B_CONTINUOUS_PARAMETER) &&
+                    (strcmp(param->Kind(), B_MASTER_GAIN) == 0 || strcmp(param->Name(), "Master") == 0)) {
+                    
+                    BContinuousParameter* gainSlider = static_cast<BContinuousParameter*>(param);
+                    float rawGain = 0.0f;
+                    bigtime_t lastChanged;
+                    size_t bytesRead = sizeof(float);
+                    
+                    if (gainSlider->GetValue(&rawGain, &bytesRead, &lastChanged) == B_OK) {
+                        float minGain = gainSlider->MinValue();
+                        float maxGain = gainSlider->MaxValue();
+                        // Normalize the raw DB float metrics directly into a clean 0.0f - 1.0f range
+                        fCurrentVolumeLevel = (rawGain - minGain) / (maxGain - minGain);
+                        if (fCurrentVolumeLevel < 0.0f) fCurrentVolumeLevel = 0.0f;
+                        if (fCurrentVolumeLevel > 1.0f) fCurrentVolumeLevel = 1.0f;
+                    }
+                    break;
+                }
+            }
+            delete parameterWeb; // Clean up parameter tree to prevent memory leaks
+        }
+        // Release hardware node thread reference counters
+        roster->ReleaseNode(mixerNode);
+    }
+}
 
 
 
@@ -2346,6 +2643,15 @@ private:
     int          fTrashTooltipH = 0;
     bool         fTrashTextGenerated = false;
     
+    float fCurrentVolumeLevel = 0.5f; // Active volume state mapping cache (0.0f to 1.0f)
+	uint32 fLastVolumeCheckTime = 0;
+	bool fIsDraggingVolumeSlider = false; // Persistent drag flag
+	float fCachedVolLeft = 0.0f;          // Saved screen positions
+	float fCachedVolTop = 0.0f;
+	float fCachedVolWidth = 0.0f;
+	float fCachedVolHeight = 0.0f;
+	float fPreMuteVolumeLevel = 0.5f; 
+    
 //@private    
 };
 
@@ -2429,7 +2735,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.6"; 
+    const char* localVersion = "v1.0.7"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -2498,8 +2804,10 @@ int main(int argc, char* argv[]) {
                     desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
 
                     if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
+                        // FIX: Added SDL_BUTTON_MIDDLE so scroll-wheel clicks pass straight down to the engine
                         if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
-                            incomingEventPackage.button.button == SDL_BUTTON_RIGHT) {
+                            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
+                            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
                             
                             desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
                             
@@ -2517,6 +2825,7 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                
                     
                     needsRender = true; 
                 }
