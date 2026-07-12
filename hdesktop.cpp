@@ -46,8 +46,6 @@
 
 
 
-
-
 class HaikuAppDrawerWindow; 
 HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
 BWindow* gActiveConfigInstance = nullptr; 
@@ -255,7 +253,7 @@ public:
 	            entry.GetRef(&item->ref);
 	            
 	            // Allocate native 32x32 color matrix profile
-	            item->icon = new BBitmap(BRect(0, 0, 31, 31), B_RGBA32);
+	            item->icon = new BBitmap(BRect(0, 0, 47, 47), B_RGBA32);
 	            
 	            bool iconLoaded = false;
 	            
@@ -309,7 +307,7 @@ public:
         
         // 1. Draw Centered Title Text
         SetFont(be_bold_font);
-        SetFontSize(16.0f);
+        SetFontSize(20.0f);
         SetHighColor(rgb_color{220, 225, 235, 255}); // Clean crisp white/silver
         
         BString titleStr("hdesktop");
@@ -395,28 +393,32 @@ public:
             }
         }
 
-        // =========================================================================
-        // INDIVIDUAL ICON AND STRING LABEL RENDERING PASS
-        // =========================================================================
-        for (int32 i = 0; i < fItemsList.CountItems(); i++) {
-            DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
-            int32 c = i % cols;
-            int32 r = i / cols;
+		// =========================================================================
+		// INDIVIDUAL ICON AND STRING LABEL RENDERING PASS
+		// =========================================================================
+		for (int32 i = 0; i < fItemsList.CountItems(); i++) {
+		    DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
+		    int32 c = i % cols;
+		    int32 r = i / cols;
+		
+		    float x = startX + (c * (itemW + spacingX));
+		    float y = startY + (r * (itemH + spacingY));
+		
+		    if (item->icon) {
+		        SetDrawingMode(B_OP_ALPHA);
+		        // CHANGED: Offset is now -24.0f instead of -16.0f to properly center the 48px wide icon
+		        DrawBitmap(item->icon, BPoint(x + (itemW / 2.0f) - 24.0f, y + 15.0f));
+		    }
+		
+		    SetHighColor(rgb_color{240, 240, 245, 255});
+		    BString truncatedName = item->name;
+		    TruncateString(&truncatedName, B_TRUNCATE_END, itemW - 10.0f);
+		    float textW = StringWidth(truncatedName.String());
+		    
+		    // CHANGED: Pushed text down from y + 80.0f to y + 90.0f to give the 48px tall icon room
+		    DrawString(truncatedName.String(), BPoint(x + (itemW / 2.0f) - (textW / 2.0f), y + 90.0f));
+		}
 
-            float x = startX + (c * (itemW + spacingX));
-            float y = startY + (r * (itemH + spacingY));
-
-            if (item->icon) {
-                SetDrawingMode(B_OP_ALPHA);
-                DrawBitmap(item->icon, BPoint(x + (itemW / 2.0f) - 16.0f, y + 15.0f));
-            }
-
-            SetHighColor(rgb_color{240, 240, 245, 255});
-            BString truncatedName = item->name;
-            TruncateString(&truncatedName, B_TRUNCATE_END, itemW - 10.0f);
-            float textW = StringWidth(truncatedName.String());
-            DrawString(truncatedName.String(), BPoint(x + (itemW / 2.0f) - (textW / 2.0f), y + 80.0f));
-        }
 
         // Dynamically update inner container height tracking with header offset
         int32 colsRecalc = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
@@ -428,6 +430,37 @@ public:
             ResizeTo(Bounds().Width(), targetVirtualHeight);
         }
     }
+    
+
+		virtual void MessageReceived(BMessage* message) {
+		    switch (message->what) {
+		        case B_MOUSE_WHEEL_CHANGED: {
+		            float deltaY = 0.0f;
+		            
+		            // Extract the vertical wheel movement delta
+		            if (message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0.0f) {
+		                // Multiplier to increase scrolling speed (adjust 15.0f to taste)
+		                float scrollSpeedMultiplier = 15.0f; 
+		                float scrollAmount = deltaY * scrollSpeedMultiplier;
+		
+		                // Option A: If your view is hosted directly in a standard BScrollView
+		                if (ScrollBar(B_VERTICAL)) {
+		                    float currentVal = ScrollBar(B_VERTICAL)->Value();
+		                    ScrollBar(B_VERTICAL)->SetValue(currentVal + scrollAmount);
+		                } 
+		                // Option B: If your view handles its own internal drawing offset bounds
+		                else {
+		                    ScrollBy(0.0f, scrollAmount);
+		                }
+		            }
+		            break;
+		        }
+		        default:
+		            // Pass unhandled messages up to the base class
+		            BView::MessageReceived(message);
+		            break;
+		    }
+		}
 
     virtual void MouseDown(BPoint point) {
         float canvasWidth = Bounds().Width();
@@ -2241,7 +2274,6 @@ private:
 };
 
 
-
 // =========================================================================
 // MAIN SDL2 SYSTEM WRAPPER CONTAINER PIPELINE ENTRYPOINT
 // =========================================================================
@@ -2271,12 +2303,15 @@ int main(int argc, char* argv[]) {
     int dockPanelH = 160; 
     int dockPanelX = 0;
     int dockPanelY = screenHeight - dockPanelH;
+    
+
 
     SDL_Window* window = SDL_CreateWindow(
         "Haiku Desktop Taskbar Overlay Component",
         dockPanelX, dockPanelY,
         dockPanelW, dockPanelH,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP
+        //SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP
+        SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS
     );
 
 
@@ -2285,14 +2320,17 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return -1;
     }
-     
+
+
 
     SDL_GLContext glContext = SDL_GL_CreateContext(window);
+
     if (!glContext) {
         SDL_DestroyWindow(window);
         SDL_Quit();
         return -1;
     }
+
     
 
     SDL_GL_SetSwapInterval(1);
@@ -2327,19 +2365,43 @@ int main(int argc, char* argv[]) {
    }
     
 
+
+
     // =========================================================================
     // RENDER-ON-DEMAND EVENT PIPELINE (DROPS CPU TO ~0%)
     // =========================================================================
     uint32 lastRosterScanTime = 0;
     uint32 lastMetricsUpdateTime = 0;
     bool needsRender = true; // Force initial draw pass when booting up
-
+	
     while (appExecuting) {
-        // 1. Put the thread to complete sleep until an OS input event arrives!
-        // Wakes up instantly on movement, or falls through on a 30ms timer heartbeat
-        // to check if clock strings or processor metrics updated.
         if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
             do {
+                // =========================================================================
+                // ANTI-FOCUS HIJACK INTERCEPTION PROTOCOL
+                // =========================================================================
+                if (incomingEventPackage.type == SDL_WINDOWEVENT) {
+                    if (incomingEventPackage.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+                        incomingEventPackage.window.event == SDL_WINDOWEVENT_TAKE_FOCUS) {
+                        
+                        if (be_app && be_app->Lock()) {
+                            int32 windowCount = be_app->CountWindows();
+                            for (int32 i = 0; i < windowCount; i++) {
+                                BWindow* win = be_app->WindowAt(i);
+                                if (win != nullptr && win->Lock()) {
+                                    win->SendBehind(nullptr); // Sink to the bottom
+                                    win->Unlock();
+                                    break;
+                                    
+                                }
+                            }
+                            be_app->Unlock();
+                        }
+                        continue; 
+                    }
+                }
+                // =========================================================================
+
                 if (incomingEventPackage.type == SDL_QUIT) {
                     appExecuting = false;
                 }
@@ -2355,40 +2417,42 @@ int main(int argc, char* argv[]) {
                     int mouseX, mouseY;
                     Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
 
-                    // =========================================================================
-                    // COORDINATE MAPPING FIX: RESTORE FULLSCREEN Y MATRIX INTERACTION
-                    // =========================================================================
-                    // Because our local window sits at the bottom of the monitor, we add the 
-                    // hidden screen offset back to mouseY so our engine's internal checks pass!
-                    int hiddenScreenOffset = screenHeight - 160; 
+                    int hiddenScreenOffset = screenHeight - 165; 
                     int adjustedMouseY = mouseY + hiddenScreenOffset;
-                    // =========================================================================
 
-                    // Forward the adjusted coordinate down to the engine logic
                     desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
 
-                    // UPDATED: Allow both LEFT and RIGHT clicks to pass into our router channels
                     if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
                         if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
                             incomingEventPackage.button.button == SDL_BUTTON_RIGHT) {
                             
-                            // Pass coordinates and the explicit button ID down as the third parameter
                             desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
+                            
+                            // Defensive click-down drop to ensure Apps stays on top
+                            if (be_app && be_app->Lock()) {                            	
+                                int32 windowCount = be_app->CountWindows();
+                                if (windowCount > 0) {
+                                    BWindow* win = be_app->WindowAt(0);
+                                    if (win != nullptr && win->Lock()) {
+                                        win->SendBehind(nullptr);
+                                        win->Unlock();
+                                    }
+                                }
+                                be_app->Unlock();
+                            }
                         }
                     }
                     
-                    needsRender = true; // Mouse moved or clicked -> Schedule a redraw pass!
+                    needsRender = true; 
                 }
-
                 else if (incomingEventPackage.type == SDL_MOUSEWHEEL) {
                     desktopEngine.HandleMouseWheel(incomingEventPackage.wheel.y);
-                    needsRender = true; // Scrolled tracker layout -> Schedule redraw pass
+                    needsRender = true; 
                 }        
             } while (SDL_PollEvent(&incomingEventPackage)); 
         }
 
         uint32 currentTime = SDL_GetTicks();
-
 
         // 2. Rate-limit structural background system updates (Clock & CPU counters)
         if (currentTime - lastMetricsUpdateTime >= 1000 || lastMetricsUpdateTime == 0) {
