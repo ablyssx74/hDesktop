@@ -2567,7 +2567,8 @@ void FetchHaikuMixerVolume() {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA, targetSize, targetSize, 0, GL_BGRA, GL_UNSIGNED_BYTE, haikuBitmap->Bits());
+            // Support Haiku Standard Mesa as well as x512's nebula driver with this update.
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, targetSize, targetSize, 0, GL_BGRA, GL_UNSIGNED_BYTE, haikuBitmap->Bits());
         }
         
         delete haikuBitmap;
@@ -2735,7 +2736,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.7"; 
+    const char* localVersion = "v1.0.8"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
