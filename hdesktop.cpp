@@ -1283,10 +1283,6 @@ public:
         // 1. STEP POSIX TIMING ENGINES AND KERNEL RECORD SAMPLES
         // =========================================================================
         SyncDockWithRunningDeskbarApps(); // Rebuilds fTaskbarWindows using real OS states!
-
-    	UpdateLiveClockTexture();
-    	UpdateGlobalCpuLoadTracker();
-        
         
         UpdateLiveClockTexture();
         UpdateGlobalCpuLoadTracker(); // Pull processor ticks and update our 40-cell buffer array
@@ -1340,123 +1336,170 @@ public:
 
 
         // =========================================================================
-        // 3. TASKBAR-ENABLED DOCK WIDTH GEOMETRY CALCULATIONS
+        // 3. TASKBAR-ENABLED DOCK WIDTH GEOMETRY CALCULATIONS (UNIFIED ZOOM PIPELINE)
         // =========================================================================
         float baseSize = 48.0f;
         float padding = 12.0f;
         
-        // Dynamic Allocation: Base Leaf Menu + Active Desktop File Vectors Count
         size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
-        // Filter out closed window nodes to find how many taskbar icons need to be painted
         size_t activeWindowsCount = 0;
         for (const auto& w : fTaskbarWindows) {
             if (*w.openStateFlag == true) activeWindowsCount++;
         }
 
-        // Total Icon slots required on our dynamic panel layout
         size_t totalIconsCount = baselineLaunchersCount + activeWindowsCount;
 
+        // Configuration variables for the status widgets
+        float clockSectionPadding = 24.0f;
+        float cpuGraphWidth = 60.0f;
+        float separatorGapPadding = 16.0f;
+        float baseTrashSize = 48.0f;
+
+        // Arrays to store real-time calculations for EVERY component
         std::vector<float> dynamicWidths;
         std::vector<float> dynamicScales;
-        float totalDockWidth = 0.0f;
         float maxDockHeight = baseSize;
 
-        for (size_t i = 0; i < totalIconsCount; ++i) {
-            float approximateIconX = (fWidth / 2.0f) - ((totalIconsCount * (baseSize + padding)) / 2.0f) + (i * (baseSize + padding)) + (baseSize / 2.0f);
-            float distanceX = std::abs(fMouseX - approximateIconX);
+        // -------------------------------------------------------------------------
+        // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING
+        // -------------------------------------------------------------------------
+        float totalCalculatedWidth = 0.0f; 
+        
+        for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
+            dynamicWidths.clear();
+            dynamicScales.clear();
+            maxDockHeight = baseSize;
             
-            float scale = 1.0f;
-            if (fMouseY >= (fHeight - 140.0f)) {
-                if (distanceX < 160.0f) {
+            // Start reading layouts from a relative left offset margin
+            float progressiveX = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
+            
+            // 1. Process standard app launchers & active window indicators
+            for (size_t i = 0; i < totalIconsCount; ++i) {
+                float approxCenterX = progressiveX + (baseSize / 2.0f);
+                float distanceX = std::abs(fMouseX - approxCenterX);
+                
+                float scale = 1.0f;
+                if (fMouseY >= (fHeight - 140.0f) && distanceX < 160.0f) {
                     float ratio = distanceX / 160.0f;
                     scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
                 }
+
+                float finalSize = baseSize * scale;
+                dynamicWidths.push_back(finalSize);
+                dynamicScales.push_back(scale);
+                
+                if (finalSize > maxDockHeight) maxDockHeight = finalSize;
+                progressiveX += finalSize + padding;
+            }
+            if (totalIconsCount > 0) progressiveX -= padding; // Clean tail boundary drop
+
+            // Account for the structural native app split divider
+            if (activeWindowsCount > 0) {
+                progressiveX += separatorGapPadding;
             }
 
-            float finalSize = baseSize * scale;
-            dynamicWidths.push_back(finalSize);
-            dynamicScales.push_back(scale);
-            totalDockWidth += finalSize + padding;
-            if (finalSize > maxDockHeight) maxDockHeight = finalSize;
-        }
-        totalDockWidth -= padding;
+            // =========================================================================
+            // 2. PROCESS SYSTEM CLOCK COMPONENT METRICS
+            // =========================================================================
+            if (fClockTexture.id != 0) {
+                progressiveX += clockSectionPadding;
+                
+                float highDpiCompensateFactor = 0.42f;
+                float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;
+                
+                float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
+                float distanceClockX = std::abs(fMouseX - approxClockCenterX);
+                
+                float clockScale = 1.0f;
+                if (fMouseY >= (fHeight - 140.0f) && distanceClockX < 160.0f) {
+                    float ratio = distanceClockX / 160.0f;
+                    clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+                
+                dynamicWidths.push_back(baselineClockLayoutWidth * clockScale);
+                dynamicScales.push_back(clockScale);
+                progressiveX += (baselineClockLayoutWidth * clockScale);
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
+            }
 
-        // Custom segment dividers spacing values
-        float clockSectionPadding = 24.0f;
-        float cpuGraphWidth = 60.0f;
-        float separatorGapPadding = 16.0f; // Sizing space between desktop links and live open apps
-
-        // =========================================================================
-        // UNIFIED PREDICTIVE TRAY GEOMETRY LOOP (FIX FOR RIGHT-EDGE CLIPPING)
-        // =========================================================================
-        // We simulate the exact progressive currentX increments from the render pass
-        // to find the precise real-time width required for the clock, trash, and CPU graph.
-        float baseTrashSize = 48.0f; // Synchronized full scale match!
-        float trashScale = 1.0f;
-        float currentPredictX = 20.0f; 
-        
-        // 1. Accumulate dynamic width of left shortcuts zone
-        currentPredictX += totalDockWidth;
-        if (activeWindowsCount > 0) {
-            currentPredictX += separatorGapPadding;
-        }
-        
-        float traySectionStartX = currentPredictX;
-
-        // 2. Clock layout calculation
-        if (fClockTexture.id != 0) {
-            currentPredictX += clockSectionPadding;
-            currentPredictX += fClockWidth;
-        }
-
-        // 3. Trash magnification math linked to the real rendering path
-        currentPredictX += clockSectionPadding;
-        float approximateTrashX = (fWidth / 2.0f) - ((totalDockWidth + (currentPredictX + (baseTrashSize / 2.0f) - traySectionStartX)) / 2.0f) + currentPredictX + (baseTrashSize / 2.0f);
-        float distanceTrashX = std::abs(fMouseX - approximateTrashX);
-
-        if (fMouseY >= (fHeight - 140.0f)) {
-            if (distanceTrashX < 160.0f) {
+            // =========================================================================
+            // 3. PROCESS HAIKU TRASH CAN COMPONENT METRICS
+            // =========================================================================
+            progressiveX += clockSectionPadding;
+            float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
+            float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+            
+            float trashScale = 1.0f;
+            if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
                 float ratio = distanceTrashX / 160.0f;
                 trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
-        }
-        float dynamicTrashSize = baseTrashSize * trashScale;
-        
-        // Update backplate height constraints if the trash grows larger than the app shortcuts
-        if (dynamicTrashSize > maxDockHeight) {
-            maxDockHeight = dynamicTrashSize;
-        }
-        currentPredictX += dynamicTrashSize;
+            
+            float finalTrashSize = baseTrashSize * trashScale;
+            dynamicWidths.push_back(finalTrashSize);
+            dynamicScales.push_back(trashScale);
+            if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
+            progressiveX += finalTrashSize;
+ 			
+            // =========================================================================
+            // 4. PROCESS GRAPHICAL CPU MONITOR METRICS
+            // =========================================================================
+            progressiveX += clockSectionPadding; // Unified separation margin channel
+            float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
+            float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+            
+            float cpuScale = 1.0f;
+            if (fMouseY >= (fHeight - 140.0f) && distanceCpuX < 160.0f) {
+                float ratio = distanceCpuX / 160.0f;
+                cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+            }
+            
+            float finalCpuWidth = cpuGraphWidth * cpuScale;
+            dynamicWidths.push_back(finalCpuWidth);
+            dynamicScales.push_back(cpuScale);
+            progressiveX += finalCpuWidth;
 
-        // 4. CPU Graph layout calculation
-        currentPredictX += clockSectionPadding;
-        currentPredictX += cpuGraphWidth;
-
-        float finalTrayWidth = currentPredictX - traySectionStartX;
-        float finalPlateWidth = totalDockWidth + finalTrayWidth + clockSectionPadding;
-        if (activeWindowsCount > 0) {
-            finalPlateWidth += separatorGapPadding;
+            // Save converged dimensions to update anchor points on the next pass
+            float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
+            totalCalculatedWidth = progressiveX - leftEdge;
         }
+
+        // -------------------------------------------------------------------------
+        // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
+        // -------------------------------------------------------------------------
+        size_t clockSlotIdx = totalIconsCount;
+        size_t trashSlotIdx = totalIconsCount + 1;
+        size_t cpuSlotIdx   = totalIconsCount + 2;
 
         float dockMarginBottom = 15.0f;
         HaikuRect dockPlate;
-        dockPlate.left = (fWidth / 2.0f) - (finalPlateWidth / 2.0f) - 20.0f;
-        dockPlate.right = (fWidth / 2.0f) + (finalPlateWidth / 2.0f) + 20.0f;
+        float outerPlatePadding = 40.0f; 
+        dockPlate.left = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f) - (outerPlatePadding / 2.0f);
+        dockPlate.right = (fWidth / 2.0f) + (totalCalculatedWidth / 2.0f) + (outerPlatePadding / 2.0f);
         dockPlate.bottom = fHeight - dockMarginBottom;
         dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
 
-        // Lock down the definitive global boundaries for rendering AND click-handling
-        float trashTop = dockPlate.bottom - 10.0f - dynamicTrashSize;
-        fTrashRect.left = dockPlate.left + 20.0f + totalDockWidth;
-        if (activeWindowsCount > 0) {
-            fTrashRect.left += separatorGapPadding;
+        // Lock down definitive trash hitbox using unified layout streams
+        float renderingTrashSize = dynamicWidths[trashSlotIdx];
+        
+        float layoutTrackerX = dockPlate.left + 20.0f;
+        for (size_t idx = 0; idx < totalIconsCount; ++idx) {
+            layoutTrackerX += dynamicWidths[idx] + padding;
         }
-        fTrashRect.left += clockSectionPadding + (fClockTexture.id != 0 ? fClockWidth + clockSectionPadding : 0);
-        fTrashRect.right = fTrashRect.left + dynamicTrashSize;
-        fTrashRect.top = trashTop;
+        if (totalIconsCount > 0) layoutTrackerX -= padding;
+        if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
+        if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
+        
+        layoutTrackerX += clockSectionPadding;
+        fTrashRect.left = layoutTrackerX;
+        fTrashRect.right = fTrashRect.left + renderingTrashSize;
+        fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
         fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
+        // Render backplate container shelf
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         float cornerRadius = 15.0f;
         DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, 0.4f); 
@@ -1464,11 +1507,10 @@ public:
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
 
-
-
         // =========================================================================
         // 4. RENDER DOCK BACKPLATE SHELF
         // =========================================================================
+
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);        
@@ -1534,13 +1576,20 @@ public:
 		// STEP 2: IF RUNNING WINDOWS EXIST, DRAW A STRUCTURAL TASKBAR VERTICAL DIVIDER LINE
 		if (activeWindowsCount > 0) {
 		    currentX += (separatorGapPadding / 2.0f) - padding;
-		    glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f); // Matte Charcoal split divider
+		    
+		    // FIX: Snap the line to a clean whole pixel boundary to prevent subpixel bleeding
+		    float snappedX = std::floor(currentX + 0.5f); 
+
+		    glLineWidth(2.0f); 
+		    glColor4f(0.15f, 0.15f, 0.15f, 0.5f); // Matte Charcoal split divider
 		    glBegin(GL_LINES);
-		        glVertex2f(currentX, dockPlate.top + 6.0f);
-		        glVertex2f(currentX, dockPlate.bottom - 6.0f);
+		        glVertex2f(snappedX, dockPlate.top + 6.0f);
+		        glVertex2f(snappedX, dockPlate.bottom - 6.0f);
 		    glEnd();
+		    
 		    currentX += (separatorGapPadding / 2.0f) + padding;
 		}
+
 		
 		// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
@@ -1671,16 +1720,34 @@ public:
 
 
         // =========================================================================
-        // 6. DRAW SYSTEM CLOCK STATUS TEXT
+        // 6. DRAW SYSTEM CLOCK STATUS TEXT (MATHEMATICALLY LOCKED SYMMETRY)
         // =========================================================================
         if (fClockTexture.id != 0) {
-            currentX += clockSectionPadding - padding;
-            float plateHeight = dockPlate.bottom - dockPlate.top;
-            float clockY = dockPlate.top + (plateHeight / 2.0f) - (fClockHeight / 2.0f);
-            HaikuRect clockB = { currentX, clockY, currentX + static_cast<float>(fClockWidth), clockY + static_cast<float>(fClockHeight) };
+            float clockScale   = dynamicScales[clockSlotIdx];
+            float dynamicClockW = dynamicWidths[clockSlotIdx]; 
+            float highDpiCompensateFactor = 0.42f; 
+            float dynamicClockH = static_cast<float>(fClockHeight) * highDpiCompensateFactor * clockScale;
+            
+            // Left Clock Divider Line
+            float lineLeftSnappedX = std::floor(currentX + 0.5f);
+            glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
+            glBegin(GL_LINES);
+                glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
+                glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
+            glEnd();
+
+            currentX += clockSectionPadding;
+            float clockY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicClockH / 2.0f));
+            
+            HaikuRect clockB = { 
+                std::floor(currentX + 0.5f), 
+                std::floor(clockY + 0.5f), 
+                std::floor(currentX + dynamicClockW + 0.5f), 
+                std::floor(clockY + dynamicClockH + 0.5f) 
+            };
             
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fClockTexture.id);
-            glColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
             glBegin(GL_QUADS);
                 glTexCoord2f(0.0f, 0.0f); glVertex2f(clockB.left, clockB.top);
                 glTexCoord2f(1.0f, 0.0f); glVertex2f(clockB.right, clockB.top);
@@ -1688,21 +1755,13 @@ public:
                 glTexCoord2f(0.0f, 1.0f); glVertex2f(clockB.left, clockB.bottom);
             glEnd();
             glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-            // Vertical 1-pixel separator line splitting clock from icon lists
-            glLineWidth(1.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.3f);
-            glBegin(GL_LINES);
-                glVertex2f(currentX - (clockSectionPadding / 2.0f), dockPlate.top + 8.0f);
-                glVertex2f(currentX - (clockSectionPadding / 2.0f), dockPlate.bottom - 8.0f);
-            glEnd();
-            currentX += fClockWidth;
+            
+            currentX += dynamicClockW;
         }
-        
+
         // =========================================================================
         // 6C. DRAW HAIKU TRASH BIN (RIGHT OF THE CLOCK)
         // =========================================================================
-        // THROTTLED FILE SYSTEM SCANNER: Automatically re-query live node twice per second
         uint32 currentTicks = SDL_GetTicks();
         if (currentTicks - fLastTrashCheckTime > 500) { 
             fLastTrashCheckTime = currentTicks;
@@ -1712,8 +1771,26 @@ public:
             }
             fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
         }
+		
+        // Left Trash Divider Line (Centered between Clock and Trash)
+        // float lineTrashLeftSnappedX = std::floor(currentX + (clockSectionPadding / 2.0f) + 0.5f);
+        glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
+        /*
+        glBegin(GL_LINES);
+            glVertex2f(lineTrashLeftSnappedX, dockPlate.top + 8.0f);
+            glVertex2f(lineTrashLeftSnappedX, dockPlate.bottom - 8.0f);
+        glEnd();
+		*/
+        currentX += clockSectionPadding;
+		
+		
+        // Pin hitbox geometry directly to our current track pointer
+        renderingTrashSize = dynamicWidths[trashSlotIdx];
+        fTrashRect.left   = currentX;
+        fTrashRect.right  = fTrashRect.left + renderingTrashSize;
+        fTrashRect.top    = dockPlate.bottom - 10.0f - renderingTrashSize;
+        fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
-        // RENDER PASS: Clean drawing via locked rect.
         if (fHaikuTrashIcon.id != 0) {
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fHaikuTrashIcon.id);
             glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
@@ -1726,112 +1803,106 @@ public:
             glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
         }
 
-        // =========================================================================
-        // MATCHING HOVER PROXIMITY TEST AND DIRECT GUIDANCE TEXT LAYER
-        // =========================================================================
         if (fTrashRect.Contains(fMouseX, fMouseY)) {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            // 1. Re-render texture asset ONCE upon hover entry to protect frame rates
             if (!fTrashTextGenerated) {
-                if (fTrashTooltipTexId != 0) {
-                    glDeleteTextures(1, &fTrashTooltipTexId);
-                    fTrashTooltipTexId = 0;
-                }
-                // Fetch high-fidelity text string texture using your exact internal function
-                // We extract the underlying '.id' from whatever layout object type it returns!
+                if (fTrashTooltipTexId != 0) { glDeleteTextures(1, &fTrashTooltipTexId); fTrashTooltipTexId = 0; }
                 auto generatedTex = RenderTextToTexture("Right click to empty Trash", &fTrashTooltipW, &fTrashTooltipH);
                 fTrashTooltipTexId = generatedTex.id; 
                 fTrashTextGenerated = true; 
             }
 
-            // 2. Position a miniature floating background tooltip box right above the Trash node
             float tooltipW = static_cast<float>(fTrashTooltipW) + 12.0f;
             float tooltipH = static_cast<float>(fTrashTooltipH) + 8.0f;
             float tooltipLeft = fTrashRect.left + ((fTrashRect.right - fTrashRect.left) / 2.0f) - (tooltipW / 2.0f);
-            float tooltipBottom = fTrashRect.top - 8.0f; // Symmetrical 8-pixel floating layout gap
+            
+            // FIX: Bring the box lower down closer to the Trash icon edge (changed from -8.0f to -1.0f)
+            float tooltipBottom = fTrashRect.top - 1.0f; 
 
-            HaikuRect tooltipBounds = { 
-                tooltipLeft, 
-                tooltipBottom - tooltipH, 
-                tooltipLeft + tooltipW, 
-                tooltipBottom 
-            };
-
-            // Draw translucent charcoal indicator plate backing matching the CPU widget (75% opacity)
+            HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
             DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
 
-            // Draw crisp perimeter border outline around tooltip card
             glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
             glBegin(GL_LINE_LOOP);
                 glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
                 glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
             glEnd();
 
-            // 3. Map the font text layer directly inside the card (Render clean white lettering)
             if (fTrashTooltipTexId != 0) {
-                glEnable(GL_TEXTURE_2D);
-                glBindTexture(GL_TEXTURE_2D, fTrashTooltipTexId);
-                glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // High-contrast solid white print
-
-                float textX = tooltipBounds.left + 6.0f;
-                float textY = tooltipBounds.top + 4.0f;
-
+                glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fTrashTooltipTexId);
+                
+                // =========================================================================
+                // FIX: FORCE NEON GREEN COLOR BY OVERRIDING BLACK TEXTURE RGB CHANNELS
+                // =========================================================================
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
+                
+                // Set the blending color filter to match your illuminated matrix neon green
+                glColor4f(0.2f, 1.0f, 0.2f, 1.0f); 
+                // =========================================================================
+                
+                float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
                 glBegin(GL_QUADS);
                     glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
                     glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fTrashTooltipW, textY);
                     glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fTrashTooltipW, textY + fTrashTooltipH);
                     glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fTrashTooltipH);
                 glEnd();
-
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glDisable(GL_TEXTURE_2D);
+                
+                // =========================================================================
+                // FIX: Cleanly reset texture environment mode back to standard modulation
+                // =========================================================================
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
+                // =========================================================================
             }
-            glDisable(GL_BLEND);
+
         } else {
-            // Reset state latch toggle when mouse departs bounds so it can regenerate text when needed
             fTrashTextGenerated = false;
         }
 
-        // 1-pixel divider splitting the clock from our trash segment
-        glLineWidth(1.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.3f);
-        glBegin(GL_LINES);
-            glVertex2f(fTrashRect.left - (clockSectionPadding / 2.0f), dockPlate.top + 8.0f);
-            glVertex2f(fTrashRect.left - (clockSectionPadding / 2.0f), dockPlate.bottom - 8.0f);
-        glEnd();
-        
-        // Update currentX using the right edge of the trash bounds to safely feed the CPU graph position
         currentX = fTrashRect.right;
 
-
-
-
+        // =========================================================================
+        // 6B. DRAW GRAPHICAL GREEN LED HISTORICAL CPU MONITOR
+        // =========================================================================
         
-
-        // =========================================================================
-        // 6B. DRAW GRAPHICAL GREEN LED HISTORICAL CPU MONITOR & HOVER TOOLTIP
-        // =========================================================================
+        // Line 3: Right Trash / Left CPU Divider
+        // Drawn directly on currentX so it balances perfectly with the clock dividers
+        //float cpuLineLeftSnappedX = std::floor(currentX + 0.5f);
+        glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
+        /*
+        glBegin(GL_LINES);
+            glVertex2f(cpuLineLeftSnappedX, dockPlate.top + 8.0f);
+            glVertex2f(cpuLineLeftSnappedX, dockPlate.bottom - 8.0f);
+        glEnd();
+		*/
+        // Consume the left cushion channel completely to move tracking to the chart border
+        
         currentX += clockSectionPadding;
-        float graphHeight = 28.0f;
-        float graphTop = dockPlate.top + ((dockPlate.bottom - dockPlate.top) / 2.0f) - (graphHeight / 2.0f);
-        HaikuRect cpuGraphBounds = { currentX, graphTop, currentX + cpuGraphWidth, graphTop + graphHeight };
+        
+        float cpuScale          = dynamicScales[cpuSlotIdx];
+        float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
+        float dynamicGraphHeight = 28.0f * cpuScale; 
+        float graphTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicGraphHeight / 2.0f));
+        
+        HaikuRect cpuGraphBounds = { currentX, graphTop, currentX + dynamicGraphWidth, graphTop + dynamicGraphHeight };
 
         // 1. Draw solid dark background casing container
         DrawFilledRect(cpuGraphBounds, 0.05f, 0.10f, 0.05f, 0.9f); 
         
-        // 2. Loop through the historical data array to paint individual glowing LED columns
-        float columnWidth = cpuGraphWidth / 40.0f;
+        // 2. Loop through the historical data array to paint individual columns
+        float columnWidth = dynamicGraphWidth / 40.0f;
         glBegin(GL_QUADS);
         for (int i = 0; i < 40; ++i) {
             int bufferIndex = (fCpuHistoryIndex + i) % 40;
             float activeLoadFactor = fCpuHistory[bufferIndex];
-            
             float barLeft = cpuGraphBounds.left + (i * columnWidth) + 0.5f;
             float barRight = barLeft + columnWidth - 0.5f;
-            float barTop = cpuGraphBounds.bottom - (activeLoadFactor * graphHeight);
+            float barTop = cpuGraphBounds.bottom - (activeLoadFactor * dynamicGraphHeight);
             
-            // Set bright glowing Green LED columns
             glColor4f(0.2f, 0.95f, 0.2f, 0.85f);
             glVertex2f(barLeft,  barTop);
             glVertex2f(barRight, barTop);
@@ -1847,82 +1918,84 @@ public:
             glVertex2f(cpuGraphBounds.right, cpuGraphBounds.bottom); glVertex2f(cpuGraphBounds.left, cpuGraphBounds.bottom);
         glEnd();
 
-        // Divider splitting the clock from our graph panel segment
-        glBegin(GL_LINES);
-            glVertex2f(currentX - (clockSectionPadding / 2.0f), dockPlate.top + 8.0f);
-            glVertex2f(currentX - (clockSectionPadding / 2.0f), dockPlate.bottom - 8.0f);
-        glEnd();
-
         // =========================================================================
         // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
         // =========================================================================
         if (cpuGraphBounds.Contains(fMouseX, fMouseY)) {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-            // 1. Fetch the absolute latest percentage stored in our history queue
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             int latestIndex = (fCpuHistoryIndex == 0) ? 39 : fCpuHistoryIndex - 1;
             int cpuPercent = static_cast<int>(fCpuHistory[latestIndex] * 100.0f);
 
-            // Format a clean label reading text (e.g., "CPU: 42%")
-            char textBuffer[32];
-            snprintf(textBuffer, sizeof(textBuffer), "CPU: %d%%", cpuPercent);
+            char textBuffer[32]; snprintf(textBuffer, sizeof(textBuffer), "CPU: %d%%", cpuPercent);
             std::string currentTooltipStr(textBuffer);
 
-            // 2. Optimization check: Only rebuild text asset if the value changed
-            if (currentTooltipStr != fLastCpuTooltipStr) {
-                if (fCpuTooltipTex.id != 0) {
-                    glDeleteTextures(1, &fCpuTooltipTex.id);
-                    fCpuTooltipTex.id = 0;
-                }
+            if (currentTooltipStr != fLastCpuTooltipStr) { 
+                if (fCpuTooltipTex.id != 0) { 
+                    glDeleteTextures(1, &fCpuTooltipTex.id); 
+                    fCpuTooltipTex.id = 0; 
+                } 
                 fLastCpuTooltipStr = currentTooltipStr;
                 fCpuTooltipTex = RenderTextToTexture(fLastCpuTooltipStr.c_str(), &fCpuTooltipW, &fCpuTooltipH);
             }
+                                 
 
-            // 3. Position a miniature floating background tooltip box right above the LED display
-            float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f;
+            float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f; 
             float tooltipH = static_cast<float>(fCpuTooltipH) + 8.0f;
             float tooltipLeft = cpuGraphBounds.left + (cpuGraphBounds.Width() / 2.0f) - (tooltipW / 2.0f);
-            float tooltipBottom = cpuGraphBounds.top - 8.0f; // 8-pixel floating layout gap
+            
+            // FIX: Brought the box lower down closer to the graph frame edge (changed from -8.0f to -1.0f)
+            float tooltipBottom = cpuGraphBounds.top - 1.0f; 
 
-            HaikuRect tooltipBounds = { 
-                tooltipLeft, 
-                tooltipBottom - tooltipH, 
-                tooltipLeft + tooltipW, 
-                tooltipBottom 
-            };
-
-            // Draw translucent charcoal indicator plate backing
-            DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f); // 75% dark matte glass
-
-            // Draw crisp perimeter border outline around tooltip card
+            HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
+            DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
+            
             glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
             glBegin(GL_LINE_LOOP);
                 glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
                 glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
             glEnd();
 
-            // 4. Map the font text layer directly inside the card (Render clean white lettering)
             if (fCpuTooltipTex.id != 0) {
-                glEnable(GL_TEXTURE_2D);
-                glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
-                glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // High-contrast solid white print
-
-                float textX = tooltipBounds.left + 6.0f;
-                float textY = tooltipBounds.top + 4.0f;
-
+                glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
+                
+                // =========================================================================
+                // FIX: FORCE NEON GREEN COLOR BY OVERRIDING BLACK TEXTURE RGB CHANNELS
+                // =========================================================================
+                // Tell the GPU to replace the texture's color channels with our glColor4f selection,
+                // while preserving the texture's native anti-aliased font alpha masking channel.
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
+                
+                // Set the blending color filter to an illuminated matrix neon green
+                glColor4f(0.2f, 1.0f, 0.2f, 1.0f); 
+                // =========================================================================
+                
+                float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
                 glBegin(GL_QUADS);
                     glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
                     glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fCpuTooltipW, textY);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fCpuTooltipW, textY + fCpuTooltipH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fCpuTooltipH);
+                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fCpuTooltipW, textY + fTrashTooltipH);
+                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fTrashTooltipH);
                 glEnd();
-
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glDisable(GL_TEXTURE_2D);
+                
+                // =========================================================================
+                // FIX: Cleanly reset texture environment mode back to standard modulation
+                // so your system app launchers don't inherit the color replacement flags!
+                // =========================================================================
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
+                // =========================================================================
             }
         }
-        glDisable(GL_BLEND);       
+        
+        glDisable(GL_BLEND);
+
+   
+        
+        // 4. Update the tracker pointer past the cpu monitor graph layout bounds area cleanly
+        currentX += dynamicGraphWidth;
+        currentX += clockSectionPadding;
 
     } // Exact functional closing brace of RenderFrame() method!
 
@@ -2013,24 +2086,19 @@ private:
 
 
     void UpdateLiveClockTexture() {
-        // 1. Fetch current local system hour and minute metrics (POSIX global functions)
         time_t rawTime = ::time(nullptr);
         struct tm* timeInfo = ::localtime(&rawTime);
         if (!timeInfo) return;
 
-        // 2. Format a traditional AM/PM time display string
-        char timeBuffer[32];
+        char timeBuffer[32]; 
         ::strftime(timeBuffer, sizeof(timeBuffer), "%I:%M %p", timeInfo);
         std::string currentTimeStr(timeBuffer);
 
-        // Strip leading zeros for a cleaner, native look (e.g., "05:30" -> "5:30")
         if (!currentTimeStr.empty() && currentTimeStr[0] == '0') {
             currentTimeStr.erase(0, 1);
         }
 
-        // 3. Performance Check: Only rebuild the texture when a minute ticks over!
         if (currentTimeStr != fLastClockTimeString) {
-            // Delete the old text texture handle from GPU VRAM if it exists
             if (fClockTexture.id != 0) {
                 glDeleteTextures(1, &fClockTexture.id);
                 fClockTexture.id = 0;
@@ -2038,10 +2106,14 @@ private:
 
             fLastClockTimeString = currentTimeStr;
             
-            // Rasterize the fresh time stamp into an anti-aliased OpenGL text map
-            fClockTexture = RenderTextToTexture(fLastClockTimeString.c_str(), &fClockWidth, &fClockHeight);
+            // FIX: Pass 32.0f to rasterize a high-res text canvas sheet once a minute
+            fClockTexture = RenderTextToTexture(fLastClockTimeString.c_str(), &fClockWidth, &fClockHeight, 32.0f);
         }
     }
+
+
+
+
 
 
     void DrawFilledRoundedRect(const HaikuRect& rect, float radius, float r, float g, float b, float a) {
@@ -2078,13 +2150,22 @@ private:
         }
     }
 
-    HaikuTexture RenderTextToTexture(const char* labelText, int* outWidth, int* outHeight) {
+    HaikuTexture RenderTextToTexture(const char* labelText, int* outWidth, int* outHeight, float targetFontSize = -1.0f) {
         HaikuTexture textTex;
         
-        // 1. Fetch system font preferences and text metrics
-        float stringPixelWidth = be_plain_font->StringWidth(labelText);
+        // 1. Setup a dynamic local font object to override point sizes cleanly
+        BFont localFont(be_plain_font);
+        if (targetFontSize > 0.0f) {
+            localFont.SetSize(targetFontSize);
+        } else {
+            // Default baseline fallback if no font size is explicitly provided
+            localFont.SetSize(12.0f); 
+        }
+        
+        // Fetch font preferences and text metrics using our dynamic font instance
+        float stringPixelWidth = localFont.StringWidth(labelText);
         font_height fontMetrics;
-        be_plain_font->GetHeight(&fontMetrics);
+        localFont.GetHeight(&fontMetrics);
         float fontTotalHeight = fontMetrics.ascent + fontMetrics.descent + fontMetrics.leading;
 
         int bitmapW = (int)(stringPixelWidth + 6.0f);
@@ -2099,27 +2180,22 @@ private:
         BRect drawingBounds(0, 0, bitmapW - 1, bitmapH - 1);
         BBitmap* textBitmap = new BBitmap(drawingBounds, B_RGBA32, true);
         
-        // Explicitly clear the raw bits in memory to 0 (fully transparent black: 0x00000000)
-        // This ensures absolutely zero background artifacts are left behind before rendering!
         memset(textBitmap->Bits(), 0, textBitmap->BitsLength());
 
         BView* drawTarget = new BView(drawingBounds, "text_raster_view", B_FOLLOW_NONE, B_WILL_DRAW);
         textBitmap->AddChild(drawTarget);
 
         if (textBitmap->Lock()) {
-            // HighColor is our text color (Crisp White)
-            drawTarget->SetHighColor(255, 255, 255, 255); 
-            
-            // LowColor is our transparent background color (Alpha = 0)
+            // FIX: Rasterize text as crisp solid BLACK to match dock tray styling.
+            // This prevents sub-pixel anti-aliasing color bleeding in OpenGL.
+            drawTarget->SetHighColor(0, 0, 0, 255); 
             drawTarget->SetLowColor(0, 0, 0, 0); 
             
-            // Set drawing mode to support alpha blending overlays
             drawTarget->SetDrawingMode(B_OP_ALPHA);
             drawTarget->SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_COMPOSITE);
             
-            drawTarget->SetFont(be_plain_font);
+            drawTarget->SetFont(&localFont); // Use our custom-sized font instance
             
-            // Draw text aligned with the baseline metrics
             drawTarget->DrawString(labelText, BPoint(3.0f, fontMetrics.ascent + 2.0f));
             drawTarget->Sync(); 
             textBitmap->Unlock();
@@ -2134,7 +2210,6 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        // Upload using GL_BGRA matching native Little-Endian memory layout
         glTexImage2D(
             GL_TEXTURE_2D, 0, GL_RGBA8, bitmapW, bitmapH, 0, 
             GL_BGRA, GL_UNSIGNED_BYTE, textBitmap->Bits()
@@ -2143,6 +2218,7 @@ private:
         delete textBitmap; 
         return textTex;
     }
+
 
 
 
@@ -2392,7 +2468,6 @@ int main(int argc, char* argv[]) {
                                     win->SendBehind(nullptr); // Sink to the bottom
                                     win->Unlock();
                                     break;
-                                    
                                 }
                             }
                             be_app->Unlock();
@@ -2452,30 +2527,105 @@ int main(int argc, char* argv[]) {
             } while (SDL_PollEvent(&incomingEventPackage)); 
         }
 
+        // =========================================================================
+        // NATIVE HAIKU BOUNDARY ESCAPE SAFEGUARD (SDL2 FIX)
+        // =========================================================================
+        int localMouseX = 0;
+        int localMouseY = 0;
+        uint32 nativeButtons = 0;
+        bool cursorIsInsideDock = false;
+
+        // Query Haiku's native app_server directly to sidestep the SDL2 global bug
+        if (be_app && be_app->Lock()) {
+            int32 windowCount = be_app->CountWindows();
+            if (windowCount > 0) {
+                // Grab the first BWindow (which belongs to your SDL instance)
+                BWindow* nativeWin = be_app->WindowAt(0);
+                if (nativeWin && nativeWin->Lock()) {
+                    // Grab its primary container view
+                    BView* mainView = nativeWin->ChildAt(0); 
+                    if (mainView) {
+                        BPoint localPoint;
+                        // GetMouse retrieves layout-relative coordinates perfectly 
+                        // even if another non-desktop Haiku window steals focus!
+                        mainView->GetMouse(&localPoint, &nativeButtons, false);
+                        
+                        localMouseX = static_cast<int>(localPoint.x);
+                        localMouseY = static_cast<int>(localPoint.y);
+                        
+                        // Check local bounds (0 to Width, 0 to Height)
+                        cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW &&
+                                              localMouseY >= 0 && localMouseY < dockPanelH);
+                    }
+                    nativeWin->Unlock();
+                }
+            }
+            be_app->Unlock();
+        }
+
+        // =========================================================================
+        // CPU-OPTIMIZED RENDER INJECTION
+        // =========================================================================
+        static int lastSentX = -1;
+        static int lastSentY = -1;
+        static uint32 lastSentButtons = 0;
+
+        int hiddenScreenOffset = screenHeight - 165; 
+        int adjustedMouseY = localMouseY + hiddenScreenOffset;
+
+        if (!cursorIsInsideDock) {
+            // Only fire the exit collapse state ONCE when leaving boundaries
+            if (lastSentX != -1 || lastSentY != -1) {
+                desktopEngine.HandleMouseInput(localMouseX, adjustedMouseY, 0);
+                needsRender = true;
+                
+                // Set markers to rest state
+                lastSentX = -1;
+                lastSentY = -1;
+                lastSentButtons = 0;
+            }
+        } else {
+            // Check if mouse actually moved or clicked inside the dock boundaries
+            // (Note: If your dock uses an active timer animation loop to smooth resize,
+            // also add '|| desktopEngine.IsAnimating()' to this conditional statement)
+            if (localMouseX != lastSentX || adjustedMouseY != lastSentY || nativeButtons != lastSentButtons) {
+                desktopEngine.HandleMouseInput(localMouseX, adjustedMouseY, nativeButtons);
+                needsRender = true;
+
+                lastSentX = localMouseX;
+                lastSentY = adjustedMouseY;
+                lastSentButtons = nativeButtons;
+            }
+        }
+        // =========================================================================
+
+
+
+
+
         uint32 currentTime = SDL_GetTicks();
 
         // 2. Rate-limit structural background system updates (Clock & CPU counters)
         if (currentTime - lastMetricsUpdateTime >= 1000 || lastMetricsUpdateTime == 0) {
-            // Your clock changes once a minute and CPU changes once a second. 
-            // Running this once per second is more than enough.
             lastMetricsUpdateTime = currentTime;
-            needsRender = true; // Tell engine to paint the new clock/graph values
+            needsRender = true; 
         }
 
         // 3. Rate-limit your native Haiku team roster process loop
         if (currentTime - lastRosterScanTime >= 400 || lastRosterScanTime == 0) {
             desktopEngine.SyncDockWithRunningDeskbarApps();
             lastRosterScanTime = currentTime;
-            needsRender = true; // App opened/closed -> Schedule layout recalculation redraw
+            needsRender = true; 
         }
 
         // 4. ONLY EXECUTE GRAPHICS CALCULATIONS IF SOMETHING ACTUALLY CHANGED!
         if (needsRender) {
             desktopEngine.RenderFrame();
             SDL_GL_SwapWindow(window);
-            needsRender = false; // Reset draw trigger flag cleanly
+            needsRender = false; 
         }
     }
+
 
     // Explicit Context Resource Destruction sequence
     std::cout << "[System Terminal] Closing hDesktop context cleanly." << std::endl;
