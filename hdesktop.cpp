@@ -994,6 +994,7 @@ public:
 
    
 	void HandleMouseClick(int x, int y, int button) {
+		
 	    // Sync global mouse variables to match click coordinates
 	    fMouseX = x; 
 	    fMouseY = y;
@@ -1428,12 +1429,12 @@ public:
 	            }
 	        }
 	        fShowMainMenu = false;
-	
+
 	        if (button == SDL_BUTTON_LEFT) {
 	            std::system("/boot/system/Tracker /boot/trash &");
 	            return;
 	        }
-	        else if (button == SDL_BUTTON_RIGHT) {
+	        else if (button == SDL_BUTTON_MIDDLE ) {
 	            std::system("trash --empty &"); 
 	            fLastTrashCheckTime = 0; 
 	            return;
@@ -2093,7 +2094,7 @@ public:
 
             if (!fTrashTextGenerated) {
                 if (fTrashTooltipTexId != 0) { glDeleteTextures(1, &fTrashTooltipTexId); fTrashTooltipTexId = 0; }
-                auto generatedTex = RenderTextToTexture("Right click to empty Trash", &fTrashTooltipW, &fTrashTooltipH);
+                auto generatedTex = RenderTextToTexture("Middle click to empty Trash", &fTrashTooltipW, &fTrashTooltipH);
                 fTrashTooltipTexId = generatedTex.id; 
                 fTrashTextGenerated = true; 
             }
@@ -2823,7 +2824,10 @@ int main(int argc, char* argv[]) {
 
     // Adjusted base speed parameter (now scaled against real seconds)
     float baseAnimationSpeed = 12.0f; 
-
+    int localMouseX = 0;
+    int localMouseY = 0;
+    uint32 nativeButtons = 0;
+    bool cursorIsInsideDock = false;
 	
     while (appExecuting) {
         if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
@@ -2860,44 +2864,54 @@ int main(int argc, char* argv[]) {
                         appExecuting = false;
                     }
                 }
-                else if (incomingEventPackage.type == SDL_MOUSEMOTION || 
-                         incomingEventPackage.type == SDL_MOUSEBUTTONDOWN ||
-                         incomingEventPackage.type == SDL_MOUSEBUTTONUP) {
-                    
-                    int mouseX, mouseY;
-                    Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
+		            else if (incomingEventPackage.type == SDL_MOUSEMOTION || 
+				         incomingEventPackage.type == SDL_MOUSEBUTTONDOWN ||
+				         incomingEventPackage.type == SDL_MOUSEBUTTONUP) {
+				    
+				    int mouseX, mouseY;
+				    Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
+				
+				    // =========================================================================
+				    // BUGFIX FIX: BLOCK ENGINE CLICKS/HOVERS IF THE DOCK IS HIDDEN
+				    // =========================================================================
+				    // If hidden, only pass mouse input if the pointer is within the active sensor strip bounds.
+				    if (dockState == STATE_HIDDEN && !cursorIsInsideDock) {
+				        // Drop the event! Do not feed it to desktopEngine.
+				        needsRender = true;
+				        continue;
+				    }
+				    // =========================================================================
+				
+				    int hiddenScreenOffset = screenHeight - 165; 
+				    int adjustedMouseY = mouseY + hiddenScreenOffset;
+				
+				    desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
+				
+				    if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
+				        if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
+				            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
+				            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
+				            
+				            desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
+				            
+				            // Defensive click-down drop to ensure Apps stays on top
+				            if (be_app && be_app->Lock()) {                            	
+				                int32 windowCount = be_app->CountWindows();
+				                if (windowCount > 0) {
+				                    BWindow* win = be_app->WindowAt(0);
+				                    if (win != nullptr && win->Lock()) {
+				                        win->SendBehind(nullptr);
+				                        win->Unlock();
+				                    }
+				                }
+				                be_app->Unlock();
+				            }
+				        }
+				    }
+				
+				    needsRender = true; 
+				}
 
-                    int hiddenScreenOffset = screenHeight - 165; 
-                    int adjustedMouseY = mouseY + hiddenScreenOffset;
-
-                    desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
-
-                    if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
-                        // FIX: Added SDL_BUTTON_MIDDLE so scroll-wheel clicks pass straight down to the engine
-                        if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
-                            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
-                            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
-                            
-                            desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
-                            
-                            // Defensive click-down drop to ensure Apps stays on top
-                            if (be_app && be_app->Lock()) {                            	
-                                int32 windowCount = be_app->CountWindows();
-                                if (windowCount > 0) {
-                                    BWindow* win = be_app->WindowAt(0);
-                                    if (win != nullptr && win->Lock()) {
-                                        win->SendBehind(nullptr);
-                                        win->Unlock();
-                                    }
-                                }
-                                be_app->Unlock();
-                            }
-                        }
-                    }
-                
-                    
-                    needsRender = true; 
-                }
                 else if (incomingEventPackage.type == SDL_MOUSEWHEEL) {
                     desktopEngine.HandleMouseWheel(incomingEventPackage.wheel.y);
                     needsRender = true; 
@@ -2907,11 +2921,7 @@ int main(int argc, char* argv[]) {
 
         // =========================================================================
         // NATIVE HAIKU BOUNDARY & INTERNAL SLIDE TRIGGER LOGIC (STAGE 3 - FIXED)
-        // =========================================================================
-        int localMouseX = 0;
-        int localMouseY = 0;
-        uint32 nativeButtons = 0;
-        bool cursorIsInsideDock = false;
+
 
         if (be_app && be_app->Lock()) {
             int32 windowCount = be_app->CountWindows();
