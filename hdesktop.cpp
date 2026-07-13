@@ -47,6 +47,12 @@
 #include <MediaNode.h>
 #include <ParameterWeb.h>
 #include <CheckBox.h>
+#include <NodeMonitor.h>
+
+// Custom SDL Event definition
+enum {
+    SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1
+};
 
 
 class HaikuAppDrawerWindow; 
@@ -271,7 +277,7 @@ public:
 	    // 1. Temporary storage to hold items before sorting them
 	    std::vector<DrawerItem*> temporarySortedVector;
 	
-	    const char* paths[] = { "/boot/system/apps", "/boot/system/preferences" };
+	    const char* paths[] = { "/boot/system/apps", "/boot/system/demos", "/boot/system/preferences" };
 	    for (int p = 0; p < 2; p++) {
 	        BDirectory dir(paths[p]);
 	        if (dir.InitCheck() != B_OK) continue;
@@ -856,7 +862,7 @@ public:
 
         fHaikuMenuIcon = LoadIconFromNode("/boot/system/apps/AboutSystem", 128);
         fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
-        
+
         BString capturedWallpaper = GetActiveHaikuWallpaperPath();
         fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
 
@@ -883,6 +889,23 @@ public:
 
 
     } // End of complete class constructor
+
+
+
+	void ReloadWallpaperBackground() {
+	    std::cout << "[Engine] Reloading wallpaper graphics assets..." << std::endl;
+	
+	    // Use the inner integer identifier field for the OpenGL cleanup
+	    if (fWallpaperTexture.id != 0) {
+	        glDeleteTextures(1, &fWallpaperTexture.id);
+	        fWallpaperTexture.id = 0;
+	    }
+	
+	    BString capturedWallpaper = GetActiveHaikuWallpaperPath();
+	    std::cout << "[Engine] Detected new wallpaper target: " << capturedWallpaper.String() << std::endl;
+	
+	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
+	}
 
 
     void HandleMouseWheel(int wheelStepY) {
@@ -2723,6 +2746,60 @@ public:
 };
 
 
+class WallpaperWatcher : public BHandler {
+private:
+    node_ref fDesktopNodeRef;
+
+public:
+    WallpaperWatcher() : BHandler("WallpaperWatcher") {
+        BPath desktopPath;
+        if (find_directory(B_DESKTOP_DIRECTORY, &desktopPath) == B_OK) {
+            BNode desktopNode(desktopPath.Path());
+            if (desktopNode.InitCheck() == B_OK) {
+                // Get the unique node reference identifiers
+                desktopNode.GetNodeRef(&fDesktopNodeRef);
+                
+                // Start watching for any attribute changes on the desktop directory node
+                if (be_app && be_app->Lock()) {
+                    be_app->AddHandler(this);
+                    watch_node(&fDesktopNodeRef, B_WATCH_ATTR, this);
+                    be_app->Unlock();
+                }
+            }
+        }
+    }
+
+    virtual ~WallpaperWatcher() {
+        // Safely unregister monitoring on deletion
+        stop_watching(this);
+        if (be_app && be_app->Lock()) {
+            be_app->RemoveHandler(this);
+            be_app->Unlock();
+        }
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        if (message->what == B_NODE_MONITOR) {
+            int32 opcode;
+            if (message->FindInt32("opcode", &opcode) == B_OK && opcode == B_ATTR_CHANGED) {
+                const char* attrName;
+                if (message->FindString("attr", &attrName) == B_OK && strcmp(attrName, "be:bgndimginfo") == 0) {
+                    // Trigger a thread-safe custom event directly into the SDL processing stream
+                    SDL_Event userEvent;
+                    SDL_zero(userEvent);
+                    userEvent.type = SDL_EVENT_WALLPAPER_CHANGED;
+                    SDL_PushEvent(&userEvent);
+                }
+            }
+        } else {
+            BHandler::MessageReceived(message);
+        }
+    }
+};
+
+
+
+
 bool autoHideEnabled = false;
 
 void LoadConfiguration() {
@@ -2815,6 +2892,7 @@ int main(int argc, char* argv[]) {
     AutoHideState dockState = STATE_VISIBLE;
     bool hidingSettled = false;
 	LoadConfiguration(); 
+	WallpaperWatcher wallpaperWatcher;
 	
     // FIX: Force the initial window creation down to the bottom using yExpanded!
     SDL_Window* window = SDL_CreateWindow(
@@ -2927,7 +3005,21 @@ int main(int argc, char* argv[]) {
                 if (incomingEventPackage.type == SDL_QUIT) {
                     appExecuting = false;
                 }
+                // =========================================================================
+                // NATIVE WALLPAPER MONITOR INTERACTION PROTOCOL
+                // =========================================================================
+                else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED) {
+                    std::cout << "[Node Monitor] Wallpaper update detected! Refreshing dock canvas asset." << std::endl;
+                    
+                    desktopEngine.ReloadWallpaperBackground(); 
+                    desktopEngine.SyncDockWithRunningDeskbarApps(); 
+
+                    
+                    needsRender = true;
+                }   
+                // =========================================================================
                 else if (incomingEventPackage.type == SDL_KEYDOWN) {
+
                     if (incomingEventPackage.key.keysym.sym == SDLK_ESCAPE) {
                         appExecuting = false;
                     }
