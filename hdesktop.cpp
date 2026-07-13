@@ -1255,115 +1255,137 @@ public:
 	        currentX += separatorGapPadding;
 	    }
 	
-	    // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
-	    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-	        auto& activeTaskWin = fTaskbarWindows[w];
-	        if (*activeTaskWin.openStateFlag == false) continue;
-	
-	        float size = dynamicWidths[evaluationSlotIdx];
-	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-	
-	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
-	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-	            
-	            if (fShowMainMenu) {
-	                BWindow* nativeWin = be_app->WindowAt(0);
-	                if (nativeWin != nullptr && nativeWin->Lock()) {
-	                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-	                    nativeWin->ResizeBy(0, -220.0f);
-	                    nativeWin->MoveBy(0, 220.0f);
-	                    nativeWin->Unlock();
-	                }
-	            }
-	            fShowMainMenu = false;
-	
-	            // --- TRACKER SAFETY TOGGLE PIPELINES ---
-	            bool isTracker = false;
-	            app_info appInfo;
-	            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
-	                if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
-	            }
-	
-	            if (isTracker) {
-	                char safeTrackerCmdBuffer[256];
-	                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
-	
-	                if (activeTaskWin.isMinimized == false) {
-	                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
-	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-	                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
-	                    std::system(safeTrackerCmdBuffer);
-	                    
-	                    be_roster->ActivateApp(-1);
-	                    activeTaskWin.isMinimized = true;
-	                } 
-	                else {
-	                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
-	                    app_info realTrackerInfo;
-	                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
-	                        be_roster->ActivateApp(realTrackerInfo.team);
-	                    } else {
-	                        be_roster->ActivateApp(activeTaskWin.teamId);
-	                    }
-	                    
-	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-	                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
-	                    std::system(safeTrackerCmdBuffer);
-	
-	                    if (trackerMessenger.IsValid()) {
-	                        BEntry homeEntry("/boot/home");
-	                        entry_ref homeRef;
-	                        if (homeEntry.GetRef(&homeRef) == B_OK) {
-	                            BMessage openMsg(B_REFS_RECEIVED);
-	                            openMsg.AddRef("refs", &homeRef);
-	                            trackerMessenger.SendMessage(&openMsg);
-	                        }
-	                    }
-	                    activeTaskWin.isMinimized = false;
-	                }
-                    return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
-	            }
-	            // -----------------------------------------------------------
-	
-	            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
-	            char systemCmdBuffer[512]; 
-	
-	            if (activeTaskWin.isMinimized == false) {
-	                std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
-	                
-	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-	                    "hey \"%s\" Set Minimize of Window 0 to true &", 
-	                    activeTaskWin.title.c_str());
-	                
-	                std::system(systemCmdBuffer); 
-	                be_roster->ActivateApp(-1);
-	                activeTaskWin.isMinimized = true; 
-	            } 
-	            else {
-	                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
-	                
-	                app_info targetAppInfo;
-	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
-	                    be_roster->ActivateApp(targetAppInfo.team);
-	                } else {
-	                    be_roster->ActivateApp(activeTaskWin.teamId);
-	                }
-	                
-	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-	                    "hey \"%s\" Set Minimize of Window 0 to false &", 
-	                    activeTaskWin.title.c_str());
-	                
-	                std::system(systemCmdBuffer);
-	                activeTaskWin.isMinimized = false; 
-	            }
-	            
-	            std::cout << "========================================\n" << std::endl;
-	            return; 
-	        }
-	        
-	        currentX += size + padding;
-	        evaluationSlotIdx++;
-	    }
+	       // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+        auto& activeTaskWin = fTaskbarWindows[w];
+        if (*activeTaskWin.openStateFlag == false) continue;
+
+        float size = dynamicWidths[evaluationSlotIdx];
+        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+
+        if (x >= realIconBounds.left && x <= realIconBounds.right &&
+            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+            // =========================================================================
+            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
+            // =========================================================================
+            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
+            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
+                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
+                
+                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
+                if (targetAppMessenger.IsValid()) {
+                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+                } else {
+                    char closeCmdBuffer[256];
+                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
+                    std::system(closeCmdBuffer);
+                }
+                
+                fShowMainMenu = false;
+                std::cout << "========================================\n" << std::endl;
+                return; 
+            }
+
+
+            if (fShowMainMenu) {
+                BWindow* nativeWin = be_app->WindowAt(0);
+                if (nativeWin != nullptr && nativeWin->Lock()) {
+                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
+                    nativeWin->ResizeBy(0, -220.0f);
+                    nativeWin->MoveBy(0, 220.0f);
+                    nativeWin->Unlock();
+                }
+            }
+            fShowMainMenu = false;
+
+            // --- TRACKER SAFETY TOGGLE PIPELINES ---
+            bool isTracker = false;
+            app_info appInfo;
+            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
+                if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
+            }
+
+            if (isTracker) {
+                char safeTrackerCmdBuffer[256];
+                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+
+                if (activeTaskWin.isMinimized == false) {
+                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
+                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
+                    std::system(safeTrackerCmdBuffer);
+                    
+                    be_roster->ActivateApp(-1);
+                    activeTaskWin.isMinimized = true;
+                } 
+                else {
+                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
+                    app_info realTrackerInfo;
+                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
+                        be_roster->ActivateApp(realTrackerInfo.team);
+                    } else {
+                        be_roster->ActivateApp(activeTaskWin.teamId);
+                    }
+                    
+                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
+                    std::system(safeTrackerCmdBuffer);
+
+                    if (trackerMessenger.IsValid()) {
+                        BEntry homeEntry("/boot/home");
+                        entry_ref homeRef;
+                        if (homeEntry.GetRef(&homeRef) == B_OK) {
+                            BMessage openMsg(B_REFS_RECEIVED);
+                            openMsg.AddRef("refs", &homeRef);
+                            trackerMessenger.SendMessage(&openMsg);
+                        }
+                    }
+                    activeTaskWin.isMinimized = false;
+                }
+                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
+            }
+            // -----------------------------------------------------------
+
+            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
+            char systemCmdBuffer[512]; 
+
+            if (activeTaskWin.isMinimized == false) {
+                std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
+                
+                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+                    "hey \"%s\" Set Minimize of Window 0 to true &", 
+                    activeTaskWin.title.c_str());
+                
+                std::system(systemCmdBuffer); 
+                be_roster->ActivateApp(-1);
+                activeTaskWin.isMinimized = true; 
+            } 
+            else {
+                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
+                
+                app_info targetAppInfo;
+                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
+                    be_roster->ActivateApp(targetAppInfo.team);
+                } else {
+                    be_roster->ActivateApp(activeTaskWin.teamId);
+                }
+                
+                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+                    "hey \"%s\" Set Minimize of Window 0 to false &", 
+                    activeTaskWin.title.c_str());
+                
+                std::system(systemCmdBuffer);
+                activeTaskWin.isMinimized = false; 
+            }
+            
+            std::cout << "========================================\n" << std::endl;
+            return; 
+        }
+        
+        currentX += size + padding;
+        evaluationSlotIdx++;
+    }
+
 
 	    // =========================================================================
 	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (CLOCK -> VOLUME -> TRASH BIN -> CPU)
@@ -1478,7 +1500,7 @@ public:
 
 
 
-    void RenderFrame() {
+  void RenderFrame(float yOffset) {
         // =========================================================================
         // 1. STEP POSIX TIMING ENGINES AND KERNEL RECORD SAMPLES
         // =========================================================================
@@ -1491,7 +1513,7 @@ public:
         glClear(GL_COLOR_BUFFER_BIT);
 
         // =========================================================================
-        // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED)
+        // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED) - STATIONARY
         // =========================================================================
         if (fWallpaperTexture.id != 0) {
             glEnable(GL_TEXTURE_2D);
@@ -1533,7 +1555,11 @@ public:
             glDisable(GL_TEXTURE_2D);
         }
 
-
+        // =========================================================================
+        // NEW MATRIX TRANSLATION FOR THE AUTOHIDE OVERLAY ELEMENTS
+        // =========================================================================
+        glPushMatrix();
+        glTranslatef(0.0f, yOffset, 0.0f);
 
         // =========================================================================
         // 3. TASKBAR-ENABLED DOCK WIDTH GEOMETRY CALCULATIONS (UNIFIED ZOOM PIPELINE)
@@ -1565,7 +1591,8 @@ public:
         // -------------------------------------------------------------------------
         // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING
         // -------------------------------------------------------------------------
-        float totalCalculatedWidth = 0.0f; 
+        float totalCalculatedWidth = 0.0f;
+
         
         for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
             dynamicWidths.clear();
@@ -2251,6 +2278,9 @@ public:
         // 4. Update the tracker pointer past the cpu monitor graph layout bounds area cleanly
         currentX += dynamicGraphWidth;
         currentX += clockSectionPadding;
+        
+        fLastCalculatedWidth = totalCalculatedWidth;
+        glPopMatrix();
 
     } // Exact functional closing brace of RenderFrame() method!
 
@@ -2652,9 +2682,24 @@ void FetchHaikuMixerVolume() {
 	float fCachedVolWidth = 0.0f;
 	float fCachedVolHeight = 0.0f;
 	float fPreMuteVolumeLevel = 0.5f; 
-    
+
 //@private    
+
+public:
+    float fLastCalculatedWidth = 0.0f;	
 };
+
+
+// =========================================================================
+// AUTOHIDE CONFIGURATION & STATES (STAGE 1)
+// =========================================================================
+enum AutoHideState {
+    STATE_VISIBLE,
+    STATE_HIDING,
+    STATE_HIDDEN,
+    STATE_SHOWING
+};
+
 
 
 // =========================================================================
@@ -2680,22 +2725,35 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    // =========================================================================
+    // RESOLVE MONITOR RESOLUTION BOUNDS DYNAMICALLY
+    // =========================================================================
     int screenWidth  = currentDisplayMode.w;
     int screenHeight = currentDisplayMode.h;
+    
     int dockPanelW = screenWidth;
     int dockPanelH = 160; 
-    int dockPanelX = 0;
-    int dockPanelY = screenHeight - dockPanelH;
-    
+    int sensorHeight = 4; 
 
+    // Use yExpanded to position the actual SDL window frame at the bottom
+    int yExpanded  = screenHeight - dockPanelH; 
+    //int yCollapsed = screenHeight - sensorHeight; // Silences the second warning
 
+    // Animation tracking (0.0f means elements draw normally inside the bottom window)
+    float currentY = 0.0f;
+    float targetY  = 0.0f;
+    AutoHideState dockState = STATE_VISIBLE;
+    bool hidingSettled = false;
+
+    // FIX: Force the initial window creation down to the bottom using yExpanded!
     SDL_Window* window = SDL_CreateWindow(
         "Haiku Desktop Taskbar Overlay Component",
-        dockPanelX, dockPanelY,
+        0, yExpanded,
         dockPanelW, dockPanelH,
-        //SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP
         SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS
     );
+
+
 
 
     if (!window) {
@@ -2755,7 +2813,15 @@ int main(int argc, char* argv[]) {
     // =========================================================================
     uint32 lastRosterScanTime = 0;
     uint32 lastMetricsUpdateTime = 0;
-    bool needsRender = true; // Force initial draw pass when booting up
+    bool needsRender = true;
+    
+        // --- TIMING ENGINES FOR SMOOTH ANIMATION ---
+    Uint64 lastPerfTime = SDL_GetPerformanceCounter();
+    Uint64 perfFrequency = SDL_GetPerformanceFrequency();
+
+    // Adjusted base speed parameter (now scaled against real seconds)
+    float baseAnimationSpeed = 12.0f; 
+
 	
     while (appExecuting) {
         if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
@@ -2838,39 +2904,110 @@ int main(int argc, char* argv[]) {
         }
 
         // =========================================================================
-        // NATIVE HAIKU BOUNDARY ESCAPE SAFEGUARD (SDL2 FIX)
+        // NATIVE HAIKU BOUNDARY & INTERNAL SLIDE TRIGGER LOGIC (STAGE 3 - FIXED)
         // =========================================================================
         int localMouseX = 0;
         int localMouseY = 0;
         uint32 nativeButtons = 0;
         bool cursorIsInsideDock = false;
 
-        // Query Haiku's native app_server directly to sidestep the SDL2 global bug
         if (be_app && be_app->Lock()) {
             int32 windowCount = be_app->CountWindows();
             if (windowCount > 0) {
-                // Grab the first BWindow (which belongs to your SDL instance)
                 BWindow* nativeWin = be_app->WindowAt(0);
                 if (nativeWin && nativeWin->Lock()) {
-                    // Grab its primary container view
                     BView* mainView = nativeWin->ChildAt(0); 
                     if (mainView) {
                         BPoint localPoint;
-                        // GetMouse retrieves layout-relative coordinates perfectly 
-                        // even if another non-desktop Haiku window steals focus!
                         mainView->GetMouse(&localPoint, &nativeButtons, false);
                         
                         localMouseX = static_cast<int>(localPoint.x);
                         localMouseY = static_cast<int>(localPoint.y);
                         
-                        // Check local bounds (0 to Width, 0 to Height)
-                        cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW &&
-                                              localMouseY >= 0 && localMouseY < dockPanelH);
+                        // If hidden, check if cursor hit the tiny sensor row at the bottom
+                        // If visible or animating, check the entire active height of the window
+                        if (dockState == STATE_HIDDEN) {
+                            cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW &&
+                                                  localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
+                        } else {
+                            cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW &&
+                                                  localMouseY >= 0 && localMouseY < dockPanelH);
+                        }
                     }
                     nativeWin->Unlock();
                 }
             }
             be_app->Unlock();
+        }
+
+        // =========================================================================
+        // NATIVE HAIKU BOUNDARY & LOCAL OFFSET CONSTRAINTS
+        // =========================================================================
+        bool autoHideEnabled = true;
+
+        // FIX: Directly reading your public field variable member token cleanly!
+        float dockWidth = desktopEngine.fLastCalculatedWidth;
+        if (dockWidth <= 0.0f) dockWidth = 600.0f; // Safe fallback for the initial boot pass
+
+        // Calculate the local left and right edge positions of the centered dock shelf
+        int dockLeftX  = (dockPanelW / 2) - (static_cast<int>(dockWidth) / 2);
+        int dockRightX = (dockPanelW / 2) + (static_cast<int>(dockWidth) / 2);
+
+        // Dynamically re-evaluate cursorIsInsideDock using the precise shelf limits
+        if (dockState == STATE_HIDDEN) {
+            // Unhide ONLY if the mouse touches the active width segment of the thin sensor strip
+            cursorIsInsideDock = (localMouseX >= dockLeftX && localMouseX <= dockRightX &&
+                                  localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
+        } else {
+            // Keep visible only if the mouse remains inside the active width footprint of the dock shelf
+            cursorIsInsideDock = (localMouseX >= dockLeftX && localMouseX <= dockRightX &&
+                                  localMouseY >= 0 && localMouseY < dockPanelH);
+        }
+
+        if (autoHideEnabled) {
+            if (cursorIsInsideDock) {
+                if (!hidingSettled) {
+                    targetY = 0.0f; 
+                    if (dockState == STATE_HIDDEN || dockState == STATE_HIDING) {
+                        dockState = STATE_SHOWING;
+                    }
+                }
+            } else {
+                targetY = static_cast<float>(dockPanelH - sensorHeight); 
+                hidingSettled = false; 
+                if (dockState == STATE_VISIBLE || dockState == STATE_SHOWING) {
+                    dockState = STATE_HIDING;
+                }
+            }
+        } else {
+            targetY = 0.0f;
+            dockState = STATE_VISIBLE;
+            hidingSettled = false;
+        }
+
+        // =========================================================================
+        // TIMING DELTA CALCULATIONS (SMOOTHING MULTIPLIER)
+        // =========================================================================
+        Uint64 currentPerfTime = SDL_GetPerformanceCounter();
+        float deltaTime = static_cast<float>(currentPerfTime - lastPerfTime) / static_cast<float>(perfFrequency);
+        lastPerfTime = currentPerfTime;
+
+        if (deltaTime > 0.1f) deltaTime = 0.1f; 
+
+        float smoothingMultiplier = 1.0f - std::exp(-baseAnimationSpeed * deltaTime);
+
+        if (std::abs(currentY - targetY) > 0.1f) {
+            currentY += (targetY - currentY) * smoothingMultiplier;
+            needsRender = true; 
+        } else {
+            currentY = targetY;
+            if (autoHideEnabled) {
+                if (dockState == STATE_SHOWING) dockState = STATE_VISIBLE;
+                if (dockState == STATE_HIDING) {
+                    dockState = STATE_HIDDEN;
+                    hidingSettled = true; 
+                }
+            }
         }
 
         // =========================================================================
@@ -2884,20 +3021,15 @@ int main(int argc, char* argv[]) {
         int adjustedMouseY = localMouseY + hiddenScreenOffset;
 
         if (!cursorIsInsideDock) {
-            // Only fire the exit collapse state ONCE when leaving boundaries
             if (lastSentX != -1 || lastSentY != -1) {
                 desktopEngine.HandleMouseInput(localMouseX, adjustedMouseY, 0);
                 needsRender = true;
                 
-                // Set markers to rest state
                 lastSentX = -1;
                 lastSentY = -1;
                 lastSentButtons = 0;
             }
         } else {
-            // Check if mouse actually moved or clicked inside the dock boundaries
-            // (Note: If your dock uses an active timer animation loop to smooth resize,
-            // also add '|| desktopEngine.IsAnimating()' to this conditional statement)
             if (localMouseX != lastSentX || adjustedMouseY != lastSentY || nativeButtons != lastSentButtons) {
                 desktopEngine.HandleMouseInput(localMouseX, adjustedMouseY, nativeButtons);
                 needsRender = true;
@@ -2907,40 +3039,32 @@ int main(int argc, char* argv[]) {
                 lastSentButtons = nativeButtons;
             }
         }
-        // =========================================================================
-
-
-
-
 
         uint32 currentTime = SDL_GetTicks();
 
-        // 2. Rate-limit structural background system updates (Clock & CPU counters)
         if (currentTime - lastMetricsUpdateTime >= 1000 || lastMetricsUpdateTime == 0) {
             lastMetricsUpdateTime = currentTime;
             needsRender = true; 
         }
 
-        // 3. Rate-limit your native Haiku team roster process loop
         if (currentTime - lastRosterScanTime >= 400 || lastRosterScanTime == 0) {
             desktopEngine.SyncDockWithRunningDeskbarApps();
             lastRosterScanTime = currentTime;
             needsRender = true; 
         }
 
-        // 4. ONLY EXECUTE GRAPHICS CALCULATIONS IF SOMETHING ACTUALLY CHANGED!
         if (needsRender) {
-            desktopEngine.RenderFrame();
+            desktopEngine.RenderFrame(currentY); 
             SDL_GL_SwapWindow(window);
             needsRender = false; 
         }
+
     }
 
-
-    // Explicit Context Resource Destruction sequence
     std::cout << "[System Terminal] Closing hDesktop context cleanly." << std::endl;
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;
 }
+
