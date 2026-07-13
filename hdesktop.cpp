@@ -46,7 +46,7 @@
 #include <MediaRoster.h>
 #include <MediaNode.h>
 #include <ParameterWeb.h>
-
+#include <CheckBox.h>
 
 
 class HaikuAppDrawerWindow; 
@@ -60,13 +60,35 @@ std::map<team_id, int32> gVisibleStreak;
 const int32 kThresholdMinimize = 1;   
 const int32 kThresholdMaximize = 33;  
 
-// =========================================================================
-// NATIVE CONFIGURATION PANEL CANVAS (FUNCTIONAL UI IMPLEMENTATION)
-// =========================================================================
+
+// Global communication flags (or place them in an accessible global/namespace config struct)
+extern bool autoHideEnabled; 
+void SaveConfiguration(); 
+
+enum {
+    MSG_AUTOHIDE_TOGGLED = 'ahtg'
+};
+
 class ConfigView : public BView {
+private:
+    BCheckBox* fAutoHideCheckbox;
+
 public:
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255}); // Matte dark background
+
+        // Create a native Haiku UI Checkbox instead of manual tracking math
+        BRect checkboxRect(25.0f, 115.0f, frame.Width() - 25.0f, 135.0f);
+        fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide Dock", 
+            new BMessage(MSG_AUTOHIDE_TOGGLED));
+        
+        // Match your dark theme text colors
+        fAutoHideCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
+        
+        // Sync the UI checkmark visually with the current state of your variable
+        fAutoHideCheckbox->SetValue(autoHideEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
+        
+        AddChild(fAutoHideCheckbox);
     }
 
     virtual void Draw(BRect updateRect) {
@@ -95,34 +117,23 @@ public:
         BRect shutdownBtnRect(25.0f, 65.0f, canvasWidth - 25.0f, 100.0f);
         
         if (shutdownBtnRect.Contains(cursorPoint)) {
-            // Hot red alert hover glow for severe option block
             SetHighColor(rgb_color{220, 60, 60, 45});
             FillRect(shutdownBtnRect);
-            SetHighColor(rgb_color{255, 90, 90, 255}); // Glowing text tone
+            SetHighColor(rgb_color{255, 90, 90, 255}); 
         } else {
-            SetHighColor(rgb_color{35, 36, 42, 255}); // Inset card background
+            SetHighColor(rgb_color{35, 36, 42, 255}); 
             FillRect(shutdownBtnRect);
-            SetHighColor(rgb_color{210, 100, 100, 255}); // Warn red text tone
+            SetHighColor(rgb_color{210, 100, 100, 255}); 
         }
         StrokeRect(shutdownBtnRect);
         
-        // Render the text center-aligned inside the button container box
         SetFont(be_bold_font);
         SetFontSize(12.0f);
         BString shutdownText("Shutdown App");
         float shutdownTextW = StringWidth(shutdownText.String());
         DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 87.0f));
 
-        // 4. Render "Other Config Options Coming Soon..." placeholder below
-        SetFont(be_plain_font);
-        SetFontSize(11.0f);
-        SetHighColor(rgb_color{110, 120, 135, 255}); // Dim slate text
-        
-        BString soonText("Other Config Options Coming Soon...");
-        float soonTextW = StringWidth(soonText.String());
-        DrawString(soonText.String(), BPoint((canvasWidth - soonTextW) / 2.0f, 135.0f));
-
-        // 5. Standard Window Control "Close" button tracking metrics at footer
+        // 4. Standard Window Control "Close" button tracking metrics at footer
         BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, Bounds().Height() - 45.0f, 
                            (canvasWidth + 100.0f) / 2.0f, Bounds().Height() - 15.0f);
         
@@ -143,7 +154,7 @@ public:
     }
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
-        Invalidate(); // Smooth real-time color highlights on cursor shift
+        Invalidate(); 
     }
 
     virtual void MouseDown(BPoint point) {
@@ -153,24 +164,43 @@ public:
         BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, Bounds().Height() - 45.0f, 
                            (canvasWidth + 100.0f) / 2.0f, Bounds().Height() - 15.0f);
         
-        // Target Action A: Complete System Termination Request Intercepted
         if (shutdownBtnRect.Contains(point)) {
-            std::cout << "[Config Panel] Shutdown option clicked! Terminating application context." << std::endl;
             if (be_app) {
                 be_app->PostMessage(B_QUIT_REQUESTED);
             }
             return;
         }
 
-        // Target Action B: Simple Configuration Overlay Dismissal
         if (closeBtnRect.Contains(point)) {
             if (Window()) {
-                Window()->Quit(); // Dismiss configuration panel shell safely
+                Window()->Quit(); 
             }
             return;
         }
     }
+    
+    // Intercept UI interaction messaging hooks safely
+    virtual void AttachedToWindow() {
+        BView::AttachedToWindow();
+        // Route checkbox notifications directly to this view's target pipeline
+        fAutoHideCheckbox->SetTarget(this);
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        switch (message->what) {
+            case MSG_AUTOHIDE_TOGGLED: {
+                // Read out state from the checkbox and store it
+                autoHideEnabled = (fAutoHideCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration(); // Instantly write state variations safely to disk
+                break;
+            }
+            default:
+                BView::MessageReceived(message);
+                break;
+        }
+    }
 };
+
 
 // =========================================================================
 // NATIVE CONFIGURATION MANAGEMENT BWINDOW OVERLAY
@@ -2693,6 +2723,43 @@ public:
 };
 
 
+bool autoHideEnabled = false;
+
+void LoadConfiguration() {
+    BPath path;
+    // Find the dedicated system path directory safely (~/config/settings/)
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+        path.Append("hdesktop_settings");
+        
+        BFile file(path.Path(), B_READ_ONLY);
+        BMessage settings;
+        
+        // If file unpacks successfully, look up saved preferences
+        if (settings.Unflatten(&file) == B_OK) {
+            bool savedValue;
+            if (settings.FindBool("auto_hide", &savedValue) == B_OK) {
+                autoHideEnabled = savedValue;
+            }
+        }
+    }
+}
+
+void SaveConfiguration() {
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+        path.Append("hdesktop_settings");
+        
+        // Open file safely for clearing data and writing anew
+        BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+        BMessage settings;
+        
+        settings.AddBool("auto_hide", autoHideEnabled);
+        settings.Flatten(&file); // Writes key/values securely to storage layout block
+    }
+}
+
+
+
 // =========================================================================
 // AUTOHIDE CONFIGURATION & STATES (STAGE 1)
 // =========================================================================
@@ -2747,7 +2814,8 @@ int main(int argc, char* argv[]) {
     float targetY  = 0.0f;
     AutoHideState dockState = STATE_VISIBLE;
     bool hidingSettled = false;
-
+	LoadConfiguration(); 
+	
     // FIX: Force the initial window creation down to the bottom using yExpanded!
     SDL_Window* window = SDL_CreateWindow(
         "Haiku Desktop Taskbar Overlay Component",
@@ -2955,7 +3023,7 @@ int main(int argc, char* argv[]) {
         // =========================================================================
         // NATIVE HAIKU BOUNDARY & LOCAL OFFSET CONSTRAINTS
         // =========================================================================
-        bool autoHideEnabled = true;
+        //bool autoHideEnabled = true;
 
         // FIX: Directly reading your public field variable member token cleanly!
         float dockWidth = desktopEngine.fLastCalculatedWidth;
