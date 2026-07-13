@@ -278,7 +278,7 @@ public:
 	    std::vector<DrawerItem*> temporarySortedVector;
 	
 	    const char* paths[] = { "/boot/system/apps", "/boot/system/demos", "/boot/system/preferences" };
-	    for (int p = 0; p < 2; p++) {
+	    for (int p = 0; p < 3; p++) {
 	        BDirectory dir(paths[p]);
 	        if (dir.InitCheck() != B_OK) continue;
 	
@@ -659,12 +659,16 @@ struct BrowserFileItem {
 
 struct TaskbarItem {
     std::string title;       
+    std::string appName;     
     HaikuTexture icon;       
     bool isMinimized;       
     bool* openStateFlag;     
     bool* minimizeStateFlag; 
     team_id teamId;       
+    int32 windowIndex;       
 };
+
+
 
 
 
@@ -939,8 +943,171 @@ public:
         std::cout << "[Tracker window] Scrolled canvas position offset: " << fScrollOffset << std::endl;
     }
 
+/*
+void SyncDockWithRunningDeskbarApps() {
+    // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
+    for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
+        if (fTaskbarWindows[i].icon.id > 0) {
+            glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
+            fTaskbarWindows[i].icon.id = 0; 
+        }
+    }
+    
+    // 1. Keep a local backup so we don't blow away our click modifications
+    std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
+    fTaskbarWindows.clear();
 
-	void SyncDockWithRunningDeskbarApps() {
+    std::vector<std::string> processedSignatures;
+
+    // Fetch the absolute active app info once up front to optimize the loop
+    app_info activeAppInfo;
+    team_id activeTeamId = -1;
+    if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+        activeTeamId = activeAppInfo.team;
+    }
+
+    // 2. Query the global Haiku roster for all active running teams
+    BList teamList;
+    be_roster->GetAppList(&teamList);
+
+    int32 count = teamList.CountItems();
+    for (int32 i = 0; i < count; ++i) {
+        team_id id = (team_id)(addr_t)teamList.ItemAt(i);
+        
+        app_info info;
+        // Hide background apps and/or other apps we don't want to see.
+        if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
+            if ((info.flags & B_BACKGROUND_APP) != 0) continue;
+            if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
+            
+            std::string appSignature(info.signature);
+            bool isDuplicate = false;
+            
+            // =========================================================================
+            // COHESIVE MULTI-INSTANCE APPLICATION WHITELIST
+            // =========================================================================
+            bool allowsMultipleInstances = (
+                appSignature == "application/x-vnd.Haiku-Terminal" ||
+                appSignature == "application/x-vnd.Haiku-WebPositive" ||
+                appSignature == "application/x-vnd.Heka-Pe"
+            );
+
+            // Only check for duplicates if it is NOT a whitelisted multi-instance application
+            if (!allowsMultipleInstances) {
+                for (const auto& sig : processedSignatures) {
+                    if (sig == appSignature && !appSignature.empty()) {
+                        isDuplicate = true; 
+                        break;
+                    }
+                }
+            }
+            if (isDuplicate) continue; 
+
+            BEntry entry(&info.ref);
+            if (entry.InitCheck() != B_OK) continue;
+
+            char nameBuf[B_FILE_NAME_LENGTH];
+            entry.GetName(nameBuf);
+            std::string appTitle(nameBuf);
+
+            if (appTitle == "Deskbar") {
+                continue;
+            }
+
+            BPath path;
+            entry.GetPath(&path);
+
+            // =========================================================================
+            // DYNAMIC INDIVIDUAL WINDOW TITLE RESOLUTION PIPELINE
+            // =========================================================================
+            std::vector<std::string> targetInstanceTitles;
+            BMessenger appMessenger(info.signature, id);
+            
+            // Now queries titles for Terminal, WebPositive, and Pe alike!
+            if (appMessenger.IsValid() && allowsMultipleInstances) {
+                // 1. Ask the application team how many window containers it currently holds
+                BMessage countRequest(B_GET_PROPERTY);
+                countRequest.AddSpecifier("Count");
+                countRequest.AddSpecifier("Window");
+                BMessage countReply;
+                
+                int32 foundWindowCount = 1;
+                if (appMessenger.SendMessage(&countRequest, &countReply) == B_OK) {
+                    int32 trackedCount = 0;
+                    if (countReply.FindInt32("result", &trackedCount) == B_OK && trackedCount > 0) {
+                        foundWindowCount = trackedCount;
+                    }
+                }
+
+                // 2. Fetch the explicit Title text string for each active window slot
+                for (int32 wIdx = 0; wIdx < foundWindowCount; ++wIdx) {
+                    BMessage titleRequest(B_GET_PROPERTY);
+                    titleRequest.AddSpecifier("Title");
+                    titleRequest.AddSpecifier("Window", wIdx);
+                    BMessage titleReply;
+                    
+                    std::string extractedTitle = appTitle; // Fallback
+                    if (appMessenger.SendMessage(&titleRequest, &titleReply) == B_OK) {
+                        const char* titleStr = nullptr;
+                        if (titleReply.FindString("result", &titleStr) == B_OK && titleStr != nullptr) {
+                            extractedTitle = titleStr;
+                        }
+                    }
+                    targetInstanceTitles.push_back(extractedTitle);
+                }
+            } else {
+                // Singleton application fallback (including Iceweasel pathing channels)
+                targetInstanceTitles.push_back(appTitle);
+            }
+
+            // =========================================================================
+            // LOOP AND GENERATE DOCK ENTRIES PER RESOLVED TITLE STRING
+            // =========================================================================
+            for (size_t winIdx = 0; winIdx < targetInstanceTitles.size(); ++winIdx) {
+                TaskbarItem openApp;
+                openApp.title = targetInstanceTitles[winIdx]; // Dynamically tracks web pages / documents!
+                openApp.appName = appTitle;                    
+                openApp.icon = LoadIconFromNode(path.Path(), 128); 
+                openApp.teamId = id; 
+                openApp.windowIndex = static_cast<int32>(winIdx); 
+
+                // --- FIXED STATE RESTORE LAYER (MATCH BY INDEX) ---
+                bool foundOldInstance = false;
+                for (const auto& oldWin : oldTaskbarWindows) {
+                    if (oldWin.teamId == id && oldWin.windowIndex == openApp.windowIndex) {
+                        openApp.isMinimized = oldWin.isMinimized;
+                        foundOldInstance = true;
+                        break;
+                    }
+                }
+
+                if (!foundOldInstance || activeTeamId == id) {
+                    if (activeTeamId == id) {
+                        openApp.isMinimized = false;
+                    } 
+                    else if (activeTeamId == be_app->Team()) {
+                        openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
+                    } 
+                    else {
+                        openApp.isMinimized = true;
+                    }
+                }
+
+                static bool sAlwaysTrue = true;
+                openApp.openStateFlag = &sAlwaysTrue;
+                openApp.minimizeStateFlag = &openApp.isMinimized; 
+
+                fTaskbarWindows.push_back(openApp);
+            }
+
+            processedSignatures.push_back(appSignature);
+        }
+    }
+}
+
+*/
+
+void SyncDockWithRunningDeskbarApps() {
 		// --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
 	    // =================================================================
 	    for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
@@ -1043,7 +1210,6 @@ public:
 	        }
 	    }
 	}
-
 
    
 	void HandleMouseClick(int x, int y, int button) {
@@ -1308,8 +1474,7 @@ public:
 	    if (activeWindowsCount > 0) {
 	        currentX += separatorGapPadding;
 	    }
-	
-	       // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+	    	       // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
     for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
         auto& activeTaskWin = fTaskbarWindows[w];
         if (*activeTaskWin.openStateFlag == false) continue;
@@ -1441,7 +1606,167 @@ public:
         currentX += size + padding;
         evaluationSlotIdx++;
     }
+	    
+	    
+	    
+	/*
+	// STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+        auto& activeTaskWin = fTaskbarWindows[w];
+        if (*activeTaskWin.openStateFlag == false) continue;
 
+        float size = dynamicWidths[evaluationSlotIdx];
+        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+        
+        // --- TRACKER SAFETY TOGGLE PIPELINES ---
+        bool isTracker = false;
+        app_info appInfo;
+        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
+            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
+        }
+
+        if (x >= realIconBounds.left && x <= realIconBounds.right &&
+            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+            // =========================================================================
+            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
+            // =========================================================================
+            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
+            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
+                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
+                
+                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
+                if (targetAppMessenger.IsValid()) {
+                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+                } else {
+                    char closeCmdBuffer[256];
+                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
+                    std::system(closeCmdBuffer);
+                }
+                
+                fShowMainMenu = false;
+                std::cout << "========================================\n" << std::endl;
+                return; 
+            }
+
+
+            if (fShowMainMenu) {
+                BWindow* nativeWin = be_app->WindowAt(0);
+                if (nativeWin != nullptr && nativeWin->Lock()) {
+                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
+                    nativeWin->ResizeBy(0, -220.0f);
+                    nativeWin->MoveBy(0, 220.0f);
+                    nativeWin->Unlock();
+                }
+            }
+            fShowMainMenu = false;
+
+
+
+            if (isTracker) {
+                char safeTrackerCmdBuffer[256];
+                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+
+                if (activeTaskWin.isMinimized == false) {
+                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
+                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
+                    std::system(safeTrackerCmdBuffer);
+                    
+                    be_roster->ActivateApp(-1);
+                    activeTaskWin.isMinimized = true;
+                } 
+                else {
+                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
+                    app_info realTrackerInfo;
+                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
+                        be_roster->ActivateApp(realTrackerInfo.team);
+                    } else {
+                        be_roster->ActivateApp(activeTaskWin.teamId);
+                    }
+                    
+                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
+                    std::system(safeTrackerCmdBuffer);
+
+                    if (trackerMessenger.IsValid()) {
+                        BEntry homeEntry("/boot/home");
+                        entry_ref homeRef;
+                        if (homeEntry.GetRef(&homeRef) == B_OK) {
+                            BMessage openMsg(B_REFS_RECEIVED);
+                            openMsg.AddRef("refs", &homeRef);
+                            trackerMessenger.SendMessage(&openMsg);
+                        }
+                    }
+                    activeTaskWin.isMinimized = false;
+                }
+                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
+            }
+            // -----------------------------------------------------------
+
+	        // GENERAL APPLICATION BEHAVIOR (UNIVERSAL TITLE-BASED WITH X11/GTK FALLBACKS)
+	        char systemCmdBuffer[512]; 
+	
+	        if (activeTaskWin.isMinimized == false) {
+	            std::cout << "[SYSTEM CALL] ---> Action: MINIMIZING APPNAMED \"" << activeTaskWin.appName 
+	                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
+	            
+	            // =========================================================================
+	            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
+	            // =========================================================================
+	            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
+	                // Target Window 0 directly since ported browser panes don't expose Title strings
+	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+	                    "hey \"%s\" Set Minimize of Window 0 to true &", 
+	                    activeTaskWin.appName.c_str());
+	            } else {
+	                // Standard native application track using explicit title matching
+	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+	                    "hey \"%s\" Set Minimize of Window \"%s\" to true &", 
+	                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
+	            }
+	            // =========================================================================
+	            
+	            std::system(systemCmdBuffer); 
+	            be_roster->ActivateApp(-1);
+	            activeTaskWin.isMinimized = true; 
+	        } 
+	        else {
+	            std::cout << "[SYSTEM CALL] ---> Action: RESTORING APPNAMED \"" << activeTaskWin.appName 
+	                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
+	            
+	            app_info targetAppInfo;
+	            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
+	                be_roster->ActivateApp(targetAppInfo.team);
+	            } else {
+	                be_roster->ActivateApp(activeTaskWin.teamId);
+	            }
+	            
+	            // =========================================================================
+	            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
+	            // =========================================================================
+	            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
+	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+	                    "hey \"%s\" Set Minimize of Window 0 to false &", 
+	                    activeTaskWin.appName.c_str());
+	            } else {
+	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+	                    "hey \"%s\" Set Minimize of Window \"%s\" to false &", 
+	                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
+	            }
+	            // =========================================================================
+	            
+	            std::system(systemCmdBuffer);
+	            activeTaskWin.isMinimized = false; 
+	        }
+	        
+	        std::cout << "========================================\n" << std::endl;
+	        return; 
+	    }
+	    
+	    currentX += size + padding;
+	    evaluationSlotIdx++;
+    }
+	*/
 
 	    // =========================================================================
 	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (CLOCK -> VOLUME -> TRASH BIN -> CPU)
@@ -1897,12 +2222,13 @@ public:
 		}
 
 		
+		// =========================================================================
 		// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
+		// =========================================================================
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
 		    auto& activeTaskWin = fTaskbarWindows[w];		
 		    float size = dynamicWidths[renderingSlotIdx];
 		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-		
 		
             if (activeTaskWin.title == "Trackerx") {
                 // TRACKER EXCLUSIVITY: Preserve your original working strategy.
@@ -1910,7 +2236,6 @@ public:
                 // Let your verified click-handling states manage Tracker's visibility.
             } 
             else {
-				
                  // GENERAL APPLICATIONS: Keep the fast thread execution checks 
                 bool generalAppIsVisible = false;
                 thread_info info;
@@ -1938,9 +2263,17 @@ public:
                     }
                 }
 
-                // --- BALANCED ASYMMETRICAL LATCH SAFETY GUARD ---
-                static std::map<team_id, int32> invisibleStreak;
-                static std::map<team_id, int32> visibleStreak;
+                // =========================================================================
+                // MULTI-INSTANCE INSTANCE FIX: CREATE COMPOSITE STRUCTURAL KEYS FOR INDEPENDENT STREAKS
+                // =========================================================================
+                // If you named your internal sub-window variable windowIndex, id, or instanceId, 
+                // match it here (assuming 'windowIndex' based on the tracking pipeline).
+      
+				std::pair<team_id, int32> instanceKey(activeTaskWin.teamId, static_cast<int32>(w));
+
+                static std::map<std::pair<team_id, int32>, int32> invisibleStreak;
+                static std::map<std::pair<team_id, int32>, int32> visibleStreak;
+                // =========================================================================
                 
                 // ASYMMETRICAL BALANCING:
                 const int32 THRESHOLD_MINIMIZE = 1; 
@@ -1949,43 +2282,38 @@ public:
                 bool nextState = activeTaskWin.isMinimized;
 
                 if (isCurrentlyForeground) {
-                    invisibleStreak[activeTaskWin.teamId] = 0;
-                    visibleStreak[activeTaskWin.teamId] = 0;
+                    invisibleStreak[instanceKey] = 0;
+                    visibleStreak[instanceKey] = 0;
                     nextState = false;
                 } else {
                     if (!generalAppIsVisible) {
-                        invisibleStreak[activeTaskWin.teamId]++;
-                        visibleStreak[activeTaskWin.teamId] = 0;
+                        invisibleStreak[instanceKey]++;
+                        visibleStreak[instanceKey] = 0;
                         
                         bool quickBackgroundCheck = false;
                         if (activeAppInfo.team == activeTaskWin.teamId) {
                             quickBackgroundCheck = (activeAppInfo.flags & B_BACKGROUND_APP);
                         }
 
-                        if (quickBackgroundCheck || invisibleStreak[activeTaskWin.teamId] >= THRESHOLD_MINIMIZE) {
+                        if (quickBackgroundCheck || invisibleStreak[instanceKey] >= THRESHOLD_MINIMIZE) {
                             nextState = true;
                         }
                     } else {
-                        visibleStreak[activeTaskWin.teamId]++;
-                        invisibleStreak[activeTaskWin.teamId] = 0;
+                        visibleStreak[instanceKey]++;
+                        invisibleStreak[instanceKey] = 0;
                         
                         // Icon will only un-dim if the app threads stay awake continuously 
-                        // for 20 frames, filtering out temporary spikes completely.
-                        if (visibleStreak[activeTaskWin.teamId] >= THRESHOLD_MAXIMIZE) {
+                        // for 33 frames, filtering out temporary spikes completely.
+                        if (visibleStreak[instanceKey] >= THRESHOLD_MAXIMIZE) {
                             nextState = false;
                         }
                     }
                 }
 
                 // Smoothly toggle the state for non-Tracker applications
-                activeTaskWin.isMinimized = nextState;
-
-          
-            }
+                activeTaskWin.isMinimized = nextState;          
+            }             
                 
-                
-                
-		
 		    // A. Draw active task window application vector icon thumbnail
 		    if (activeTaskWin.icon.id != 0) {
 		        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
@@ -2021,6 +2349,7 @@ public:
 		    renderingSlotIdx++;
 		}
 		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
+
 		
 
 
