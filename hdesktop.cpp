@@ -1262,6 +1262,13 @@ public:
 
         float size = dynamicWidths[evaluationSlotIdx];
         HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+        
+        // --- TRACKER SAFETY TOGGLE PIPELINES ---
+        bool isTracker = false;
+        app_info appInfo;
+        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
+            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
+        }
 
         if (x >= realIconBounds.left && x <= realIconBounds.right &&
             y >= realIconBounds.top  && y <= realIconBounds.bottom) {
@@ -1269,7 +1276,7 @@ public:
             // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
             // =========================================================================
             // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
-            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
+            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
                 std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
                 
                 BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
@@ -1298,12 +1305,7 @@ public:
             }
             fShowMainMenu = false;
 
-            // --- TRACKER SAFETY TOGGLE PIPELINES ---
-            bool isTracker = false;
-            app_info appInfo;
-            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
-                if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
-            }
+
 
             if (isTracker) {
                 char safeTrackerCmdBuffer[256];
