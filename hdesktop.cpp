@@ -767,15 +767,15 @@ status_t ForceActiveWallpaperMode(int32 newMode) {
 
 
 
-BString GetActiveHaikuWallpaperPath(int32* outMode = nullptr, rgb_color* outColor = nullptr) {
+BString GetActiveHaikuWallpaperPath() {
     BString targetWallpaperPath = "";
-    int32 targetMode = 4;
-    rgb_color targetColor = {51, 102, 152, 255}; // Haiku classic default blue fallback
     BPath desktopPath;
 
+    // 1. Get the current active workspace index (0-indexed) and convert to a bitmask
     int32 currentWorkspaceIndex = current_workspace();
     uint32 currentWorkspaceMask = 1 << currentWorkspaceIndex;
 
+    // 2. Resolve and attach to the Desktop directory node
     if (find_directory(B_DESKTOP_DIRECTORY, &desktopPath) == B_OK) {
         BNode desktopNode(desktopPath.Path());
         attr_info info;
@@ -790,54 +790,41 @@ BString GetActiveHaikuWallpaperPath(int32* outMode = nullptr, rgb_color* outColo
                     if (container.Unflatten(buffer) == B_OK) {
                         
                         BString fallbackPath = "";
-                        int32 fallbackMode = 4;
-                        rgb_color fallbackColor = {51, 102, 152, 255};
 
+                        // 3. Loop through the array to find the match for our current workspace
                         for (int32 index = 0; ; index++) {
                             int32 workspaceMask = 0;
+                            
+                            // Check if we reached the end of the data matrix
                             if (container.FindInt32("be:bgndimginfoworkspaces", index, &workspaceMask) != B_OK) {
                                 break;
                             }
 
                             const char* extractedPath = nullptr;
-                            int32 extractedMode = 4;
-                            container.FindInt32("be:bgndimginfomode", index, &extractedMode);
-
-                            // Extract the rgb_color structure for the background canvas color
-                            rgb_color extractedColor = {51, 102, 152, 255};
-                            const void* colorData = nullptr;
-                            ssize_t colorSize = 0;
-                            if (container.FindData("be:bgndimginfocolor", B_RAW_TYPE, index, &colorData, &colorSize) == B_OK) {
-								if (colorSize == sizeof(rgb_color)) {
-								    extractedColor = *static_cast<const rgb_color*>(colorData);
-								}
-                            }
-
                             if (container.FindString("be:bgndimginfopath", index, &extractedPath) == B_OK) {
                                 if (extractedPath != nullptr && extractedPath[0] != '\0') {
+                                    
                                     BEntry imageFile(extractedPath);
                                     if (imageFile.Exists() && !imageFile.IsDirectory()) {
+                                        
+                                        // If this entry explicitly targets our current workspace bit, choose it immediately
                                         if ((workspaceMask & currentWorkspaceMask) != 0) {
                                             targetWallpaperPath = extractedPath;
-                                            targetMode = extractedMode;
-                                            targetColor = extractedColor;
                                             break; 
                                         }
 
+                                        // Fallback if no specific workspace match is found later
                                         if (fallbackPath.IsEmpty()) {
                                             fallbackPath = extractedPath;
-                                            fallbackMode = extractedMode;
-                                            fallbackColor = extractedColor;
                                         }
                                     }
                                 }
                             }
                         }
 
+                        // If no specific workspace rule matched, fall back to the first valid image found
                         if (targetWallpaperPath.IsEmpty()) {
                             targetWallpaperPath = fallbackPath;
-                            targetMode = fallbackMode;
-                            targetColor = fallbackColor;
                         }
                     }
                 }
@@ -846,12 +833,8 @@ BString GetActiveHaikuWallpaperPath(int32* outMode = nullptr, rgb_color* outColo
         }
     }
 
-    if (outMode != nullptr) *outMode = targetMode;
-    if (outColor != nullptr) *outColor = targetColor;
     return targetWallpaperPath;
 }
-
-
 
 
 
@@ -880,15 +863,8 @@ public:
         fHaikuMenuIcon = LoadIconFromNode("/boot/system/apps/AboutSystem", 128);
         fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
 
-		rgb_color sysColor;
-		BString capturedWallpaper = GetActiveHaikuWallpaperPath(&fWallpaperMode, &sysColor);
-		fBgColorR = static_cast<float>(sysColor.red) / 255.0f;
-		fBgColorG = static_cast<float>(sysColor.green) / 255.0f;
-		fBgColorB = static_cast<float>(sysColor.blue) / 255.0f;
-		
-		fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
-
-
+        BString capturedWallpaper = GetActiveHaikuWallpaperPath();
+        fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
 
         // =========================================================================
         // INITIALIZE SYSTEM MONITOR 
@@ -919,27 +895,17 @@ public:
 	void ReloadWallpaperBackground() {
 	    std::cout << "[Engine] Reloading wallpaper graphics assets..." << std::endl;
 	
+	    // Use the inner integer identifier field for the OpenGL cleanup
 	    if (fWallpaperTexture.id != 0) {
 	        glDeleteTextures(1, &fWallpaperTexture.id);
 	        fWallpaperTexture.id = 0;
 	    }
 	
-	    rgb_color sysColor;
-	    BString capturedWallpaper = GetActiveHaikuWallpaperPath(&fWallpaperMode, &sysColor);
-	    
-	    // =========================================================================
-	    // OVERRIDE FORCED MODE LOCK
-	    // =========================================================================
-	    // Force Scale to Fit (Mode 4) to ensure the re-stitch math never breaks!
-	    fWallpaperMode = BG_MODE_SCALE; 
-	    // =========================================================================
-	
+	    BString capturedWallpaper = GetActiveHaikuWallpaperPath();
 	    std::cout << "[Engine] Detected new wallpaper target: " << capturedWallpaper.String() << std::endl;
+	
 	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
 	}
-
-
-
 
 
     void HandleMouseWheel(int wheelStepY) {
@@ -1602,74 +1568,48 @@ public:
         glClearColor(fBgColorR, fBgColorG, fBgColorB, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-                // =========================================================================
-        // 2. ABSOLUTE SCREEN-SPACE WALLPAPER RE-STITCH ALIGNMENT
+        // =========================================================================
+        // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED) - STATIONARY
         // =========================================================================
         if (fWallpaperTexture.id != 0) {
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, fWallpaperTexture.id);
             glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-            float sW = static_cast<float>(fWidth);
-            float sH = static_cast<float>(fHeight);
-            float tW = static_cast<float>(fWallpaperTexture.width);
-            float tH = static_cast<float>(fWallpaperTexture.height);
+            // 1. Calculate aspect ratios
+            float screenAspect = static_cast<float>(fWidth) / static_cast<float>(fHeight);
+            float imageAspect  = static_cast<float>(fWallpaperTexture.width) / static_cast<float>(fWallpaperTexture.height);
 
-            // Establish UV bounds based on your background configuration mode
+            // Default to full texture boundaries
             float uMin = 0.0f, uMax = 1.0f;
             float vMin = 0.0f, vMax = 1.0f;
 
-            if (fWallpaperMode == BG_MODE_CENTER) {
-                // Determine pixel coordinates relative to the screen center footprint
-                float startX = (sW - tW) / 2.0f;
-                float startY = (sH - tH) / 2.0f;
-
-                // Project UV coordinates down into our specific dock region 
-                // This alignment matches the exact physical coordinates of Tracker!
-                uMin = -startX / tW;
-                uMax = (sW - startX) / tW;
-                vMin = -startY / tH;
-                vMax = (sH - startY) / tH;
-
-            } else if (fWallpaperMode == BG_MODE_TILE) {
-                // Calculate the global repeating matrix frequency across the screen
-                uMax = sW / tW;
-                vMax = sH / tH;
-
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-            } else if (fWallpaperMode == BG_MODE_SCALE) {
-                // Scale to Fit (Crop-to-fit aspect ratio mapping)
-                float screenAspect = sW / sH;
-                float imageAspect  = tW / tH;
-
-                if (imageAspect > screenAspect) {
-                    float cropWidth = tH * screenAspect;
-                    float horizontalDiff = (tW - cropWidth) / tW;
-                    uMin = horizontalDiff / 2.0f;
-                    uMax = 1.0f - uMin;
-                } else if (imageAspect < screenAspect) {
-                    float cropHeight = tW / screenAspect;
-                    float verticalDiff = (tH - cropHeight) / tH;
-                    vMin = verticalDiff / 2.0f;
-                    vMax = 1.0f - vMin;
-                }
+            // 2. Replicate Tracker's center-cropped scaling logic
+            if (imageAspect > screenAspect) {
+                // Image is wider than your screen aspect: crop left/right sides
+                float cropWidth = static_cast<float>(fWallpaperTexture.height) * screenAspect;
+                float horizontalDiff = (static_cast<float>(fWallpaperTexture.width) - cropWidth) / static_cast<float>(fWallpaperTexture.width);
+                uMin = horizontalDiff / 2.0f;
+                uMax = 1.0f - uMin;
+            } else if (imageAspect < screenAspect) {
+                // Image is taller than your screen aspect: crop top/bottom sides
+                float cropHeight = static_cast<float>(fWallpaperTexture.width) / screenAspect;
+                float verticalDiff = (static_cast<float>(fWallpaperTexture.height) - cropHeight) / static_cast<float>(fWallpaperTexture.height);
+                vMin = verticalDiff / 2.0f;
+                vMax = 1.0f - vMin;
             }
-            // Note: BG_MODE_STRETCH stays at default 0.0 to 1.0 UV mappings!
 
-            // Draw across the entire screen area coordinates to force hardware-accelerated stitching
+            // 3. Render utilizing your original upright orientation vertices
             glBegin(GL_QUADS);
                 glTexCoord2f(uMin, vMin); glVertex2f(0.0f, 0.0f);
-                glTexCoord2f(uMax, vMin); glVertex2f(sW, 0.0f);
-                glTexCoord2f(uMax, vMax); glVertex2f(sW, sH);
-                glTexCoord2f(uMin, vMax); glVertex2f(0.0f, sH);
+                glTexCoord2f(uMax, vMin); glVertex2f(static_cast<float>(fWidth), 0.0f);
+                glTexCoord2f(uMax, vMax); glVertex2f(static_cast<float>(fWidth), static_cast<float>(fHeight));
+                glTexCoord2f(uMin, vMax); glVertex2f(0.0f, static_cast<float>(fHeight));
             glEnd();
 
             glBindTexture(GL_TEXTURE_2D, 0); 
             glDisable(GL_TEXTURE_2D);
         }
-
 
         // =========================================================================
         // NEW MATRIX TRANSLATION FOR THE AUTOHIDE OVERLAY ELEMENTS
@@ -2798,7 +2738,7 @@ void FetchHaikuMixerVolume() {
 	float fCachedVolWidth = 0.0f;
 	float fCachedVolHeight = 0.0f;
 	float fPreMuteVolumeLevel = 0.5f; 
-	int32 fWallpaperMode; 
+
 //@private    
 
 public:
