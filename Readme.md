@@ -8,6 +8,6 @@ make release
 ```
 
 ### Screenshots
-<img width="1067" height="836" alt="Image" src="https://github.com/user-attachments/assets/7c977b49-595a-4972-9a43-2b5bc389fd60" />
+<img width="1920" height="1080" alt="Image" src="https://github.com/user-attachments/assets/74c650b0-0b77-4c64-a490-bb777a73a47e" />
 
 
