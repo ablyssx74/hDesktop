@@ -48,6 +48,9 @@
 #include <ParameterWeb.h>
 #include <CheckBox.h>
 #include <NodeMonitor.h>
+#include <set>
+#include <PopUpMenu.h>
+#include <MenuItem.h>
 
 // Custom SDL Event definition
 enum {
@@ -68,7 +71,9 @@ const int32 kThresholdMaximize = 33;
 
 
 // Global communication flags (or place them in an accessible global/namespace config struct)
-extern bool autoHideEnabled; 
+bool autoHideEnabled; 
+std::set<std::string> gFavoritePaths; 
+
 void SaveConfiguration(); 
 
 enum {
@@ -272,71 +277,154 @@ public:
         BString nameB(b->name);
         return nameA.ICompare(nameB) < 0;
     }
+    
+    void KeyDown(const char* bytes, int32 numBytes)
+	{
+	    if (numBytes == 1) {
+	        // Intercept standard ascii / character byte maps
+	        switch (bytes[0]) {
+	            case B_ESCAPE:
+	            case B_SPACE:
+	            {
+	                std::cout << "[hdesktop] Close shortcut pressed. Dismissing app drawer container." << std::endl;
+	                if (Window()) {
+	                    Window()->Quit();
+	                }
+	                return;
+	            }
+	        }
+	    }
+	    
+	    // Pass any other keystrokes up to the base class handler loop safely
+	    BView::KeyDown(bytes, numBytes);
+	}
+
+    
+    
+	void ProcessAndAddItem(BEntry& entry, const char* overrideName, std::vector<DrawerItem*>& targetVector, BEntry* parentEntry = nullptr) {
+	    char name[B_FILE_NAME_LENGTH];
+	    if (overrideName != nullptr) {
+	        strncpy(name, overrideName, B_FILE_NAME_LENGTH);
+	    } else {
+	        if (entry.GetName(name) != B_OK) return;
+	    }
+	
+	    DrawerItem* item = new DrawerItem();
+	    item->name = name;
+	    entry.GetRef(&item->ref);
+	    
+	    item->icon = new BBitmap(BRect(0, 0, 47, 47), B_RGBA32);
+	    bool iconLoaded = false;
+	    
+	    // 1. Try to read the native icon from the executable binary itself
+	    BNodeInfo nodeInfo;
+	    BNode node(&entry);
+	    if (nodeInfo.SetTo(&node) == B_OK) {
+	        if (nodeInfo.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
+	            iconLoaded = true;
+	        }
+	    }
+	
+	    // --- NEW FALLBACK BLOCK: Fall back to the parent folder's icon if the binary has none ---
+	    if (!iconLoaded && parentEntry != nullptr) {
+	        BNode parentNode(parentEntry);
+	        BNodeInfo parentNodeInfo(&parentNode);
+	        if (parentNodeInfo.InitCheck() == B_OK) {
+	            if (parentNodeInfo.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
+	                iconLoaded = true;
+	            }
+	        }
+	    }
+	
+	    // 2. Generic System Asset Fallback
+	    if (!iconLoaded) {
+	        BMimeType genericMime("application/octet-stream");
+	        if (genericMime.InitCheck() != B_OK || genericMime.GetIcon(item->icon, B_LARGE_ICON) != B_OK) {
+	            delete item->icon;
+	            item->icon = nullptr;
+	        }
+	    }
+	    
+	    targetVector.push_back(item);
+	}
+
+
 
 	void ScanSystemDirectories() {
-	    // 1. Temporary storage to hold items before sorting them
 	    std::vector<DrawerItem*> temporarySortedVector;
-	
 	    const char* paths[] = { "/boot/system/apps", "/boot/system/demos", "/boot/system/preferences" };
+	    
 	    for (int p = 0; p < 3; p++) {
 	        BDirectory dir(paths[p]);
 	        if (dir.InitCheck() != B_OK) continue;
 	
 	        BEntry entry;
 	        while (dir.GetNextEntry(&entry) == B_OK) {
-	            char name[B_FILE_NAME_LENGTH];
-	            if (entry.GetName(name) != B_OK) continue;
-	
-	            DrawerItem* item = new DrawerItem();
-	            item->name = name;
-	            entry.GetRef(&item->ref);
-	            
-	            // Allocate native 32x32 color matrix profile
-	            item->icon = new BBitmap(BRect(0, 0, 47, 47), B_RGBA32);
-	            
-	            bool iconLoaded = false;
-	            
-	            // --- CONDITION A: ENTRY IS A SUB-DIRECTORY/FOLDER ---
 	            if (entry.IsDirectory()) {
-	                BMimeType folderMime("application/x-vnd.Be-directory");
-	                if (folderMime.InitCheck() == B_OK) {
-	                    if (folderMime.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
-	                        iconLoaded = true;
-	                    }
-	                }
-	            }
-	            // --- CONDITION B: ENTRY IS A REGULAR FILE/BINARY ---
-	            else {
-	                BNodeInfo nodeInfo;
-	                BNode node(&entry);
-	                if (nodeInfo.SetTo(&node) == B_OK) {
-	                    if (nodeInfo.GetIcon(item->icon, B_LARGE_ICON) == B_OK) {
-	                        iconLoaded = true;
-	                    }
-	                }
-	            }
+	                char folderName[B_FILE_NAME_LENGTH];
+	                if (entry.GetName(folderName) != B_OK) continue;
 	
-	            if (!iconLoaded) {
-	                BMimeType genericMime("application/octet-stream");
-	                if (genericMime.InitCheck() != B_OK || genericMime.GetIcon(item->icon, B_LARGE_ICON) != B_OK) {
-	                    delete item->icon;
-	                    item->icon = nullptr;
+	                BDirectory subDir(&entry);
+	                if (subDir.InitCheck() == B_OK) {
+	                    BEntry subEntry;
+	                    
+	                    // Track choices across the folder inspection sweep
+	                    BEntry bestAppEntry;
+	                    char bestAppName[B_FILE_NAME_LENGTH] = {0};
+	                    while (subDir.GetNextEntry(&subEntry) == B_OK) {
+	                        char subName[B_FILE_NAME_LENGTH];
+	                        if (subEntry.GetName(subName) != B_OK) continue;
+	
+	                        BNode subNode(&subEntry);
+	                        BNodeInfo subNodeInfo(&subNode);
+	                        char mimeType[B_MIME_TYPE_LENGTH] = {0};
+	                        subNodeInfo.GetType(mimeType);
+	
+	                        // Is this an executable file or a wrapper matching the folder metadata name?
+	                        if (strcmp(mimeType, "application/x-vnd.Be-elfexecutable") == 0 ||
+	                            strcmp(mimeType, "text/x-source-code") == 0 || // Catch shell script wrappers
+	                            strstr(subName, folderName) != nullptr) {
+	                            
+	                            // Check if this specific item contains the vector icon asset
+	                            attr_info attrInfo;
+								if (subNode.GetAttrInfo("BEOS:ICON", &attrInfo) == B_OK) {
+								    bestAppEntry = subEntry;
+								    strncpy(bestAppName, subName, B_FILE_NAME_LENGTH);
+								    break; 
+								}                            
+	                            // Backup: Save the first binary we encounter if no custom icon wrapper presents itself
+	                            if (bestAppName[0] == '\0') {
+	                                bestAppEntry = subEntry;
+	                                strncpy(bestAppName, subName, B_FILE_NAME_LENGTH);
+	                            }
+	                        }
+	                    }
+	
+	                    // If we found a valid launcher target inside the folder, register it!
+	                    if (bestAppName[0] != '\0') {
+	                        ProcessAndAddItem(bestAppEntry, bestAppName, temporarySortedVector, &entry);
+	                    } else {
+	                        // Fallback: Show the parent folder itself if completely empty of executables
+	                        ProcessAndAddItem(entry, folderName, temporarySortedVector);
+	                    }
 	                }
+	            } 
+	            else {
+	                // Top level system preferences and apps
+	                ProcessAndAddItem(entry, nullptr, temporarySortedVector);
 	            }
-	            
-	            // Collect the pointers inside our sorting array vector structure instead of immediate list push
-	            temporarySortedVector.push_back(item);
 	        }
 	    }
 	
 	    // 2. Perform Case-Insensitive Alphabetical Sorting across the entire combined list
 	    std::sort(temporarySortedVector.begin(), temporarySortedVector.end(), CompareDrawerItems);
 	
-	    // 3. Move the perfectly organized pointers into your native Haiku BList canvas architecture
+	    // 3. Move perfectly organized pointers into native BList architecture
 	    for (size_t i = 0; i < temporarySortedVector.size(); ++i) {
 	        fItemsList.AddItem(temporarySortedVector[i]);
 	    }
 	}
+
 
     virtual void Draw(BRect updateRect) {
         // =========================================================================
@@ -354,9 +442,16 @@ public:
         BPoint titlePos((canvasWidth - titleWidth) / 2.0f, 30.0f);
         DrawString(titleStr.String(), titlePos);
 
-        // 2. Define Action Icon Boundary Metrics (Exit Left, Config Right)
-        BRect exitIconRect(30.0f, 45.0f, 61.0f, 76.0f);
+        // 2. Define Action Icon Boundary Metrics
+        // --- Exit button is now calculated dynamically from the right side ---
         BRect configIconRect(canvasWidth - 62.0f, 45.0f, canvasWidth - 31.0f, 76.0f);
+        BRect exitIconRect(canvasWidth - 103.0f, 45.0f, canvasWidth - 72.0f, 76.0f); // 31px wide, placed left of config
+
+        // Power buttons stay safely on the far left side
+        BRect shutdownSysRect(30.0f, 45.0f, 110.0f, 76.0f); // Shifted over to start at X=30
+        BRect rebootSysRect(120.0f, 45.0f, 190.0f, 76.0f);
+
+
 
         // Fetch active cursor coordinates for interface tracking
         BPoint cursorPoint;
@@ -375,6 +470,41 @@ public:
         }
         StrokeLine(BPoint(exitIconRect.left, exitIconRect.top), BPoint(exitIconRect.right, exitIconRect.bottom));
         StrokeLine(BPoint(exitIconRect.left, exitIconRect.bottom), BPoint(exitIconRect.right, exitIconRect.top));
+        
+                // --- ADDED: DRAW SHUTDOWN BUTTON ---
+        if (shutdownSysRect.Contains(cursorPoint)) {
+            SetHighColor(rgb_color{220, 60, 60, 45}); // Soft red hover glow
+            FillRect(shutdownSysRect);
+            SetHighColor(rgb_color{255, 90, 90, 255}); 
+        } else {
+            SetHighColor(rgb_color{35, 36, 42, 255}); // Dark matte base
+            FillRect(shutdownSysRect);
+            SetHighColor(rgb_color{210, 100, 100, 255}); 
+        }
+        StrokeRect(shutdownSysRect);
+        
+        SetFont(be_plain_font);
+        SetFontSize(11.0f);
+        BString shutText("Shutdown");
+        float shutTextW = StringWidth(shutText.String());
+        DrawString(shutText.String(), BPoint(shutdownSysRect.left + (shutdownSysRect.Width() - shutTextW) / 2.0f, 64.0f));
+
+        // --- ADDED: DRAW REBOOT BUTTON ---
+        if (rebootSysRect.Contains(cursorPoint)) {
+            SetHighColor(rgb_color{60, 140, 220, 45}); // Soft blue hover glow
+            FillRect(rebootSysRect);
+            SetHighColor(rgb_color{90, 175, 255, 255}); 
+        } else {
+            SetHighColor(rgb_color{35, 36, 42, 255}); 
+            FillRect(rebootSysRect);
+            SetHighColor(rgb_color{100, 160, 220, 255}); 
+        }
+        StrokeRect(rebootSysRect);
+
+        BString rebootText("Reboot");
+        float rebootTextW = StringWidth(rebootText.String());
+        DrawString(rebootText.String(), BPoint(rebootSysRect.left + (rebootSysRect.Width() - rebootTextW) / 2.0f, 64.0f));
+
 
         // 4. Draw Config Gear Button (Right Side)
         if (configIconRect.Contains(cursorPoint)) {
@@ -395,34 +525,109 @@ public:
         StrokeLine(BPoint(20.0f, 91.0f), BPoint(canvasWidth - 20.0f, 91.0f));
 
         // =========================================================================
-        // ADJUSTED APPLICATION GRID SECTION
+        // ADJUSTED MULTI-SECTION APPLICATION GRID PIPELINE
         // =========================================================================
         float itemW = 100.0f;
         float itemH = 110.0f;
         float startX = 30.0f;
-        float startY = 115.0f; // Shifted safely down below the separator layout line
+        float currentY = 115.0f; // Track active height positions dynamically
         float spacingX = 24.0f;
         float spacingY = 20.0f;
 
         int32 cols = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
         if (cols < 1) cols = 1;
 
-        // Reset tracking mode back for icon card hover calculations
+        // Reset tracking modes for icon card hover metrics
         SetFont(be_plain_font);
         SetFontSize(11.0f);
 
-        // =========================================================================
-        // BACKLIGHT HOVER HIGHLIGHT FILTER PASS
-        // =========================================================================
+        // 1. Separate your source lists dynamically
+        std::vector<DrawerItem*> favoriteItems;
+        std::vector<DrawerItem*> standardItems;
+
         for (int32 i = 0; i < fItemsList.CountItems(); i++) {
+            DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
+            BPath itemPath(&item->ref);
+            std::string pathKey(itemPath.Path());
+
+            if (gFavoritePaths.find(pathKey) != gFavoritePaths.end()) {
+                favoriteItems.push_back(item);
+            } else {
+                standardItems.push_back(item);
+            }
+        }
+
+        // =========================================================================
+        // PASS A: RENDER PINNED FAVORITES GRID
+        // =========================================================================
+        if (!favoriteItems.empty()) {
+            SetFont(be_bold_font);
+            SetFontSize(12.0f);
+            SetHighColor(rgb_color{130, 145, 180, 200}); // Dim slate text
+            DrawString("Favorites", BPoint(startX, currentY + 10.0f));
+            currentY += 25.0f;
+
+            SetFont(be_plain_font);
+            SetFontSize(11.0f);
+
+            for (size_t i = 0; i < favoriteItems.size(); i++) {
+                int32 c = i % cols;
+                int32 r = i / cols;
+
+                float x = startX + (c * (itemW + spacingX));
+                float y = currentY + (r * (itemH + spacingY));
+                BRect itemBounds(x, y, x + itemW, y + itemH);
+
+                // Highlight Hover
+                if (itemBounds.Contains(cursorPoint)) {
+                    SetDrawingMode(B_OP_ALPHA);
+                    SetHighColor(rgb_color{100, 140, 220, 30}); // Soft blue highlight glow
+                    FillRect(itemBounds);
+                    SetHighColor(rgb_color{130, 160, 220, 70});
+                    StrokeRect(itemBounds);
+                }
+
+                DrawerItem* item = favoriteItems[i];
+                if (item->icon) {
+                    SetDrawingMode(B_OP_ALPHA);
+                    DrawBitmap(item->icon, BPoint(x + (itemW / 2.0f) - 24.0f, y + 15.0f));
+                }
+
+                SetHighColor(rgb_color{240, 240, 245, 255});
+                BString truncatedName = item->name;
+                TruncateString(&truncatedName, B_TRUNCATE_END, itemW - 10.0f);
+                float textW = StringWidth(truncatedName.String());
+                DrawString(truncatedName.String(), BPoint(x + (itemW / 2.0f) - (textW / 2.0f), y + 90.0f));
+            }
+
+            int32 favRows = (favoriteItems.size() + cols - 1) / cols;
+            currentY += (favRows * (itemH + spacingY)) + 15.0f;
+
+            // Draw clean secondary dividing line separating lists
+            SetHighColor(rgb_color{50, 52, 60, 120}); 
+            StrokeLine(BPoint(startX, currentY - 5.0f), BPoint(canvasWidth - startX, currentY - 5.0f));
+        }
+
+        // =========================================================================
+        // PASS B: RENDER REMAINING STANDARD APPLICATIONS GRID
+        // =========================================================================
+        SetFont(be_bold_font);
+        SetFontSize(12.0f);
+        SetHighColor(rgb_color{120, 125, 135, 180});
+        DrawString("Applications", BPoint(startX, currentY + 10.0f));
+        currentY += 25.0f;
+
+        SetFont(be_plain_font);
+        SetFontSize(11.0f);
+
+        for (size_t i = 0; i < standardItems.size(); i++) {
             int32 c = i % cols;
             int32 r = i / cols;
 
             float x = startX + (c * (itemW + spacingX));
-            float y = startY + (r * (itemH + spacingY));
-
+            float y = currentY + (r * (itemH + spacingY));
             BRect itemBounds(x, y, x + itemW, y + itemH);
-            
+
             if (itemBounds.Contains(cursorPoint)) {
                 SetDrawingMode(B_OP_ALPHA);
                 SetHighColor(rgb_color{100, 110, 140, 30}); 
@@ -430,49 +635,58 @@ public:
                 SetHighColor(rgb_color{130, 145, 180, 70});
                 StrokeRect(itemBounds);
             }
+
+            DrawerItem* item = standardItems[i];
+            if (item->icon) {
+                SetDrawingMode(B_OP_ALPHA);
+                DrawBitmap(item->icon, BPoint(x + (itemW / 2.0f) - 24.0f, y + 15.0f));
+            }
+
+            SetHighColor(rgb_color{240, 240, 245, 255});
+            BString truncatedName = item->name;
+            TruncateString(&truncatedName, B_TRUNCATE_END, itemW - 10.0f);
+            float textW = StringWidth(truncatedName.String());
+            DrawString(truncatedName.String(), BPoint(x + (itemW / 2.0f) - (textW / 2.0f), y + 90.0f));
         }
 
-		// =========================================================================
-		// INDIVIDUAL ICON AND STRING LABEL RENDERING PASS
-		// =========================================================================
-		for (int32 i = 0; i < fItemsList.CountItems(); i++) {
-		    DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
-		    int32 c = i % cols;
-		    int32 r = i / cols;
-		
-		    float x = startX + (c * (itemW + spacingX));
-		    float y = startY + (r * (itemH + spacingY));
-		
-		    if (item->icon) {
-		        SetDrawingMode(B_OP_ALPHA);
-		        // CHANGED: Offset is now -24.0f instead of -16.0f to properly center the 48px wide icon
-		        DrawBitmap(item->icon, BPoint(x + (itemW / 2.0f) - 24.0f, y + 15.0f));
-		    }
-		
-		    SetHighColor(rgb_color{240, 240, 245, 255});
-		    BString truncatedName = item->name;
-		    TruncateString(&truncatedName, B_TRUNCATE_END, itemW - 10.0f);
-		    float textW = StringWidth(truncatedName.String());
-		    
-		    // CHANGED: Pushed text down from y + 80.0f to y + 90.0f to give the 48px tall icon room
-		    DrawString(truncatedName.String(), BPoint(x + (itemW / 2.0f) - (textW / 2.0f), y + 90.0f));
-		}
-
-
-        // Dynamically update inner container height tracking with header offset
-        int32 colsRecalc = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
-        if (colsRecalc < 1) colsRecalc = 1;
-        int32 totalRows = (fItemsList.CountItems() + colsRecalc - 1) / colsRecalc;
-        float targetVirtualHeight = (totalRows * (itemH + spacingY)) + startY + 40.0f;
+        // Recalculate virtual container height correctly to scale scrolling properties
+        int32 stdRows = (standardItems.size() + cols - 1) / cols;
+        float targetVirtualHeight = currentY + (stdRows * (itemH + spacingY)) + 40.0f;
         
         if (Bounds().Height() != targetVirtualHeight) {
             ResizeTo(Bounds().Width(), targetVirtualHeight);
         }
+
     }
     
 
 		virtual void MessageReceived(BMessage* message) {
 		    switch (message->what) {
+		    	
+		        case 'tfav': {
+		            const char* pathStr = nullptr;
+		            if (message->FindString("path", &pathStr) == B_OK && pathStr != nullptr) {
+		                std::string targetKey(pathStr);
+		                
+		                std::set<std::string>::iterator it = gFavoritePaths.find(targetKey);
+		                if (it != gFavoritePaths.end()) {
+		                    gFavoritePaths.erase(it);
+		                    std::cout << "[hdesktop] Removed from Favorites: " << pathStr << std::endl;
+		                } else {
+		                    gFavoritePaths.insert(targetKey);
+		                    std::cout << "[hdesktop] Added to Favorites: " << pathStr << std::endl;
+		                }
+		
+		                // Write the message flattening block safely back down to disk
+		                SaveConfiguration();
+		                
+		                // Signal an internal redrawing pass 
+		                Invalidate();
+		            }
+		            break;
+		        }
+
+		    	
 		        case B_MOUSE_WHEEL_CHANGED: {
 		            float deltaY = 0.0f;
 		            
@@ -505,15 +719,42 @@ public:
         float canvasWidth = Bounds().Width();
         
         // Define Action Header Click Target Boundaries
-        BRect exitIconRect(30.0f, 45.0f, 61.0f, 76.0f);
+        // --- Coordinates mirrored to match Draw view layout modifications ---
         BRect configIconRect(canvasWidth - 62.0f, 45.0f, canvasWidth - 31.0f, 76.0f);
+        BRect exitIconRect(canvasWidth - 103.0f, 45.0f, canvasWidth - 72.0f, 76.0f);
+
+        BRect shutdownSysRect(30.0f, 45.0f, 110.0f, 76.0f);
+        BRect rebootSysRect(120.0f, 45.0f, 190.0f, 76.0f);
 
         // 1. Process Exit Button Trigger Click
         if (exitIconRect.Contains(point)) {
+            // ... rest of your exit code
+
             std::cout << "[Native Drawer] Exit Action Intercepted. Closing popup container." << std::endl;
             if (Window()) {
                 Window()->Quit(); 
             }
+            return;
+        }
+
+
+        // --- ADDED: INTERCEPT SHUTDOWN SYSTEM TRACKER ---
+        if (shutdownSysRect.Contains(point)) {
+            std::cout << "[hdesktop] Invoking Native CLI System Power Down." << std::endl;
+            
+            // Runs a standard safe background power down sequence.
+            // Replace "shutdown" with "shutdown -q" if you want to bypass alerts completely.
+            std::system("shutdown &");
+            return;
+        }
+
+        // --- ADDED: INTERCEPT REBOOT SYSTEM TRACKER ---
+        if (rebootSysRect.Contains(point)) {
+            std::cout << "[hdesktop] Invoking Native CLI System Restart." << std::endl;
+            
+            // Runs a standard safe system reboot. 
+            // The "-r" flag explicitly tells Haiku OS to perform a machine reboot.
+            std::system("shutdown -r &");
             return;
         }
 
@@ -534,38 +775,109 @@ public:
         }
 
 
+          // =========================================================================
         // 3. Process Standard Grid Icon Coordinates
+        // =========================================================================
         float itemW = 100.0f;
         float itemH = 110.0f;
         float startX = 30.0f;
-        float startY = 115.0f; // Matched with the new Draw offset to fix grid registration alignment
+        float currentY = 115.0f; 
         float spacingX = 24.0f;
         float spacingY = 20.0f;
 
         int32 cols = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
         if (cols < 1) cols = 1;
 
+        uint32 buttons = 0;
+        if (Window() && Window()->CurrentMessage()) {
+            Window()->CurrentMessage()->FindInt32("buttons", (int32*)&buttons);
+        }
+
+        // Split tracking groups to match Draw locations identically
+        std::vector<DrawerItem*> favoriteItems;
+        std::vector<DrawerItem*> standardItems;
+
         for (int32 i = 0; i < fItemsList.CountItems(); i++) {
             DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
+            BPath itemPath(&item->ref);
+            std::string pathKey(itemPath.Path());
+
+            if (gFavoritePaths.find(pathKey) != gFavoritePaths.end()) {
+                favoriteItems.push_back(item);
+            } else {
+                standardItems.push_back(item);
+            }
+        }
+
+        // --- CHECK TARGETS A: EVAPORATE FAVORITES SECTOR CLICK ACTION ---
+        if (!favoriteItems.empty()) {
+            currentY += 25.0f; // Header Text Padding
+            for (size_t i = 0; i < favoriteItems.size(); i++) {
+                int32 c = i % cols;
+                int32 r = i / cols;
+
+                float x = startX + (c * (itemW + spacingX));
+                float y = currentY + (r * (itemH + spacingY));
+                BRect itemBounds(x, y, x + itemW, y + itemH);
+
+                if (itemBounds.Contains(point)) {
+                    DrawerItem* item = favoriteItems[i];
+                    BPath itemPath(&item->ref);
+                    std::string pathKey(itemPath.Path());
+
+                    if (buttons & B_SECONDARY_MOUSE_BUTTON) {
+                        BPopUpMenu* contextMenu = new BPopUpMenu("Context", false, false);
+                        BMessage* toggleMsg = new BMessage('tfav');
+                        toggleMsg->AddString("path", pathKey.c_str());
+                        contextMenu->AddItem(new BMenuItem("Remove Favorite", toggleMsg));
+                        contextMenu->SetTargetForItems(this);
+                        contextMenu->Go(ConvertToScreen(point), true, true, true);
+                        return;
+                    }
+                    if (buttons & B_PRIMARY_MOUSE_BUTTON) {
+                        be_roster->Launch(&item->ref);
+                        if (Window()) Window()->Quit();
+                        return;
+                    }
+                }
+            }
+            int32 favRows = (favoriteItems.size() + cols - 1) / cols;
+            currentY += (favRows * (itemH + spacingY)) + 15.0f;
+        }
+
+        // --- CHECK TARGETS B: EVAPORATE STANDARD SECTOR CLICK ACTION ---
+        currentY += 25.0f; // Header Text Padding
+        for (size_t i = 0; i < standardItems.size(); i++) {
             int32 c = i % cols;
             int32 r = i / cols;
 
             float x = startX + (c * (itemW + spacingX));
-            float y = startY + (r * (itemH + spacingY));
-
+            float y = currentY + (r * (itemH + spacingY));
             BRect itemBounds(x, y, x + itemW, y + itemH);
+
             if (itemBounds.Contains(point)) {
-                std::cout << "[Native Drawer] Selected Item Hook: " << item->name.String() << std::endl;
-                be_roster->Launch(&item->ref);
-                
-                if (Window()) {
-                    Window()->Quit(); 
+                DrawerItem* item = standardItems[i];
+                BPath itemPath(&item->ref);
+                std::string pathKey(itemPath.Path());
+
+                if (buttons & B_SECONDARY_MOUSE_BUTTON) {
+                    BPopUpMenu* contextMenu = new BPopUpMenu("Context", false, false); 
+                    BMessage* toggleMsg = new BMessage('tfav');
+                    toggleMsg->AddString("path", pathKey.c_str());
+                    contextMenu->AddItem(new BMenuItem("Add Favorite", toggleMsg));
+                    contextMenu->SetTargetForItems(this);
+                    contextMenu->Go(ConvertToScreen(point), true, true, true);
+                    return;
                 }
-                return;
+
+                if (buttons & B_PRIMARY_MOUSE_BUTTON) {
+                    be_roster->Launch(&item->ref);
+                    if (Window()) Window()->Quit();
+                    return;
+                }
             }
         }
     }
-
 };
 
 // =========================================================================
@@ -3129,22 +3441,32 @@ public:
 
 
 
-bool autoHideEnabled = false;
-
 void LoadConfiguration() {
     BPath path;
-    // Find the dedicated system path directory safely (~/config/settings/)
+    gFavoritePaths.clear(); // Reset to prevent duplicate tracking anomalies
+    
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
         path.Append("hdesktop_settings");
         
         BFile file(path.Path(), B_READ_ONLY);
         BMessage settings;
         
-        // If file unpacks successfully, look up saved preferences
         if (settings.Unflatten(&file) == B_OK) {
+            // 1. Recover your existing auto-hide tracking value
             bool savedValue;
             if (settings.FindBool("auto_hide", &savedValue) == B_OK) {
                 autoHideEnabled = savedValue;
+            }
+            
+            // 2. Recover the favorites string index array
+            const char* favPath = nullptr;
+            int32 i = 0;
+            // Loops through every entry inside the key array automatically
+            while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
+                if (favPath != nullptr) {
+                    gFavoritePaths.insert(favPath);
+                }
+                i++;
             }
         }
     }
@@ -3155,14 +3477,22 @@ void SaveConfiguration() {
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
         path.Append("hdesktop_settings");
         
-        // Open file safely for clearing data and writing anew
         BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
         BMessage settings;
         
+        // 1. Pack your existing auto-hide setting
         settings.AddBool("auto_hide", autoHideEnabled);
-        settings.Flatten(&file); // Writes key/values securely to storage layout block
+        
+        // 2. Pack all live favorites keys sequentially into the same field name
+        std::set<std::string>::iterator it;
+        for (it = gFavoritePaths.begin(); it != gFavoritePaths.end(); ++it) {
+            settings.AddString("favorite_apps", it->c_str());
+        }
+        
+        settings.Flatten(&file); 
     }
 }
+
 
 
 
@@ -3272,7 +3602,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.8"; 
+    const char* localVersion = "v1.0.10"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
