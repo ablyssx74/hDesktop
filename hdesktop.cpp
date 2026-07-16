@@ -3,54 +3,602 @@
  * All rights reserved. Distributed under the terms of the MIT license.
  */ 
 
+#include <algorithm>
+#include <AppKit.h>
+#include <AppServerLink.h> 
+#include <Bitmap.h>
+#include <CheckBox.h>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib> 
+#include <cstring>
+#include <ctime>
+#include <Deskbar.h>
+#include <Directory.h>
+#include <Entry.h>
+#include <File.h>
+#include <FindDirectory.h>
+#include <Font.h>
+#include <fs_attr.h>
+#include <GL/gl.h>
+#include <GL/glu.h>
+#include <IconUtils.h>
+#include <InterfaceDefs.h>
+#include <iostream>
+#include <map>
+#include <MediaNode.h>
+#include <MediaRoster.h>
+#include <MenuItem.h>
+#include <Message.h>
+#include <Node.h>
+#include <NodeInfo.h>
+#include <NodeMonitor.h>
+#include <OS.h>
+#include <ParameterWeb.h>
+#include <Path.h>
+#include <PopUpMenu.h>
+#include <Roster.h>
+#include <Screen.h>
+#include <ScrollView.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include <SDL2/SDL_syswm.h>
-#include <GL/glu.h>
-#include <Bitmap.h>
-#include <IconUtils.h>
-#include <File.h>
-#include <Directory.h>
-#include <Entry.h>
-#include <Path.h>
-#include <NodeInfo.h>
-#include <Node.h>
-#include <iostream>
-#include <vector>
-#include <algorithm>
-#include <string>
-#include <View.h>
-#include <Font.h>
-#include <InterfaceDefs.h>
-#include <cmath>
-#include <Roster.h>
-#include <ctime>
-#include <TranslationUtils.h>
-#include <OS.h>
-#include <AppKit.h>
-#include <StorageKit.h>
-#include <vector>
-#include <AppServerLink.h> 
-#include <cstring>
-#include <Window.h>
-#include <FindDirectory.h>
-#include <String.h>
-#include <fs_attr.h>
-#include <Message.h>
-#include <stdio.h>
-#include <cstdio>
-#include <cstdlib> 
-#include <ScrollView.h>
-#include <Screen.h>
-#include <map>
-#include <MediaRoster.h>
-#include <MediaNode.h>
-#include <ParameterWeb.h>
-#include <CheckBox.h>
-#include <NodeMonitor.h>
 #include <set>
-#include <PopUpMenu.h>
-#include <MenuItem.h>
+#include <stdio.h>
+#include <StorageKit.h>
+#include <String.h>
+#include <string>
+#include <SupportKit.h> 
+#include <TranslationUtils.h>
+#include <vector>
+#include <View.h>
+#include <Window.h>
+#include <NavMenu.h> 
+
+using BPrivate::BNavMenu;
+// =========================================================================
+// PRIVATE SYMBOL ACCESS LAYER: UNNESTED PUBLIC FLOATING NAVIGATOR SUBCLASS
+// =========================================================================
+class BPopupNavMenu : public BPrivate::BNavMenu {
+public:
+    BPopupNavMenu(const char* title, uint32 message, const BMessenger& target)
+        : BPrivate::BNavMenu(title, message, target) {}
+
+    // Public bridge function to expose the protected base method to our click loop
+    BMenuItem* PublicTrack() {
+        return Track(true, nullptr);
+    }
+};
+
+
+
+// =========================================================================
+// CUSTOM RENDERING LAYER: LIVE GEOMETRIC REAL-TIME MEMORY USAGE GRAPH BAR
+// =========================================================================
+class BMemoryBarMenuItem : public BMenuItem {
+public:
+    BMemoryBarMenuItem(const char* label, double fillPercentage)
+        : BMenuItem(label, nullptr), fFillPercentage(fillPercentage) {}
+
+    void UpdateMetrics(double newPercentage, const char* newLabel) {
+        fFillPercentage = newPercentage;
+        SetLabel(newLabel);
+    }
+
+protected:
+    virtual void GetContentSize(float* width, float* height) override {
+        BMenuItem::GetContentSize(width, height);
+        // FIXED: Expanded the total bounding box width parameter from 320px to 420px 
+        // to give your long memory telemetry strings plenty of breathing room!
+        *width = 420.0f;
+        *height = 18.0f;
+    }
+
+    virtual void DrawContent() override {
+        BMenu* menu = Menu();
+        if (!menu) return;
+
+        BRect bounds = Frame();
+        float itemHeight = bounds.Height();
+        
+        font_height fh;
+        menu->GetFontHeight(&fh);
+        float fontBaseline = bounds.top + (itemHeight - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+
+        // FIXED: Pushed columns significantly rightward to completely eliminate text overlapping!
+        float nameColumnLeft = bounds.left + 5.0f;   
+        float textColumnLeft = bounds.left + 280.0f; // Shifted right by 100 pixels
+        float barColumnLeft  = bounds.left + 330.0f; // Shifted right by 100 pixels
+        float barWidth = 80.0f;
+
+        // Render the descriptive text label
+        menu->MovePenTo(nameColumnLeft, fontBaseline);
+        menu->DrawString(Label());
+
+        // Format and render the numeric consumption percentage string
+        char pctStr[16];
+        std::snprintf(pctStr, sizeof(pctStr), "%3.1f%%", fFillPercentage);
+        menu->MovePenTo(textColumnLeft, fontBaseline);
+        menu->DrawString(pctStr);
+
+        // Build and draw the visual progress track capsule
+        float barHeight = 10.0f;
+        float barTop = bounds.top + (itemHeight - barHeight) / 2.0f;
+        BRect barTrack(barColumnLeft, barTop, barColumnLeft + barWidth, barTop + barHeight);
+        
+        double clampedPercent = (fFillPercentage < 0.0) ? 0.0 : (fFillPercentage > 100.0) ? 100.0 : fFillPercentage;
+        BRect fillCap(barColumnLeft, barTop, barColumnLeft + (barWidth * (clampedPercent / 100.0)), barTop + barHeight);
+
+        // Dark track background silhouette
+        menu->SetHighColor(45, 45, 45);
+        menu->FillRect(barTrack);
+
+        // Dynamic resource footprint styling thresholds
+        if (fFillPercentage > 85.0) {
+            menu->SetHighColor(220, 20, 60);    // Crimson Red
+        } else if (fFillPercentage > 60.0) {
+            menu->SetHighColor(255, 140, 0);   // Dark Orange
+        } else {
+            menu->SetHighColor(50, 205, 50);    // Neon Green matching your UI!
+        }
+
+        if (fillCap.Width() > 0) {
+            menu->FillRect(fillCap);
+        }
+
+        // Apply a fine glass border overlay frame highlight
+        menu->SetHighColor(90, 90, 90);
+        menu->StrokeRect(barTrack);
+
+        // Restore brush configurations back to standard text properties
+        menu->SetHighColor(ui_color(B_MENU_ITEM_TEXT_COLOR));
+    }
+
+private:
+    double fFillPercentage;
+};
+
+
+// =========================================================================
+// CUSTOM RENDERING LAYER: LIVE COLORED CPU PERFORMANCE GRAPH BAR + ICONS
+// =========================================================================
+class BCpuBarMenuItem : public BMenuItem {
+public:
+    BCpuBarMenuItem(const char* label, BMessage* message, double cpuPercent, BBitmap* icon = nullptr)
+        : BMenuItem(label, message), fCpuPercent(cpuPercent), fIcon(icon) {}
+
+    virtual ~BCpuBarMenuItem() override {
+        delete fIcon; // Safely release bitmap memory when item is removed
+    }
+
+    void UpdateMetrics(double newPercent, const char* newLabel) {
+        fCpuPercent = newPercent;
+        SetLabel(newLabel);
+    }
+
+protected:
+    virtual void GetContentSize(float* width, float* height) override {
+        BMenuItem::GetContentSize(width, height);
+        *width = 340.0f; // Expand width parameter slightly to house the icon space cleanly
+        *height = 18.0f; 
+    }
+
+    virtual void DrawContent() override {
+        BMenu* menu = Menu();
+        if (!menu) return;
+
+        BRect bounds = Frame();
+        float itemHeight = bounds.Height();
+        
+        font_height fh;
+        menu->GetFontHeight(&fh);
+        float fontBaseline = bounds.top + (itemHeight - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+
+        // 1. Define our absolute, left-aligned column grid positions (offset to accommodate the icon)
+        float iconColumnLeft = bounds.left + 5.0f;
+        float nameColumnLeft = bounds.left + 25.0f;   // Shifted right by 20 pixels for clear layout padding
+        float textColumnLeft = bounds.left + 200.0f; 
+        float barColumnLeft = bounds.left + 250.0f;  
+        float barWidth = 80.0f;
+
+        // 2. Draw the application icon graphic if it was successfully resolved
+        if (fIcon) {
+            float graphicTop = bounds.top + (itemHeight - 16.0f) / 2.0f;
+            menu->SetDrawingMode(B_OP_ALPHA);
+            menu->DrawBitmap(fIcon, BPoint(iconColumnLeft, graphicTop));
+            menu->SetDrawingMode(B_OP_COPY);
+        }
+
+        // 3. Render the Process Name string
+        menu->MovePenTo(nameColumnLeft, fontBaseline);
+        menu->DrawString(Label());
+
+        // 4. Format and render the numeric percentage string
+        char pctStr[16];
+        std::snprintf(pctStr, sizeof(pctStr), "%3.1f%%", fCpuPercent);
+        menu->MovePenTo(textColumnLeft, fontBaseline);
+        menu->DrawString(pctStr);
+
+        // 5. Render the graphical performance loading bar container
+        float barHeight = 10.0f;
+        float barTop = bounds.top + (itemHeight - barHeight) / 2.0f;
+        BRect barTrack(barColumnLeft, barTop, barColumnLeft + barWidth, barTop + barHeight);
+        
+        double clampedPercent = (fCpuPercent < 0.0) ? 0.0 : (fCpuPercent > 100.0) ? 100.0 : fCpuPercent;
+        BRect fillCap(barColumnLeft, barTop, barColumnLeft + (barWidth * (clampedPercent / 100.0)), barTop + barHeight);
+
+        menu->SetHighColor(45, 45, 45);
+        menu->FillRect(barTrack);
+
+        if (fCpuPercent > 75.0) {
+            menu->SetHighColor(220, 20, 60);    // Crimson Red
+        } else if (fCpuPercent > 35.0) {
+            menu->SetHighColor(255, 140, 0);   // Dark Orange
+        } else {
+            menu->SetHighColor(50, 205, 50);    // Neon Green
+        }
+
+        if (fillCap.Width() > 0) {
+            menu->FillRect(fillCap);
+        }
+
+        menu->SetHighColor(90, 90, 90);
+        menu->StrokeRect(barTrack);
+
+        menu->SetHighColor(ui_color(B_MENU_ITEM_TEXT_COLOR));
+    }
+
+private:
+    double fCpuPercent;
+    BBitmap* fIcon;
+};
+
+
+
+// =========================================================================
+// LIVE-PULSING SUBSYSTEM: DETAILED MEMORY AND RAM CACHE PROFILER CASCADE
+// =========================================================================
+class BLiveMemoryMenu : public BMenu {
+public:
+    BLiveMemoryMenu(const char* title) : BMenu(title) {
+        SetFlags(Flags() | B_PULSE_NEEDED);
+    }
+
+    virtual void AttachedToWindow() override {
+        BMenu::AttachedToWindow();
+        Window()->SetPulseRate(500000); // Pulse metrics smoothly every half second
+    }
+
+     virtual void Pulse() override {
+        BMenu::Pulse();
+        
+        system_info info;
+        if (get_system_info(&info) == B_OK) {
+            double pageSize = static_cast<double>(B_PAGE_SIZE);
+            double totalBytes = static_cast<double>(info.max_pages) * pageSize;
+            double usedBytes = static_cast<double>(info.used_pages) * pageSize;
+            
+            int32 totalMB = static_cast<int32>(totalBytes / (1024.0 * 1024.0));
+            int32 usedMB = static_cast<int32>(usedBytes / (1024.0 * 1024.0));
+            int32 freeMB = totalMB - usedMB;
+
+            // Compute actual global RAM consumption utilization scaling 
+            double overallMemoryUsagePercent = 0.0;
+            if (totalBytes > 0) {
+                overallMemoryUsagePercent = (usedBytes / totalBytes) * 100.0;
+            }
+
+            // Create clean text strings
+            char i1[64], i2[64], i3[64];
+            std::snprintf(i1, sizeof(i1), "Used Physical Memory: %d MB", usedMB);
+            std::snprintf(i2, sizeof(i2), "Free Available RAM: %d MB", freeMB);
+            std::snprintf(i3, sizeof(i3), "Total Installed Capacity: %d MB", totalMB);
+
+            // Update row item text metrics or inject custom green graph bar items seamlessly
+            UpdateOrAddMemoryBarItem(0, i1, overallMemoryUsagePercent);
+            UpdateOrAddMemoryBarItem(1, i2, 100.0 - overallMemoryUsagePercent); // Remaining percentage space
+            UpdateOrAddMemoryBarItem(2, i3, 100.0); // Total capacity sits solid filled
+        }
+    }
+
+private:
+    void UpdateOrAddMemoryBarItem(int32 idx, const char* label, double percentage) {
+        BMemoryBarMenuItem* item = dynamic_cast<BMemoryBarMenuItem*>(ItemAt(idx));
+        if (item) {
+            item->UpdateMetrics(percentage, label);
+        } else {
+            // Instantiate our brand new memory bar object class
+            BMemoryBarMenuItem* newItem = new BMemoryBarMenuItem(label, percentage);
+            AddItem(newItem);
+        }
+    }
+
+};
+
+
+class BRealtimeCpuMenu : public BMenu {
+public:
+    BRealtimeCpuMenu(const char* title) : BMenu(title) {
+        SetFlags(Flags() | B_PULSE_NEEDED);
+        
+        system_info sysInfo;
+        fCpuCount = (get_system_info(&sysInfo) == B_OK) ? sysInfo.cpu_count : 1;
+        if (fCpuCount < 1) fCpuCount = 1;
+        
+        // Initialize our rolling tracking anchor time
+        fLastUpdateTime = system_time();
+
+        // =========================================================================
+        // CRITICAL FIRST SWIPE FIX: POPULATE ALL TEAMS IMMEDIATELY ON CREATION!
+        // This ensures the Haiku Window Layout Server sizes the menu correctly at launch.
+        // =========================================================================
+        team_info tInfo;
+        int32 teamCookie = 0;
+        int32 index = 0;
+
+        while (get_next_team_info(&teamCookie, &tInfo) == B_OK) {
+            if (tInfo.team <= 0 || std::strlen(tInfo.name) == 0) continue;
+
+            char cleanName[B_OS_NAME_LENGTH];
+            const char* lastSlash = std::strrchr(tInfo.name, '/');
+            std::strncpy(cleanName, lastSlash ? lastSlash + 1 : tInfo.name, sizeof(cleanName));
+
+            // Extract the tracker icon asset for the layout size framework on launch
+            BBitmap* processIcon = nullptr;
+            image_info imgInfo;
+            int32 imgCookie = 0;
+            if (get_next_image_info(tInfo.team, &imgCookie, &imgInfo) == B_OK) {
+                BEntry appEntry(imgInfo.name);
+                if (appEntry.Exists()) {
+                    entry_ref ref;
+                    if (appEntry.GetRef(&ref) == B_OK) {
+                        BRect iconBounds(0, 0, 15, 15);
+                        BBitmap* tempIcon = new BBitmap(iconBounds, B_RGBA32);
+                        if (BNodeInfo::GetTrackerIcon(&ref, tempIcon, B_MINI_ICON) == B_OK) {
+                            processIcon = tempIcon;
+                        } else {
+                            delete tempIcon;
+                        }
+                    }
+                }
+            }
+
+            thread_info thInfo;
+            int32 thCookie = 0;
+            bigtime_t currentTeamTotalTime = 0;
+            while (get_next_thread_info(tInfo.team, &thCookie, &thInfo) == B_OK) {
+                currentTeamTotalTime += thInfo.user_time + thInfo.kernel_time;
+            }
+
+            fProcessHistoryMap[tInfo.team].mainThreadId = 0;
+            fProcessHistoryMap[tInfo.team].lastTimeSample = currentTeamTotalTime;
+
+            BMessage* killThMsg = new BMessage('kthr');
+            killThMsg->AddInt32("target_thread", tInfo.team);
+            killThMsg->AddString("target_name", cleanName);
+            
+            // Pass the icon to initialize item sizes perfectly on swipe one
+            AddItem(new BCpuBarMenuItem(cleanName, killThMsg, 0.0, processIcon));
+            
+            index++;
+            if (index >= 45) break;
+        }
+
+    }
+
+
+    virtual void AttachedToWindow() override {
+        BMenu::AttachedToWindow();
+        Window()->SetPulseRate(200000); // Pulse every 200ms
+    }
+
+    virtual void Pulse() override;
+
+private:
+    int32 fCpuCount;
+    bigtime_t fLastUpdateTime;
+
+    // Persistent cache structure to measure metrics across separate pulses
+    struct CachedProcessState {
+        thread_id mainThreadId;
+        bigtime_t lastTimeSample;
+    };
+    std::map<team_id, CachedProcessState> fProcessHistoryMap;
+};
+
+
+void BRealtimeCpuMenu::Pulse() {
+    BMenu::Pulse();
+
+    // Compute global time differences since the absolute last frame slice
+    bigtime_t currentTime = system_time();
+    bigtime_t totalTimeDelta = (currentTime - fLastUpdateTime) * fCpuCount;
+    fLastUpdateTime = currentTime; // Roll anchor forward
+
+    // Local snapshot buffer for this specific layout pass
+    struct DisplayElement {
+        team_id teamId;
+        double calculatedCpu;
+        char name[B_OS_NAME_LENGTH];
+    };
+    std::vector<DisplayElement> currentPassList;
+
+    team_info tInfo;
+    int32 teamCookie = 0;
+
+    // 2. Iterate across the flat system team table directly to capture ALL running apps
+    while (get_next_team_info(&teamCookie, &tInfo) == B_OK) {
+        if (tInfo.team <= 0 || std::strlen(tInfo.name) == 0) continue;
+
+        DisplayElement element;
+        element.teamId = tInfo.team;
+        element.calculatedCpu = 0.0; // Default fallback for newly discovered processes
+
+        const char* lastSlash = std::strrchr(tInfo.name, '/');
+        std::strncpy(element.name, lastSlash ? lastSlash + 1 : tInfo.name, sizeof(element.name));
+
+        // Loop through ALL threads belonging to this team and sum their runtimes
+        thread_info thInfo;
+        int32 thCookie = 0;
+        bigtime_t currentTeamTotalTime = 0;
+
+        while (get_next_thread_info(tInfo.team, &thCookie, &thInfo) == B_OK) {
+            currentTeamTotalTime += thInfo.user_time + thInfo.kernel_time;
+        }
+
+        // Compute performance deltas against team histories
+        if (fProcessHistoryMap.find(tInfo.team) != fProcessHistoryMap.end()) {
+            bigtime_t oldTimeSample = fProcessHistoryMap[tInfo.team].lastTimeSample;
+            if (totalTimeDelta > 0 && currentTeamTotalTime >= oldTimeSample) {
+                element.calculatedCpu = (static_cast<double>(currentTeamTotalTime - oldTimeSample) / 
+                                         static_cast<double>(totalTimeDelta)) * 100.0;
+            }
+        }
+        
+        // Cache this team's total aggregated time for the next pulse calculation
+        fProcessHistoryMap[tInfo.team].mainThreadId = 0; 
+        fProcessHistoryMap[tInfo.team].lastTimeSample = currentTeamTotalTime;
+
+        // FIXED: Always include the running process immediately so it never gets dropped!
+        currentPassList.push_back(element);
+    }
+
+    // 3. Purge history map records for applications that exited entirely
+    auto mapIter = fProcessHistoryMap.begin();
+    while (mapIter != fProcessHistoryMap.end()) {
+        bool stillExists = false;
+        for (const auto& live : currentPassList) {
+            if (live.teamId == mapIter->first) {
+                stillExists = true;
+                break;
+            }
+        }
+        if (!stillExists) {
+            mapIter = fProcessHistoryMap.erase(mapIter);
+        } else {
+            ++mapIter;
+        }
+    }
+
+    // 4. Update existing graphical bars or create new ones complete with system icons!
+    int32 index = 0;
+    for (const auto& entry : currentPassList) {
+        char rowText[B_OS_NAME_LENGTH + 16];
+        std::snprintf(rowText, sizeof(rowText), "%s", entry.name);
+
+        BCpuBarMenuItem* item = dynamic_cast<BCpuBarMenuItem*>(ItemAt(index));
+        if (item) {
+            item->UpdateMetrics(entry.calculatedCpu, rowText);
+            if (item->Message()) {
+                item->Message()->ReplaceInt32("target_thread", entry.teamId);
+            }
+        } else {
+            // Locate and extract the dynamic system icon for this newly listed process team
+            BBitmap* processIcon = nullptr;
+            image_info imgInfo;
+            int32 imgCookie = 0;
+            
+            if (get_next_image_info(entry.teamId, &imgCookie, &imgInfo) == B_OK) {
+                BEntry appEntry(imgInfo.name);
+                if (appEntry.Exists()) {
+                    entry_ref ref;
+                    if (appEntry.GetRef(&ref) == B_OK) {
+                        BRect iconBounds(0, 0, 15, 15);
+                        BBitmap* tempIcon = new BBitmap(iconBounds, B_RGBA32);
+                        
+                        if (BNodeInfo::GetTrackerIcon(&ref, tempIcon, B_MINI_ICON) == B_OK) {
+                            processIcon = tempIcon; // Successfully grabbed the icon asset!
+                        } else {
+                            delete tempIcon;
+                        }
+                    }
+                }
+            }
+
+            // Configure the message tracking hooks
+            BMessage* killThMsg = new BMessage('kthr');
+            killThMsg->AddInt32("target_thread", entry.teamId);
+            killThMsg->AddString("target_name", entry.name);
+            
+            AddItem(new BCpuBarMenuItem(rowText, killThMsg, entry.calculatedCpu, processIcon));
+        }
+        
+        index++;
+        if (index >= 45) break;
+    }
+
+
+    // Trim trailing elements smoothly
+    while (CountItems() > index) {
+        delete RemoveItem(index);
+    }
+
+    Invalidate();
+}
+
+
+// =========================================================================
+// CUSTOM RENDERING LAYER: QUIT APPLICATION SUBMENU ITEMS (ICON ALIGNED)
+// =========================================================================
+class BIconMenuItem : public BMenuItem {
+public:
+    // Overload 1: For Cascading Submenus (Teams)
+    BIconMenuItem(BMenu* submenu, BBitmap* icon = nullptr)
+        : BMenuItem(submenu), fIcon(icon) {}
+
+    // Overload 2: For Standard Action Items (Quit Processes)
+    BIconMenuItem(const char* label, BMessage* message, BBitmap* icon = nullptr)
+        : BMenuItem(label, message), fIcon(icon) {}
+
+    virtual ~BIconMenuItem() override {
+        delete fIcon; // Safely release bitmap memory upon closure
+    }
+
+protected:
+    virtual void GetContentSize(float* width, float* height) override {
+        BMenuItem::GetContentSize(width, height);
+        // Force uniform structural row boundaries matching our design standards
+        *width = 240.0f; 
+        *height = 18.0f; 
+    }
+
+    virtual void DrawContent() override {
+        BMenu* menu = Menu();
+        if (!menu) return;
+
+        BRect bounds = Frame();
+        float itemHeight = bounds.Height();
+
+        // 1. Calculate font metrics for perfect vertical centering inside the row box
+        font_height fh;
+        menu->GetFontHeight(&fh);
+        float fontBaseline = bounds.top + (itemHeight - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+
+        // 2. Define clear absolute column grids for your elements
+        float iconColumnLeft = bounds.left + 5.0f;
+        float nameColumnLeft = bounds.left + 25.0f; // Left padding gap to separate text from icons
+
+        // 3. Render the application binary icon graphic (perfectly centered vertically)
+        if (fIcon) {
+            float graphicTop = bounds.top + (itemHeight - 16.0f) / 2.0f;
+            menu->SetDrawingMode(B_OP_ALPHA);
+            menu->DrawBitmap(fIcon, BPoint(iconColumnLeft, graphicTop));
+            menu->SetDrawingMode(B_OP_COPY);
+        }
+
+        // 4. FIXED: Render the process text label manually.
+        // Skipping BMenuItem::DrawContent completely prevents Haiku from shifting our text unaligned!
+        menu->SetHighColor(ui_color(B_MENU_ITEM_TEXT_COLOR));
+        menu->MovePenTo(nameColumnLeft, fontBaseline);
+        menu->DrawString(Label());
+    }
+
+private:
+    BBitmap* fIcon;
+};
+
+
+
 
 // Custom SDL Event definition
 enum {
@@ -58,9 +606,174 @@ enum {
 };
 
 
+
 class HaikuAppDrawerWindow; 
 HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
 BWindow* gActiveConfigInstance = nullptr; 
+
+
+struct TrayItem {
+    std::string name;
+    int32 internalId;
+    GLuint textureId;
+    float currentRenderX; // Cached during Pass 2 for Mouse Click math!
+    float currentRenderWidth;
+};
+
+// Class member variables
+std::vector<TrayItem> fLiveTrayItems;
+bigtime_t fLastTrayUpdateTime = 0;
+
+
+void SyncDynamicSystrayTextures() {
+    bigtime_t currentTime = system_time();
+    // Throttle: Only probe Deskbar twice per second (500,000 microseconds)
+    if (currentTime - fLastTrayUpdateTime < 500000) {
+        return; 
+    }
+    fLastTrayUpdateTime = currentTime;
+
+    BDeskbar deskbarControl;
+    std::vector<std::pair<std::string, int32>> activeSnapshot;
+
+    // =========================================================================
+    // VERIFIED SYSTEM METHOD: CAPTURE RUNNING APPS VIA THE STABLE ROSTER PROBER
+    // =========================================================================
+    for (int32 idProber = 0; idProber < 150; ++idProber) {
+        const char* foundName = nullptr;
+        if (deskbarControl.GetItemInfo(idProber, &foundName) == B_OK) {
+            if (foundName != nullptr && strlen(foundName) > 0) {
+                activeSnapshot.push_back({std::string(foundName), idProber});
+            }
+        }
+    }
+
+    // 2. Diff check: Rebuild GL textures if a structural change occurred
+    bool structureChanged = (activeSnapshot.size() != fLiveTrayItems.size());
+    if (!structureChanged) {
+        for (size_t i = 0; i < activeSnapshot.size(); ++i) {
+            if (activeSnapshot[i].first != fLiveTrayItems[i].name) {
+                structureChanged = true;
+                break;
+            }
+        }
+    }
+
+    // 3. Rebuild GL textures using verified 16x16 -> 32x32 upscale matrix mechanics
+    if (structureChanged) {
+        std::cout << "[Systray Matrix] Layout change caught! Updating texture nodes..." << std::endl;
+
+        // Free old GL texture allocations cleanly out of GPU VRAM
+        for (auto& oldItem : fLiveTrayItems) {
+            if (oldItem.textureId != 0) {
+                glDeleteTextures(1, &oldItem.textureId);
+            }
+        }
+        fLiveTrayItems.clear();
+
+        BRect nativeBounds(0, 0, 15, 15);
+        int32 destSize = 32; 
+
+        for (const auto& snap : activeSnapshot) {
+            BBitmap scratchBitmap(nativeBounds, B_RGBA32);
+            entry_ref appRef;
+            bool assetResolved = false;
+
+            BString itemName(snap.first.c_str());
+            BString signature = "application/x-vnd.Haiku-";
+            
+            if (itemName == "ProcessControllerView" || itemName == "ProcessController") {
+                itemName = "ProcessController";
+                signature = "application/x-vnd.Haiku-ProcessController";
+            } else if (itemName == "MediaReplicant") {
+                itemName = "Media"; 
+                signature = "application/x-vnd.Haiku-MediaPreferences";
+            } else if (itemName == "NetworkStatus") {
+                signature = "application/x-vnd.Haiku-NetworkStatus";
+            } else if (itemName == "SuperMusicTrayIcon") {
+                // Configured perfectly for your unique system music app environment layout
+                itemName = "HaikuSuperMusicThingy"; 
+                signature = "application/x-vnd.HaikuSuperMusicThingy"; 
+            } else {
+                signature << itemName;
+            }
+
+            if (be_roster->FindApp(signature.String(), &appRef) == B_OK) {
+                assetResolved = true;
+            } else {
+                const char* fallbackDirectories[] = {
+                    "/boot/system/apps",
+                    "/boot/system/preferences",
+                    "/boot/home/config/apps",
+                    "/boot/system/apps/Deskbar",
+                    "/boot/home/Desktop"
+                };
+
+                for (const char* dir : fallbackDirectories) {
+                    BPath pathProber(dir);
+                    pathProber.Append(itemName.String());
+                    BEntry checkEntry(pathProber.Path());
+                    if (checkEntry.Exists()) {
+                        checkEntry.GetRef(&appRef);
+                        assetResolved = true;
+                        break;
+                    }
+                }
+            }
+
+            GLuint textureID = 0;
+
+            if (assetResolved) {
+                BNode fileNode(&appRef);
+                BNodeInfo nodeInfo(&fileNode);
+                
+                if (nodeInfo.GetTrackerIcon(&scratchBitmap, B_MINI_ICON) == B_OK) {
+                    uint32* srcPtr = (uint32*)scratchBitmap.Bits();
+
+                    if (srcPtr != nullptr) {
+                        std::vector<uint32> highDefBuffer(destSize * destSize, 0x00000000);
+                        uint32* destPtr = highDefBuffer.data();
+
+                        for (int y = 0; y < destSize; ++y) {
+                            for (int x = 0; x < destSize; ++x) {
+                                int srcX = (x * 16) / destSize;
+                                int srcY = (y * 16) / destSize;
+                                destPtr[y * destSize + x] = srcPtr[srcY * 16 + srcX];
+                            }
+                        }
+
+                        glGenTextures(1, &textureID);
+                        glBindTexture(GL_TEXTURE_2D, textureID);
+
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+                        glTexImage2D(
+                            GL_TEXTURE_2D, 0, GL_RGBA8, 
+                            destSize, destSize, 0, 
+                            GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 
+                            highDefBuffer.data()
+                        );
+
+                        glBindTexture(GL_TEXTURE_2D, 0);
+                    }
+                }
+            }
+
+            // ALWAYS PUSH TARGET INTO THE REGISTRY ARRAY EVEN IF TEXTURE IS 0!
+            // This balances array sizes perfectly, preventing the infinite reallocation loop.
+            TrayItem newItem;
+            newItem.name = snap.first;
+            newItem.internalId = snap.second;
+            newItem.textureId = textureID; 
+            newItem.currentRenderX = 0.0f;
+            newItem.currentRenderWidth = 0.0f;
+            fLiveTrayItems.push_back(newItem);
+        }
+    }
+}
 
 
 std::map<team_id, int32> gInvisibleStreak;
@@ -72,34 +785,44 @@ const int32 kThresholdMaximize = 33;
 
 // Global communication flags (or place them in an accessible global/namespace config struct)
 bool autoHideEnabled; 
+bool showSystemTray; 
+
+enum {
+    MSG_AUTOHIDE_TOGGLED = 'ahtg',
+    MSG_SYSTEMTRAY_TOGGLED = 'sttg' 
+};
+
 std::set<std::string> gFavoritePaths; 
 
 void SaveConfiguration(); 
 
-enum {
-    MSG_AUTOHIDE_TOGGLED = 'ahtg'
-};
+
 
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
-
+	BCheckBox* fSystemTrayCheckbox;
 public:
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
-        SetViewColor(rgb_color{24, 24, 28, 255}); // Matte dark background
+        SetViewColor(rgb_color{24, 24, 28, 255});
 
-        // Create a native Haiku UI Checkbox instead of manual tracking math
         BRect checkboxRect(25.0f, 115.0f, frame.Width() - 25.0f, 135.0f);
         fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide Dock", 
             new BMessage(MSG_AUTOHIDE_TOGGLED));
-        
-        // Match your dark theme text colors
         fAutoHideCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
-        
-        // Sync the UI checkmark visually with the current state of your variable
         fAutoHideCheckbox->SetValue(autoHideEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-        
         AddChild(fAutoHideCheckbox);
+
+        // =========================================================================
+        // NEW INTERFACE INJECTION: SYSTEM TRAY HIDE/SHOW TOGGLE SUB-OPTION
+        // Placed 25 vertical pixels directly under the auto-hide slider layout row
+        // =========================================================================
+        BRect trayCheckboxRect(25.0f, 140.0f, frame.Width() - 25.0f, 160.0f);
+        fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", "Show System Tray in Dock", 
+            new BMessage(MSG_SYSTEMTRAY_TOGGLED));
+        fSystemTrayCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
+        fSystemTrayCheckbox->SetValue(showSystemTray ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fSystemTrayCheckbox);
     }
 
     virtual void Draw(BRect updateRect) {
@@ -190,19 +913,25 @@ public:
         }
     }
     
-    // Intercept UI interaction messaging hooks safely
     virtual void AttachedToWindow() {
         BView::AttachedToWindow();
-        // Route checkbox notifications directly to this view's target pipeline
         fAutoHideCheckbox->SetTarget(this);
+        fSystemTrayCheckbox->SetTarget(this); // Route message packets to this looper thread
     }
 
     virtual void MessageReceived(BMessage* message) {
         switch (message->what) {
             case MSG_AUTOHIDE_TOGGLED: {
-                // Read out state from the checkbox and store it
                 autoHideEnabled = (fAutoHideCheckbox->Value() == B_CONTROL_ON);
-                SaveConfiguration(); // Instantly write state variations safely to disk
+                SaveConfiguration();
+                break;
+            }
+            // =========================================================================
+            // NEW INTERACTION INTERCEPTOR EVENT TRACKER
+            // =========================================================================
+            case MSG_SYSTEMTRAY_TOGGLED: {
+                showSystemTray = (fSystemTrayCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration(); // Instantly write preference parameters back to disk storage
                 break;
             }
             default:
@@ -211,6 +940,7 @@ public:
         }
     }
 };
+
 
 
 // =========================================================================
@@ -1175,6 +1905,7 @@ public:
 		fTrashTextGenerated = false;
 		fTrashTooltipW = 0;
 		fTrashTooltipH = 0;
+		fLastTrackerMenuCloseTime = 0;
 
         fHaikuMenuIcon = LoadIconFromNode("/boot/system/apps/AboutSystem", 128);
         fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
@@ -1205,6 +1936,203 @@ public:
 
 
     } // End of complete class constructor
+
+
+
+	void SpawnProcessControllerFAUXMenu(int32 winX, int32 winY, int32 mouseX, int32 mouseY)
+	{
+	    std::cout << "[CPU Graph] Initializing dynamic system activity menu..." << std::endl;
+	
+	    // 1. Create the base container. Set handling to asynchronous so it doesn't freeze the dock rendering loop.
+	    BPopUpMenu* pcMenu = new BPopUpMenu("CPUGraphContext", false, false);
+	    
+	
+    // =========================================================================
+    // DYNAMIC SUBMENU 1: QUIT AN APPLICATION (FIXED ROBUST ICON TRACKING)
+    // =========================================================================
+    BMenu* quitAppMenu = new BMenu("Quit an application");
+    
+    team_info teamInfo;
+    int32 cookie = 0; 
+    bool addedApps = false;
+
+    while (get_next_team_info(&cookie, &teamInfo) == B_OK) {
+        std::string fullArgs(teamInfo.args);
+        
+        size_t lastSlash = fullArgs.find_last_of('/');
+        std::string appName = (lastSlash != std::string::npos) ? fullArgs.substr(lastSlash + 1) : fullArgs;
+        
+        size_t firstSpace = appName.find_first_of(" \t\r\n");
+        if (firstSpace != std::string::npos) {
+            appName = appName.substr(0, firstSpace);
+        }
+
+        if (appName.empty() || teamInfo.team == 1 || appName == "kernel") {
+            continue;
+        }
+
+        if (appName == "app_server" || appName == "input_server" || 
+            appName == "registrar"  || appName == "Deskbar" || 
+            appName == "hdesktop"   || appName == "Tracker" ||
+            appName == "syslog_daemon") {
+            continue;
+        }
+
+        // Initialize the messaging payload parameters
+        BMessage* killMsg = new BMessage('kill');
+        killMsg->AddInt32("target_team", teamInfo.team);
+        killMsg->AddString("target_name", appName.c_str());
+        
+        BBitmap* miniIcon = nullptr;
+
+        // Extract system vector/bitmap graphics via image structures
+        image_info imgInfo;
+        int32 imgCookie = 0;
+        
+        if (get_next_image_info(teamInfo.team, &imgCookie, &imgInfo) == B_OK) {
+            BEntry appEntry(imgInfo.name);
+            if (appEntry.Exists()) {
+                // Resolve entry_ref object to accommodate static GetTrackerIcon signature
+                entry_ref ref;
+                if (appEntry.GetRef(&ref) == B_OK) {
+                    BRect iconBounds(0, 0, 15, 15);
+                    BBitmap* tempIcon = new BBitmap(iconBounds, B_RGBA32);
+                    
+                    if (BNodeInfo::GetTrackerIcon(&ref, tempIcon, B_MINI_ICON) == B_OK) {
+                        miniIcon = tempIcon; // Successfully loaded structural graphic
+                    } else {
+                        delete tempIcon; // Clean up allocations if lookups fail
+                    }
+                }
+            }
+        }
+
+        // Use custom subclass to bind the application icon alongside its label
+        BIconMenuItem* processItem = new BIconMenuItem(appName.c_str(), killMsg, miniIcon);
+        quitAppMenu->AddItem(processItem);
+        addedApps = true;
+    }
+
+    if (!addedApps) {
+        BMenuItem* emptyItem = new BMenuItem("No system applications running", nullptr);
+        emptyItem->SetEnabled(false);
+        quitAppMenu->AddItem(emptyItem);
+    }
+    
+    pcMenu->AddItem(quitAppMenu);
+
+
+    // =========================================================================
+    // DYNAMIC SUBMENU 3: THREADS AND CPU USAGE (LIVE INTERACTIVE PULSING TARGET)
+    // =========================================================================
+    BLiveMemoryMenu* memUsageMenu = new BLiveMemoryMenu("Memory usage");
+    pcMenu->AddItem(memUsageMenu);
+    
+    BRealtimeCpuMenu* threadCpuMenu = new BRealtimeCpuMenu("Threads and CPU usage");
+
+    pcMenu->AddItem(threadCpuMenu);
+
+
+/*
+	
+	    // =========================================================================
+	    // PROCESSOR AFFINITY CORE MAPPINGS
+	    // =========================================================================
+	    // Get actual system core count using Haiku's OS.h system info framework
+	    system_info sysInfo;
+	    int32 cpuCount = 1;
+	    if (get_system_info(&sysInfo) == B_OK) {
+	        cpuCount = sysInfo.cpu_count;
+	    } else {
+	        cpuCount = 4; // Fallback simulation parameter
+	    }
+	
+	    for (int32 i = 1; i <= cpuCount; ++i) {
+	        std::string coreLabel = "Processor " + std::to_string(i);
+	        BMenuItem* cpuCoreItem = new BMenuItem(coreLabel.c_str(), new BMessage('tcpu'));
+	        cpuCoreItem->SetMarked(true); // Default active checkmark status matching the OS behavior
+	        pcMenu->AddItem(cpuCoreItem);
+	    }
+	
+	    pcMenu->AddSeparatorItem();
+	*/
+	    // =========================================================================
+	    // CORE NATIVE UTILITIES & MISC ACTIONS
+	    // =========================================================================
+	    pcMenu->AddItem(new BMenuItem("Power saving", new BMessage('pwrS')));
+
+	
+		// =========================================================================
+	    // EXECUTION MATRIX (ASYNCHRONOUS TARGETING ROUTER)
+	    // =========================================================================
+	    BPoint screenClickPoint(static_cast<float>(winX + mouseX), static_cast<float>(winY + mouseY));
+	    
+	    // Point the selection messenger back to your primary window/loop layer or execute a blocker evaluation
+	    // The parameters are: Go(screenPoint, deliverMessageToTarget=false, openAsync=true, pinMenu=false)
+	    BMenuItem* chosenAction = pcMenu->Go(screenClickPoint, false, true);
+	
+	    if (chosenAction != nullptr) {
+	        BMessage* actionMsg = chosenAction->Message();
+	        if (actionMsg != nullptr) {
+	            switch (actionMsg->what) {
+	                case 'kthr': {
+	                    team_id targetTeam = -1;
+	                    const char* thName = "Unknown";
+	                    
+	                    if (actionMsg->FindInt32("target_thread", &targetTeam) == B_OK) {
+	                        actionMsg->FindString("target_name", &thName);
+	                        std::cout << "[CPU Graph] Forcing termination of application process: " 
+	                                  << thName << " (Team ID " << targetTeam << ")" << std::endl;
+	                        
+	                        // Terminate the entire multi-threaded application footprint smoothly
+	                        kill_team(targetTeam);
+	                    }
+	                    break;
+	                }
+	
+	
+	                case 'kill': {
+	                    team_id targetTeam = -1;
+	                    const char* appName = "Unknown";
+	                    
+	                    if (actionMsg->FindInt32("target_team", &targetTeam) == B_OK) {
+	                        actionMsg->FindString("target_name", &appName);
+	                        std::cout << "[CPU Graph] Terminating application cleanly: " << appName << " (Team " << targetTeam << ")" << std::endl;
+	                        
+	                        // Send standard polite request to terminate the target message loop
+	                        BMessenger appTarget(nullptr, targetTeam);
+	                        if (appTarget.IsValid()) {
+	                            appTarget.SendMessage(B_QUIT_REQUESTED);
+	                        } else {
+	                            // Hard kill fallback if message target maps cleanly to dead loops
+	                            kill_team(targetTeam);
+	                        }
+	                    }
+	                    break;
+	                }
+	
+	                case 'pwrS': {
+	                    std::cout << "[CPU Graph] Activating system Power Saving configuration profiles..." << std::endl;
+	                    std::system("/boot/system/apps/PowerStatus --toggle &"); 
+	                    break;
+	                }
+	
+	
+	
+	
+	                default:
+	                    std::cout << "[CPU Graph] Unhandled menu flag: " << actionMsg->what << std::endl;
+	                    break;
+	            }
+	        }
+	    }
+    
+    // Clean up memory leaks cleanly
+    delete pcMenu;
+}
+
+
+
 
 
 
@@ -1524,11 +2452,138 @@ void SyncDockWithRunningDeskbarApps() {
 	}
 
    
+   
+
+
+
+
+
+   
+   
 	void HandleMouseClick(int x, int y, int button) {
 		
 	    // Sync global mouse variables to match click coordinates
 	    fMouseX = x; 
 	    fMouseY = y;
+	
+    // =========================================================================
+    // DYNAMIC SYSTEM TRAY INTERCEPTOR & SERIALIZED PROPERTY INSPECTOR
+    // =========================================================================
+    for (const auto& item : fLiveTrayItems) {
+        if (item.currentRenderWidth <= 0.0f) continue;
+
+        if (x >= item.currentRenderX && x <= (item.currentRenderX + item.currentRenderWidth) &&
+   		 y >= fCachedVolTop && y <= (fCachedVolTop + fCachedVolHeight)) {
+
+            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
+            if (deskbarMessenger.IsValid()) {
+                
+                // =========================================================================
+                // CASE A: RIGHT-CLICK -> PARSE AND PRESENT SYSTEM CONTEXT PARAMETERS
+                // =========================================================================
+                if (button == SDL_BUTTON_RIGHT) {
+                    std::cout << "[Dock Input] Querying serialized menu archive tree for: " << item.name << std::endl;
+
+                    BMessage menuRequest(B_GET_PROPERTY);
+                    menuRequest.AddSpecifier("Menu");
+                    menuRequest.AddSpecifier("Replicant", item.name.c_str());
+                    menuRequest.AddSpecifier("View", "Status");
+                    menuRequest.AddSpecifier("View", "Deskbar");
+
+                    BMessage menuReply;
+                    if (deskbarMessenger.SendMessage(&menuRequest, &menuReply) == B_OK) {
+                        
+                        // Create a clean local popup window structure right at your cursor bounds
+                        BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
+                        
+                        // Parse out the systemic menu entries archived inside the reply packet
+                        BMessage archivedItem;
+                        int32 itemIdx = 0;
+                        bool foundItems = false;
+
+                        // Haiku archives nested sub-items inside an array named "valucs" or "item"
+                        while (menuReply.FindMessage("item", itemIdx, &archivedItem) == B_OK || 
+                               menuReply.FindMessage("_items", itemIdx, &archivedItem) == B_OK) {
+                            
+                            const char* label = nullptr;
+                            if (archivedItem.FindString("label", &label) == B_OK && label != nullptr) {
+                                // Re-create the item signature cleanly into our local scope window
+                                BMessage* forwardMsg = new BMessage(archivedItem);
+                                localMenu->AddItem(new BMenuItem(label, forwardMsg));
+                                foundItems = true;
+                            }
+                            archivedItem.MakeEmpty();
+                            itemIdx++;
+                        }
+
+                        // FALLBACK MASTERSTROKE: If the target replicant maps its items via a custom protocol 
+                        // that hides raw text entries, populate the exact core native control actions!
+                        if (!foundItems) {
+                            std::cout << "    [Profile] Replicant uses private layout specs. Injecting native system actions..." << std::endl;
+                            if (item.name == "ProcessController" || item.name == "ProcessControllerView") {
+                               // localMenu->AddItem(new BMenuItem("Open Performance Monitor...", new BMessage('act1')));
+                                localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
+                            } else if (item.name == "NetworkStatus") {
+                                localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
+                            } else if (item.name == "MediaReplicant") {
+                                localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+                            }
+                        }
+
+                        // Determine absolute screen location coordinates matching standard window mappings
+                        int32 winX = 0, winY = 0;
+                        SDL_Window* activeWin = SDL_GetMouseFocus();
+                        if (activeWin) {
+                            SDL_GetWindowPosition(activeWin, &winX, &winY);
+                        }
+                        BPoint screenClickPoint(static_cast<float>(winX + x), static_cast<float>(winY + y));
+
+                        // Launch the menu natively right under your cursor!
+                        BMenuItem* chosenItem = localMenu->Go(screenClickPoint);
+                        
+                        if (chosenItem != nullptr) {
+                            BMessage* choiceAction = chosenItem->Message();
+                            if (choiceAction != nullptr) {
+                                // Determine if it was a default placeholder action or a routed command
+                                if (choiceAction->what == 'act1') {
+                                    //std::system("/boot/system/apps/ProcessController &");
+                                } else if (choiceAction->what == 'act2') {
+                                    std::system("/boot/system/apps/ActivityMonitor &");
+                                } else if (choiceAction->what == 'net1') {
+                                    std::system("/boot/system/preferences/Network &");
+                                } else if (choiceAction->what == 'aud1') {
+                                    std::system("/boot/system/preferences/Media &");
+                                } else {
+                                    // Forward the authentic underlying system command back to the true Replicant!
+                                    BMessenger replicantTarget("application/x-vnd.be-tskb");
+                                    replicantTarget.SendMessage(choiceAction);
+                                }
+                            }
+                        }
+                        delete localMenu;
+                    }
+                } 
+                // =========================================================================
+                // CASE B: LEFT-CLICK -> RESILIENT PREFERENCE PANEL LAUNCHERS
+                // =========================================================================
+                else if (button == SDL_BUTTON_LEFT) {
+                    std::cout << "[Dock Input] Launching control panel for tray applet: " << item.name << std::endl;
+                    if (item.name == "MediaReplicant") {
+                        std::system("/boot/system/preferences/Media &");
+                    } else if (item.name == "NetworkStatus") {
+                        std::system("/boot/system/preferences/Network &");
+                    } else if (item.name == "ProcessController" || item.name == "ProcessControllerView") {
+                        //std::system("/boot/system/apps/ProcessController &");
+                    } else if (item.name == "SuperMusicTrayIcon") {
+                        std::system("/boot/system/apps/HaikuSuperMusicThingy &");
+                    }
+                }
+            }
+            return; // Intercept event completely, preventing dock launcher execution bypass down-stream!
+        }
+    }
+
+
 	
 	    // =========================================================================
 	    // CACHED VOLUME SLIDER INTERACTION INTERCEPTOR (SINGLE-CLICK SYNCED)
@@ -1613,14 +2668,16 @@ void SyncDockWithRunningDeskbarApps() {
 	        // 1. Process standard app launchers & active window indicators
 	        for (size_t i = 0; i < totalIconsCount; ++i) {
 	            float approxCenterX = progressiveX + (baseSize / 2.0f);
-	            float distanceX = std::abs(x - approxCenterX); // Click 'x' used for hover testing
 	            
-	            float scale = 1.0f;
-	            if (y >= (fHeight - 140.0f) && distanceX < 160.0f) {
+			float distanceX = std::abs(x - approxCenterX); 
+			
+			float scale = 1.0f;
+			if (y >= (fHeight - 140.0f) && distanceX < 160.0f) { 
+ 
 	                float ratio = distanceX / 160.0f;
 	                scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	            }
-
+	
 	            float finalSize = baseSize * scale;
 	            dynamicWidths.push_back(finalSize);
 	            dynamicScales.push_back(scale);
@@ -1629,24 +2686,49 @@ void SyncDockWithRunningDeskbarApps() {
 	            progressiveX += finalSize + padding;
 	        }
 	        if (totalIconsCount > 0) progressiveX -= padding; 
-
-	        // Account for the structural native app split divider
+	
+	        // Account for the structural native app split divider (FIXED DE-DUPLICATION)
 	        if (activeWindowsCount > 0) {
 	            progressiveX += separatorGapPadding;
 	        }
-
+	
+	        // =========================================================================
+	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (NEW DYNAMIC CODE)
+	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
+	        // =========================================================================
+	        float traySectionPadding = clockSectionPadding;
+	        size_t trayCount = fLiveTrayItems.size();
+	        
+            float baselineTrayWidth = 0.0f;
+            if (showSystemTray && trayCount > 0) {
+                baselineTrayWidth = (trayCount * 16.0f) + ((trayCount > 1 ? trayCount - 1 : 0) * 6.0f);
+            }
+	
+	        progressiveX += traySectionPadding;
+	        float approxTrayCenterX = progressiveX + (baselineTrayWidth / 2.0f);
+	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
+	        
+	        float trayScale = 1.0f;
+	        if (fMouseY >= (fHeight - 140.0f) && distanceTrayX < 160.0f) {
+	            float ratio = distanceTrayX / 160.0f;
+	            trayScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	        }
+	        
+	        dynamicWidths.push_back(baselineTrayWidth * trayScale);
+	        dynamicScales.push_back(trayScale);
+	        progressiveX += (baselineTrayWidth * trayScale);
+	        // =========================================================================
+	
 	        // 2. Process System Clock Component Metrics
 	        if (fClockTexture.id != 0) {
-	            progressiveX += clockSectionPadding;
-	            
+	            progressiveX += clockSectionPadding;             
 	            float highDpiCompensateFactor = 0.42f;
-	            float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;
-	            
-	            float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
-	            float distanceClockX = std::abs(x - approxClockCenterX);
-	            
+	            float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;              
+	            float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);                
+	            float distanceClockX = std::abs(fMouseX - approxClockCenterX);               
 	            float clockScale = 1.0f;
-	            if (y >= (fHeight - 140.0f) && distanceClockX < 160.0f) {
+	            
+	            if (fMouseY >= (fHeight - 140.0f) && distanceClockX < 160.0f) {
 	                float ratio = distanceClockX / 160.0f;
 	                clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	            }
@@ -1658,28 +2740,28 @@ void SyncDockWithRunningDeskbarApps() {
 	            dynamicWidths.push_back(0.0f);
 	            dynamicScales.push_back(1.0f);
 	        }
-
+	
 	        // 3. Process Dynamic Volume Slider Component Metrics
 	        progressiveX += clockSectionPadding;
 	        float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
-	        float distanceVolX = std::abs(x - approxVolCenterX);
+	        float distanceVolX = std::abs(fMouseX - approxVolCenterX);
 	        
 	        float volScale = 1.0f;
-	        if (y >= (fHeight - 140.0f) && distanceVolX < 160.0f) {
+	        if (fMouseY >= (fHeight - 140.0f) && distanceVolX < 160.0f) {
 	            float ratio = distanceVolX / 160.0f;
 	            volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
 	        dynamicWidths.push_back(baseVolumeWidth * volScale);
 	        dynamicScales.push_back(volScale);
 	        progressiveX += (baseVolumeWidth * volScale);
-
+	
 	        // 4. Process Haiku Trash Can Component Metrics
 	        progressiveX += clockSectionPadding;
 	        float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
-	        float distanceTrashX = std::abs(x - approxTrashCenterX);
+	        float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
 	        
 	        float trashScale = 1.0f;
-	        if (y >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
+	        if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
 	            float ratio = distanceTrashX / 160.0f;
 	            trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
@@ -1693,10 +2775,10 @@ void SyncDockWithRunningDeskbarApps() {
 	        // 5. Process Graphical CPU Monitor Metrics
 	        progressiveX += clockSectionPadding; 
 	        float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
-	        float distanceCpuX = std::abs(x - approxCpuCenterX);
+	        float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
 	        
 	        float cpuScale = 1.0f;
-	        if (y >= (fHeight - 140.0f) && distanceCpuX < 160.0f) {
+	        if (fMouseY >= (fHeight - 140.0f) && distanceCpuX < 160.0f) {
 	            float ratio = distanceCpuX / 160.0f;
 	            cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
@@ -1705,19 +2787,21 @@ void SyncDockWithRunningDeskbarApps() {
 	        dynamicWidths.push_back(finalCpuWidth);
 	        dynamicScales.push_back(cpuScale);
 	        progressiveX += finalCpuWidth;
-
+	
 	        // Save converged dimensions to update anchor points on the next pass
 	        float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
 	        totalCalculatedWidth = progressiveX - leftEdge;
 	    }
 
+
 	    // -------------------------------------------------------------------------
 	    // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
 	    // -------------------------------------------------------------------------
-	    size_t clockSlotIdx  = totalIconsCount;
-	    size_t volumeSlotIdx = totalIconsCount + 1;
-	    size_t trashSlotIdx  = totalIconsCount + 2;
-	    size_t cpuSlotIdx    = totalIconsCount + 3;
+	    size_t traySlotIdx   = totalIconsCount;
+	    size_t clockSlotIdx  = totalIconsCount + 1;
+	    size_t volumeSlotIdx = totalIconsCount + 2;
+	    size_t trashSlotIdx  = totalIconsCount + 3;
+	    size_t cpuSlotIdx    = totalIconsCount + 4;
 
 	    float dockMarginBottom = 15.0f;
 	    HaikuRect dockPlate;
@@ -1730,17 +2814,22 @@ void SyncDockWithRunningDeskbarApps() {
 	    // Lock down definitive trash hitbox using the converged stream variables
 	    float renderingTrashSize = dynamicWidths[trashSlotIdx];
 	    
-	    float layoutTrackerX = dockPlate.left + 20.0f;
+	    // REPLACE WITH THIS TO CALIBRATE ALIGNMENT:
+		float layoutTrackerX = dockPlate.left + 20.0f;
+
 	    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
 	        layoutTrackerX += dynamicWidths[idx] + padding;
 	    }
 	    if (totalIconsCount > 0) layoutTrackerX -= padding;
 	    if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
+	    
+	    // SYNCHRONIZED: Account for the horizontal width footprint of the new System Tray slot!
+	    layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
+	    
 	    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
 	    
 	    // Accountability shift step past our volume metrics
-	    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
-	    
+	    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];	    
 	    layoutTrackerX += clockSectionPadding;
 	    fTrashRect.left = layoutTrackerX;
 	    fTrashRect.right = fTrashRect.left + renderingTrashSize;
@@ -1786,7 +2875,8 @@ void SyncDockWithRunningDeskbarApps() {
 	    if (activeWindowsCount > 0) {
 	        currentX += separatorGapPadding;
 	    }
-	    	       // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+	    // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+
     for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
         auto& activeTaskWin = fTaskbarWindows[w];
         if (*activeTaskWin.openStateFlag == false) continue;
@@ -1839,44 +2929,98 @@ void SyncDockWithRunningDeskbarApps() {
 
 
             if (isTracker) {
-                char safeTrackerCmdBuffer[256];
+                uint32 currentClickTick = SDL_GetTicks();
+                
+                // =========================================================================
+                // SEQUENTIAL TOGGLE SHIELD: CHANCE DEBOUNCE DETECTION CLOSURE GAP
+                // =========================================================================
+                // If the user left-clicks the Tracker icon while the menu was dismissed 
+                // less than 150ms ago, it means this click was meant to CLOSE the menu.
+                // We intercept the action, update our timeline, and exit safely without popping it open again!
+                if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
+                    std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
+                    fLastTrackerMenuCloseTime = 0; // Clear latch state
+                    return; // ABSOLUTE SHIELD: Block double-firing instantiation loops
+                }
+
+                std::cout << "[Tracker Menu] Deploying native asynchronous file navigator directly on root..." << std::endl;
+
+                // Fetch absolute coordinate offsets via active screen handles
+                int32 winX = 0, winY = 0;
+                SDL_Window* activeWin = SDL_GetMouseFocus();
+                if (activeWin) {
+                    SDL_GetWindowPosition(activeWin, &winX, &winY);
+                }
+
+                // Resolve the live background system Messenger for Tracker
                 BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 
-                if (activeTaskWin.isMinimized == false) {
-                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
-                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
-                    std::system(safeTrackerCmdBuffer);
-                    
-                    be_roster->ActivateApp(-1);
-                    activeTaskWin.isMinimized = true;
-                } 
-                else {
-                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
-                    app_info realTrackerInfo;
-                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
-                        be_roster->ActivateApp(realTrackerInfo.team);
-                    } else {
-                        be_roster->ActivateApp(activeTaskWin.teamId);
-                    }
-                    
-                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
-                    std::system(safeTrackerCmdBuffer);
+                // Point entry reference back to "/boot/" to completely bypass the "Haiku" partition layer
+                entry_ref rootRef;
+                BEntry rootEntry("/boot/");
+                if (rootEntry.GetRef(&rootRef) != B_OK) {
+                    return;
+                }
 
-                    if (trackerMessenger.IsValid()) {
-                        BEntry homeEntry("/boot/home");
-                        entry_ref homeRef;
-                        if (homeEntry.GetRef(&homeRef) == B_OK) {
-                            BMessage openMsg(B_REFS_RECEIVED);
-                            openMsg.AddRef("refs", &homeRef);
-                            trackerMessenger.SendMessage(&openMsg);
+                // Initialize a clean parent pop-up shell container to handle SDL layout boundaries safely
+                BPopUpMenu* navMenuWrapper = new BPopUpMenu("", false, false);
+                navMenuWrapper->SetRadioMode(false);
+
+                // Instantiate the native background-threaded navigation menu to pull your system icons
+                BPrivate::BNavMenu* asyncNavMenu = new BPrivate::BNavMenu("TempNav", B_REFS_RECEIVED, trackerMessenger);
+                asyncNavMenu->SetNavDir(&rootRef);
+
+                // Flattening Matrix: Move all items out of the background tracker class straight into the root wrapper level
+                asyncNavMenu->AttachedToWindow();
+
+                int32 totalNavItems = asyncNavMenu->CountItems();
+                if (totalNavItems > 0) {
+                    for (int32 idx = 0; idx < totalNavItems; ++idx) {
+                        BMenuItem* extractedItem = asyncNavMenu->RemoveItem(static_cast<int32>(0));
+                        if (extractedItem) {
+                            navMenuWrapper->AddItem(extractedItem);
                         }
                     }
-                    activeTaskWin.isMinimized = false;
+                } else {
+                    navMenuWrapper->AddItem(new BMenuItem("Open Tracker /boot/", new BMessage(B_REFS_RECEIVED)));
                 }
+
+                // Horizontal pixel-perfect centering and vertical anchoring math over your icon
+                float anchoredMenuX = static_cast<float>(winX + x) - 45.0f;
+                if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+                
+                float anchoredMenuY = static_cast<float>(winY) - 5.0f;
+                BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+
+                // Launch the menu container synchronously via parent pop-up tracking boundaries
+                BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
+
+                // =========================================================================
+                // CAPTURE THE CLOSURE FRAME TIMELINE TIMESTAMP IMMEDIATELY ON COLLAPSE
+                // =========================================================================
+                // The moment Go() returns, we log the exact tick time. If this closure was caused
+                // by the user clicking down right on the Tracker dog icon, the next click event
+                // loop execution will hit our shield check above and prevent re-opening!
+                fLastTrackerMenuCloseTime = SDL_GetTicks();
+
+                if (chosenAction != nullptr) {
+                    BMessage* actionMsg = chosenAction->Message();
+                    if (actionMsg != nullptr && actionMsg->what == B_REFS_RECEIVED) {
+                        if (trackerMessenger.IsValid()) {
+                            std::cout << "[Tracker Menu] Forwarding chosen ref to active Tracker loop daemon..." << std::endl;
+                            trackerMessenger.SendMessage(actionMsg);
+                        }
+                    }
+                }
+
+                // Safely clean up menu allocations on collapse
+                delete asyncNavMenu;
+                delete navMenuWrapper;
                 return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
             }
+
+
+
             // -----------------------------------------------------------
 
             // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
@@ -2081,31 +3225,158 @@ void SyncDockWithRunningDeskbarApps() {
 	*/
 
 	    // =========================================================================
-	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (CLOCK -> VOLUME -> TRASH BIN -> CPU)
+	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (TRAY -> CLOCK -> VOLUME -> TRASH BIN -> CPU)
 	    // =========================================================================
-        
-        // 1. Evaluate Click Bounds for System Clock Component
-        if (fClockTexture.id != 0) {
-            float dynamicClockW = dynamicWidths[clockSlotIdx];
-            currentX += clockSectionPadding;
-            
-            HaikuRect clockBounds = { currentX, dockPlate.top, currentX + dynamicClockW, dockPlate.bottom };
-            if (x >= clockBounds.left && x <= clockBounds.right && y >= clockBounds.top && y <= clockBounds.bottom) {
-                std::system("/boot/system/preferences/Time &"); // Launch Time Preferences panel
-                return;
-            }
-            currentX += dynamicClockW;
-        }
-
-        // 2. Skip past Volume Slider component space footprint natively 
-        // (Middle/Double click overrides are fully handled at the absolute top of the method!)
-        currentX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
-
-        // 3. Evaluate Click Bounds for Haiku Trash Bin Component (Using Locked Sync Coordinates)
-        currentX += clockSectionPadding;
-        float dynamicTrashSize = dynamicWidths[trashSlotIdx];
-        HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
-        
+	    
+	    // -------------------------------------------------------------------------
+	    // 1. INTERCEPT AND EVALUATE CLICK BOUNDS FOR THE REPLICANT SYSTEM TRAY
+	    // -------------------------------------------------------------------------
+	    float dynamicTrayWidth = dynamicWidths[traySlotIdx];
+	    float trayScaleFactor  = dynamicScales[traySlotIdx];
+	    
+	    // Only process tray metrics and click captures if the global config is enabled
+	    if (showSystemTray) {
+	        currentX += clockSectionPadding;
+	        
+	        // Match the 16px high tray vertical position bounds used in RenderFrame
+	        HaikuRect trayHitbox = { 
+	            currentX, 
+	            dockPlate.bottom - 10.0f - (32.0f * trayScaleFactor), 
+	            currentX + dynamicTrayWidth, 
+	            dockPlate.bottom - 10.0f 
+	        };
+	
+	        if (x >= trayHitbox.left && x <= trayHitbox.right && y >= trayHitbox.top && y <= trayHitbox.bottom) {
+	            float localTrayTrackerX = currentX;
+	            float iconHitboxSize = 16.0f * trayScaleFactor;
+	            float traySpacing = 6.0f * trayScaleFactor;
+	
+	            // Dynamically sweep over your live running system tray list
+	            for (size_t t = 0; t < fLiveTrayItems.size(); ++t) {
+	                float itemLeft  = localTrayTrackerX;
+	                float itemRight = itemLeft + iconHitboxSize;
+	
+	                if (x >= itemLeft && x <= itemRight) {
+	                    BMessenger deskbarMessenger("application/x-vnd.be-tskb");
+	                    if (deskbarMessenger.IsValid()) {
+	                        
+	                        // CASE 1: RIGHT-CLICK -> PARSE AND PRESENT REAL CONTEXT DROPDOWNS
+	                        if (button == SDL_BUTTON_RIGHT) {
+	                            std::cout << "[Dock Input] Querying serialized menu archive tree for: " << fLiveTrayItems[t].name << std::endl;
+	
+	                            BMessage menuRequest(B_GET_PROPERTY);
+	                            menuRequest.AddSpecifier("Menu");
+	                            menuRequest.AddSpecifier("Replicant", fLiveTrayItems[t].name.c_str());
+	                            menuRequest.AddSpecifier("View", "Status");
+	                            menuRequest.AddSpecifier("View", "Deskbar");
+	
+	                            BMessage menuReply;
+	                            if (deskbarMessenger.SendMessage(&menuRequest, &menuReply) == B_OK) {
+	                                BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
+	                                BMessage archivedItem;
+	                                int32 itemIdx = 0;
+	                                bool foundItems = false;
+	
+	                                while (menuReply.FindMessage("item", itemIdx, &archivedItem) == B_OK || 
+	                                       menuReply.FindMessage("_items", itemIdx, &archivedItem) == B_OK) {
+	                                    const char* label = nullptr;
+	                                    if (archivedItem.FindString("label", &label) == B_OK && label != nullptr) {
+	                                        BMessage* forwardMsg = new BMessage(archivedItem);
+	                                        localMenu->AddItem(new BMenuItem(label, forwardMsg));
+	                                        foundItems = true;
+	                                    }
+	                                    archivedItem.MakeEmpty();
+	                                    itemIdx++;
+	                                }
+	
+	                                // Structural fail-safe triggers
+	                                if (!foundItems) {
+	                                    if (fLiveTrayItems[t].name == "ProcessController" || fLiveTrayItems[t].name == "ProcessControllerView") {
+	                                        localMenu->AddItem(new BMenuItem("Open Performance Monitor...", new BMessage('act1')));
+	                                        localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
+	                                    } else if (fLiveTrayItems[t].name == "NetworkStatus") {
+	                                        localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
+	                                    } else if (fLiveTrayItems[t].name == "MediaReplicant") {
+	                                        localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+	                                    }
+	                                }
+	
+	                                int32 winX = 0, winY = 0;
+	                                SDL_Window* activeWin = SDL_GetMouseFocus();
+	                                if (activeWin) SDL_GetWindowPosition(activeWin, &winX, &winY);
+	                                BPoint screenClickPoint(static_cast<float>(winX + x), static_cast<float>(winY + y));
+	
+	                                BMenuItem* chosenItem = localMenu->Go(screenClickPoint);
+	                                if (chosenItem != nullptr) {
+	                                    BMessage* choiceAction = chosenItem->Message();
+	                                    if (choiceAction != nullptr) {
+	                                        if (choiceAction->what == 'act1') {
+	                                           // std::system("/boot/system/apps/ProcessController &");
+	                                        } else if (choiceAction->what == 'act2') {
+	                                            std::system("/boot/system/apps/ActivityMonitor &");
+	                                        } else if (choiceAction->what == 'net1') {
+	                                            std::system("/boot/system/preferences/Network &");
+	                                        } else if (choiceAction->what == 'aud1') {
+	                                            std::system("/boot/system/preferences/Media &");
+	                                        } else {
+	                                            BMessenger replicantTarget("application/x-vnd.be-tskb");
+	                                            replicantTarget.SendMessage(choiceAction);
+	                                        }
+	                                    }
+	                                }
+	                                delete localMenu;
+	                            }
+	                        } 
+	                        // CASE 2: LEFT-CLICK -> PANEL SHORTCUT LAUNCHERS
+	                        else if (button == SDL_BUTTON_LEFT) {
+	                            std::cout << "[SYSTEM TRAY ACTION] ---> Launching panel for: " << fLiveTrayItems[t].name << std::endl;
+	                            if (fLiveTrayItems[t].name == "NetworkStatus") {
+	                                std::system("/boot/system/preferences/Network &");
+	                            } else if (fLiveTrayItems[t].name == "MediaReplicant") {
+	                                std::system("/boot/system/preferences/Media &");
+	                            } else if (fLiveTrayItems[t].name == "ProcessController" || fLiveTrayItems[t].name == "ProcessControllerView") {
+	                               // std::system("/boot/system/apps/ProcessController &");
+	                            } else if (fLiveTrayItems[t].name == "SuperMusicTrayIcon") {
+	                                std::system("/boot/system/apps/HaikuSuperMusicThingy &");
+	                            }
+	                        }
+	                    }
+	                    fShowMainMenu = false;
+	                    return; 
+	                }
+	                localTrayTrackerX += iconHitboxSize + traySpacing;
+	            }
+	        }
+	        currentX += dynamicTrayWidth;
+	    }
+	
+	    // -------------------------------------------------------------------------
+	    // 2. Evaluate Click Bounds for System Clock Component
+	    // -------------------------------------------------------------------------
+	    if (fClockTexture.id != 0) {
+	        float dynamicClockW = dynamicWidths[clockSlotIdx];
+	        currentX += clockSectionPadding;
+	        
+	        HaikuRect clockBounds = { currentX, dockPlate.top, currentX + dynamicClockW, dockPlate.bottom };
+	        if (x >= clockBounds.left && x <= clockBounds.right && y >= clockBounds.top && y <= clockBounds.bottom) {
+	            std::system("/boot/system/preferences/Time &"); 
+	            return;
+	        }
+	        currentX += dynamicClockW;
+	    }
+	
+	    // -------------------------------------------------------------------------
+	    // 3. Skip past Volume Slider component space footprint natively 
+	    // -------------------------------------------------------------------------
+	    currentX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+	
+	     // -------------------------------------------------------------------------
+	    // 4. Evaluate Click Bounds for Haiku Trash Bin Component
+	    // -------------------------------------------------------------------------
+	    currentX += clockSectionPadding;
+	    float dynamicTrashSize = dynamicWidths[trashSlotIdx];
+	    HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
+	    
 	    if (x >= trashBounds.left && x <= trashBounds.right &&
 	        y >= trashBounds.top  && y <= trashBounds.bottom) {
 	        
@@ -2119,29 +3390,46 @@ void SyncDockWithRunningDeskbarApps() {
 	            }
 	        }
 	        fShowMainMenu = false;
-
+	
 	        if (button == SDL_BUTTON_LEFT) {
 	            std::system("/boot/system/Tracker /boot/trash &");
 	            return;
 	        }
-	        else if (button == SDL_BUTTON_MIDDLE ) {
+	        else if (button == SDL_BUTTON_MIDDLE) {
 	            std::system("trash --empty &"); 
 	            fLastTrashCheckTime = 0; 
 	            return;
 	        }
 	    }
-        currentX += dynamicTrashSize;
+	    currentX += dynamicTrashSize;
+	
+	    // -------------------------------------------------------------------------
+	    // 5. Evaluate Click Bounds for Graphical LED CPU Monitor Component
+	    // -------------------------------------------------------------------------
+	    currentX += clockSectionPadding;
+	    float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
+	    HaikuRect cpuBounds = { currentX, dockPlate.top, currentX + dynamicGraphWidth, dockPlate.bottom };
+	    
+	    if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
+	        // Fetch absolute screen coordinate offsets via the active window context
+	        int32 winX = 0, winY = 0;
+	        SDL_Window* activeWin = SDL_GetMouseFocus();
+	        if (activeWin) {
+	            SDL_GetWindowPosition(activeWin, &winX, &winY);
+	        }
+	
+	        // Handle structural fallback or single left click variant
+	        if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
+	            // Deploy the multi-tiered ProcessController-like tracking menu cascade
+	            SpawnProcessControllerFAUXMenu(winX, winY, x, y);
+	        }
+	        return;
+	    }
+	} // HandleMouseClick end closing brace
 
-        // 4. Evaluate Click Bounds for Graphical LED CPU Monitor Component
-        currentX += clockSectionPadding;
-        float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
-        HaikuRect cpuBounds = { currentX, dockPlate.top, currentX + dynamicGraphWidth, dockPlate.bottom };
-        
-        if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
-            std::system("/boot/system/apps/ActivityMonitor &"); // Launch native Haiku Activity Monitor
-            return;
-        }
-	} // Clean and safe terminal closing brace for your HandleMouseClick function!
+
+
+
 
 
 
@@ -2189,6 +3477,35 @@ void SyncDockWithRunningDeskbarApps() {
 
 
 
+	void DrawGLRoundedRect(HaikuRect bounds, float radius, float r, float g, float b, float a, bool fill) {
+	    int segments = 8; // Number of vertex points per corner circle slice
+	    
+	    if (fill) {
+	        glBegin(GL_TRIANGLE_FAN);
+	    } else {
+	        glBegin(GL_LINE_LOOP);
+	    }
+	    
+	    glColor4f(r, g, b, a);
+	
+	    // Array of corner coordinate anchors to loop through logically
+	    struct Corner { float x, y, startAngle; } corners[4] = {
+	        { bounds.right - radius, bounds.top + radius,    0.0f * static_cast<float>(M_PI) / 2.0f }, // Top-Right
+	        { bounds.left + radius,  bounds.top + radius,    1.0f * static_cast<float>(M_PI) / 2.0f }, // Top-Left
+	        { bounds.left + radius,  bounds.bottom - radius, 2.0f * static_cast<float>(M_PI) / 2.0f }, // Bottom-Left
+	        { bounds.right - radius, bounds.bottom - radius, 3.0f * static_cast<float>(M_PI) / 2.0f }  // Bottom-Right
+	    };
+	
+	    for (int i = 0; i < 4; ++i) {
+	        for (int j = 0; j <= segments; ++j) {
+	            float angle = corners[i].startAngle + (static_cast<float>(j) / static_cast<float>(segments)) * (static_cast<float>(M_PI) / 2.0f);
+	            float vx = corners[i].x + std::cos(angle) * radius;
+	            float vy = corners[i].y - std::sin(angle) * radius; // Inverted Y-axis tracking space
+	            glVertex2f(vx, vy);
+	        }
+	    }
+	    glEnd();
+	}
 
 
 
@@ -2284,9 +3601,7 @@ void SyncDockWithRunningDeskbarApps() {
         // -------------------------------------------------------------------------
         // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING
         // -------------------------------------------------------------------------
-        float totalCalculatedWidth = 0.0f;
-
-        
+        float totalCalculatedWidth = 0.0f;        
         for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
             dynamicWidths.clear();
             dynamicScales.clear();
@@ -2312,18 +3627,53 @@ void SyncDockWithRunningDeskbarApps() {
                 
                 if (finalSize > maxDockHeight) maxDockHeight = finalSize;
                 progressiveX += finalSize + padding;
-            }
-            if (totalIconsCount > 0) progressiveX -= padding; // Clean tail boundary drop
+            } 
+            
+            if (totalIconsCount > 0) progressiveX -= padding; 
 
             // Account for the structural native app split divider
             if (activeWindowsCount > 0) {
                 progressiveX += separatorGapPadding;
             }
+			if (showSystemTray) {
+            	// Run our throttled texture sync check
+            	SyncDynamicSystrayTextures();
+			}
+            
+
+	        // =========================================================================
+	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (NEW DYNAMIC CODE)
+	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
+	        // =========================================================================
+	        float traySectionPadding = clockSectionPadding;
+	        size_t trayCount = fLiveTrayItems.size();
+	        
+            float baselineTrayWidth = 0.0f;
+            if (showSystemTray && trayCount > 0) {
+                baselineTrayWidth = (trayCount * 16.0f) + ((trayCount > 1 ? trayCount - 1 : 0) * 6.0f);
+            }
+	
+	        progressiveX += traySectionPadding;
+	        float approxTrayCenterX = progressiveX + (baselineTrayWidth / 2.0f);
+	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
+	        
+	        float trayScale = 1.0f;
+	        if (fMouseY >= (fHeight - 140.0f) && distanceTrayX < 160.0f) {
+	            float ratio = distanceTrayX / 160.0f;
+	            trayScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	        }
+	        
+	        dynamicWidths.push_back(baselineTrayWidth * trayScale);
+	        dynamicScales.push_back(trayScale);
+	        progressiveX += (baselineTrayWidth * trayScale);
+	        // =========================================================================
 
             // =========================================================================
             // 2. PROCESS SYSTEM CLOCK COMPONENT METRICS
             // =========================================================================
             if (fClockTexture.id != 0) {
+
+
                 progressiveX += clockSectionPadding;
                 
                 float highDpiCompensateFactor = 0.42f;
@@ -2407,11 +3757,12 @@ void SyncDockWithRunningDeskbarApps() {
         // -------------------------------------------------------------------------
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
         // -------------------------------------------------------------------------
-        // FIX: Re-declare variables so they exist correctly in scope!
-        size_t clockSlotIdx  = totalIconsCount;
-        size_t volumeSlotIdx = totalIconsCount + 1;
-        size_t trashSlotIdx  = totalIconsCount + 2;
-        size_t cpuSlotIdx    = totalIconsCount + 3;
+        // FIXED: Added local explicit type declarations for every tracking index
+        size_t traySlotIdx   = totalIconsCount;
+        size_t clockSlotIdx  = totalIconsCount + 1;
+        size_t volumeSlotIdx = totalIconsCount + 2;
+        size_t trashSlotIdx  = totalIconsCount + 3;
+        size_t cpuSlotIdx    = totalIconsCount + 4;
 
         float dockMarginBottom = 15.0f;
         HaikuRect dockPlate;
@@ -2430,10 +3781,16 @@ void SyncDockWithRunningDeskbarApps() {
         }
         if (totalIconsCount > 0) layoutTrackerX -= padding;
         if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
+        
+        // A. Add System Tray width first
+        layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
+        
+        // B. Add Clock width second
         if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
         
-        // Skip past the new horizontal footprint width assigned to the volume block
+        // C. Add Volume slider width third
         layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+
         
         layoutTrackerX += clockSectionPadding;
         fTrashRect.left = layoutTrackerX;
@@ -2450,18 +3807,6 @@ void SyncDockWithRunningDeskbarApps() {
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
 
-        // =========================================================================
-        // 4. RENDER DOCK BACKPLATE SHELF
-        // =========================================================================
-
-
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);        
-        DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, 0.4f); 
-        DrawOutlineRoundedRect(dockPlate, cornerRadius, 0.15f, 0.15f, 0.15f, 0.8f);
-        
-        // Reset global alpha tint filter so icons draw with full brightness
-        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
         // =========================================================================
         // 5. CORE ICON RENDERING ENGINE WITH ACTIVE RUNNING TASKBAR SPLITS
@@ -2542,7 +3887,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    float size = dynamicWidths[renderingSlotIdx];
 		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 		
-            if (activeTaskWin.title == "Trackerx") {
+            if (activeTaskWin.title == "Tracker") {
                 // TRACKER EXCLUSIVITY: Preserve your original working strategy.
                 // Do not override 'isMinimized' using global counts or cached threads.
                 // Let your verified click-handling states manage Tracker's visibility.
@@ -2629,8 +3974,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    // A. Draw active task window application vector icon thumbnail
 		    if (activeTaskWin.icon.id != 0) {
 		        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
-		        
-		        if (activeTaskWin.isMinimized == true) {
+		        if (activeTaskWin.isMinimized == true && activeTaskWin.title != "Tracker") {
 		            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
 		        } else {
 		            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Bright full opacity active focus
@@ -2647,7 +3991,7 @@ void SyncDockWithRunningDeskbarApps() {
 		
 		    // B. Draw an active native glowing mini ledger stripe indicator line below active windows
 		    glDisable(GL_TEXTURE_2D);
-		    if (activeTaskWin.isMinimized == false) {
+		    if (activeTaskWin.isMinimized == false && activeTaskWin.title != "Tracker") {
 		        // Bright glowing electric blue highlight segment line for focused open panels
 		        glColor4f(0.2f, 0.6f, 1.0f, 0.9f); 
 		        glLineWidth(3.0f);
@@ -2657,24 +4001,88 @@ void SyncDockWithRunningDeskbarApps() {
 		        glEnd();
 		    }
 		
-		    currentX += size + padding;
+				    currentX += size + padding;
 		    renderingSlotIdx++;
 		}
 		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
 
-		
+       // Left Clock Divider Line
+	       float lineLeftSnappedX = std::floor(currentX + 0.5f);
+	       glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
+	       glBegin(GL_LINES);
+	           glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
+	           glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
+	       glEnd();
 
-
+        // =========================================================================
+        // NATIVE INTEGRATION: DRAW THE SYSTEM TRAY (DYNAMIC DOCK ENGINE REWRITE)
+        // =========================================================================
+        if (showSystemTray) {
+	        float dynamicTrayWidth = dynamicWidths[traySlotIdx];
+	        float trayScaleFactor  = dynamicScales[traySlotIdx];
+	        
+	        currentX += clockSectionPadding;
+	        
+	        // Vertically align the 16px high tray block cleanly within the panel
+	        float trayRenderTopY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (8.0f * trayScaleFactor));
+	        
+	        float localTrayX = currentX;
+	        float traySpacing = 6.0f * trayScaleFactor;
+	
+	        // Force a completely clean OpenGL texturing environment state block
+	        glEnable(GL_BLEND);
+	        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	        glEnable(GL_TEXTURE_2D);
+	        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	
+	        // Iterate through all live elements dynamically extracted by the background engine
+	        for (size_t i = 0; i < fLiveTrayItems.size(); ++i) {
+	            GLuint trayTexID = fLiveTrayItems[i].textureId;
+	            if (trayTexID == 0) continue;
+	
+	            float itemWidth = 16.0f * trayScaleFactor;
+	
+	            // =========================================================================
+	            // CACHE RENDER POSITION METRICS FOR FAST PASS-2 HIT TESTING IN MOUSE CLICK
+	            // =========================================================================
+	            fLiveTrayItems[i].currentRenderX = localTrayX;
+	            fLiveTrayItems[i].currentRenderWidth = itemWidth;
+	
+	            // Bind explicitly for this specific quad draw task run
+	            glBindTexture(GL_TEXTURE_2D, trayTexID);
+	            glBegin(GL_QUADS);
+	                glTexCoord2f(0.0f, 0.0f); glVertex2f(localTrayX, trayRenderTopY);
+	                glTexCoord2f(1.0f, 0.0f); glVertex2f(localTrayX + itemWidth, trayRenderTopY);
+	                glTexCoord2f(1.0f, 1.0f); glVertex2f(localTrayX + itemWidth, trayRenderTopY + itemWidth);
+	                glTexCoord2f(0.0f, 1.0f); glVertex2f(localTrayX, trayRenderTopY + itemWidth);
+	            glEnd();
+	
+	            // Advance layout vector forward using dynamic scaling specs
+	            localTrayX += itemWidth + traySpacing;
+	        }
+	
+	        // --- CRITICAL DEFENSIVE SHIELD: FORCE FULL OpenGL STATE SHUTDOWN ---
+	        // This explicitly cuts off the texture matrix pipeline, guaranteeing the clock text 
+	        // and trash bin drawing routines downstream inherit a pristine state machine!
+	        glBindTexture(GL_TEXTURE_2D, 0);
+	        glDisable(GL_TEXTURE_2D);
+	        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	        // =========================================================================
+	
+	        currentX += dynamicTrayWidth;
+        }
 
         // =========================================================================
         // 6. DRAW SYSTEM CLOCK STATUS TEXT (MATHEMATICALLY LOCKED SYMMETRY)
         // =========================================================================
         if (fClockTexture.id != 0) {
+
             float clockScale   = dynamicScales[clockSlotIdx];
             float dynamicClockW = dynamicWidths[clockSlotIdx]; 
             float highDpiCompensateFactor = 0.42f; 
             float dynamicClockH = static_cast<float>(fClockHeight) * highDpiCompensateFactor * clockScale;
-            
+            /*
             // Left Clock Divider Line
             float lineLeftSnappedX = std::floor(currentX + 0.5f);
             glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
@@ -2682,7 +4090,7 @@ void SyncDockWithRunningDeskbarApps() {
                 glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
                 glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
             glEnd();
-
+			*/
             currentX += clockSectionPadding;
             float clockY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicClockH / 2.0f));
             
@@ -2845,23 +4253,11 @@ void SyncDockWithRunningDeskbarApps() {
         currentX = fTrashRect.right;
 
         // =========================================================================
-        // 6B. DRAW GRAPHICAL GREEN LED HISTORICAL CPU MONITOR
+        // 6B. DRAW GRAPHICAL PURPLE BOUNCING CPU METERS (ROUNDED CORNER CASING)
         // =========================================================================
-        
-        // Line 3: Right Trash / Left CPU Divider
-        // Drawn directly on currentX so it balances perfectly with the clock dividers
-        //float cpuLineLeftSnappedX = std::floor(currentX + 0.5f);
-        glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
-        /*
-        glBegin(GL_LINES);
-            glVertex2f(cpuLineLeftSnappedX, dockPlate.top + 8.0f);
-            glVertex2f(cpuLineLeftSnappedX, dockPlate.bottom - 8.0f);
-        glEnd();
-		*/
-        // Consume the left cushion channel completely to move tracking to the chart border
-        
-        currentX += clockSectionPadding;
-        
+
+        glLineWidth(2.0f);        
+        currentX += clockSectionPadding;        
         float cpuScale          = dynamicScales[cpuSlotIdx];
         float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
         float dynamicGraphHeight = 28.0f * cpuScale; 
@@ -2869,33 +4265,41 @@ void SyncDockWithRunningDeskbarApps() {
         
         HaikuRect cpuGraphBounds = { currentX, graphTop, currentX + dynamicGraphWidth, graphTop + dynamicGraphHeight };
 
-        // 1. Draw solid dark background casing container
-        DrawFilledRect(cpuGraphBounds, 0.05f, 0.10f, 0.05f, 0.9f); 
+        // 1. FIXED: Draw solid dark background container equipped with a clean 4.0-pixel rounding radius
+        DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.05f, 0.05f, 0.08f, 0.9f, true); 
         
-        // 2. Loop through the historical data array to paint individual columns
-        float columnWidth = dynamicGraphWidth / 40.0f;
+        UpdateGlobalCpuLoadTracker();
+
+        int numBars = (fCpuHistoryIndex > 0 && fCpuHistoryIndex <= 40) ? fCpuHistoryIndex : 16;
+        float barSpacing = 1.5f;
+        float totalSpacingSpace = barSpacing * (numBars + 1);
+        float barWidth = (dynamicGraphWidth - totalSpacingSpace) / numBars;
+
+        static std::vector<float> visualBouncingHeights(40, 0.0f);
+
         glBegin(GL_QUADS);
-        for (int i = 0; i < 40; ++i) {
-            int bufferIndex = (fCpuHistoryIndex + i) % 40;
-            float activeLoadFactor = fCpuHistory[bufferIndex];
-            float barLeft = cpuGraphBounds.left + (i * columnWidth) + 0.5f;
-            float barRight = barLeft + columnWidth - 0.5f;
-            float barTop = cpuGraphBounds.bottom - (activeLoadFactor * dynamicGraphHeight);
+        for (int i = 0; i < numBars; ++i) {
+            float targetLoadFactor = fCpuHistory[i];
+            visualBouncingHeights[i] = (visualBouncingHeights[i] * 0.82f) + (targetLoadFactor * 0.18f);
+
+            float barLeft = cpuGraphBounds.left + barSpacing + (i * (barWidth + barSpacing));
+            float barRight = barLeft + barWidth;
             
-            glColor4f(0.2f, 0.95f, 0.2f, 0.85f);
+            // Constrain the bar top math to match our internal container corner curve parameters safely
+            float barTop = cpuGraphBounds.bottom - (visualBouncingHeights[i] * (dynamicGraphHeight - 2.0f)) - 1.0f;
+            
+            glColor4f(0.57f, 0.12f, 0.99f, 0.90f); // Neon Purple
+            
             glVertex2f(barLeft,  barTop);
             glVertex2f(barRight, barTop);
-            glVertex2f(barRight, cpuGraphBounds.bottom);
-            glVertex2f(barLeft,  cpuGraphBounds.bottom);
+            glVertex2f(barRight, cpuGraphBounds.bottom - 1.0f);
+            glVertex2f(barLeft,  cpuGraphBounds.bottom - 1.0f);
         }
         glEnd();
 
-        // 3. 1-pixel dark framing edge line outline around the display case
-        glColor4f(0.15f, 0.15f, 0.15f, 0.6f);
-        glBegin(GL_LINE_LOOP);
-            glVertex2f(cpuGraphBounds.left, cpuGraphBounds.top);     glVertex2f(cpuGraphBounds.right, cpuGraphBounds.top);
-            glVertex2f(cpuGraphBounds.right, cpuGraphBounds.bottom); glVertex2f(cpuGraphBounds.left, cpuGraphBounds.bottom);
-        glEnd();
+        // 3. FIXED: Apply a matching rounded outer wireframe stroke layer outline
+        DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.15f, 0.15f, 0.20f, 0.6f, false);
+
 
         // =========================================================================
         // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
@@ -2986,10 +4390,10 @@ void SyncDockWithRunningDeskbarApps() {
 
 private:
 
-    void UpdateGlobalCpuLoadTracker() {
+       void UpdateGlobalCpuLoadTracker() {
         uint32 currentTicks = SDL_GetTicks();
-        // Check if 1 second (1000ms) has passed since our last pulse sample
-        if (currentTicks - fLastCpuPulseTime < 1000) return;
+        // Sample every 100ms for fast, hyper-responsive bouncing action
+        if (currentTicks - fLastCpuPulseTime < 100) return;
         fLastCpuPulseTime = currentTicks;
 
         system_info info;
@@ -3001,34 +4405,38 @@ private:
             return;
         }
 
-        bigtime_t currentActive = 0;
-        for (uint32_t i = 0; i < info.cpu_count; ++i) {
-            currentActive += cpuInfos[i].active_time;
+        // Persistent tracking array for previous ticks per core (declare as static or class members)
+        static std::vector<bigtime_t> prevActiveTicks(info.cpu_count, 0);
+        static bigtime_t prevSystemTime = system_time();
+
+        bigtime_t currentSystemTime = system_time();
+        bigtime_t totalDelta = currentSystemTime - prevSystemTime;
+        prevSystemTime = currentSystemTime;
+
+        // Calculate and update the fixed slot load for each core independently
+        for (uint32 i = 0; i < info.cpu_count; ++i) {
+            bigtime_t activeDelta = cpuInfos[i].active_time - prevActiveTicks[i];
+            prevActiveTicks[i] = cpuInfos[i].active_time;
+
+            float coreLoad = 0.0f;
+            if (totalDelta > 0) {
+                coreLoad = static_cast<float>(activeDelta) / static_cast<float>(totalDelta);
+            }
+
+            if (coreLoad < 0.0f) coreLoad = 0.0f;
+            if (coreLoad > 1.0f) coreLoad = 1.0f;
+
+            // Store each core directly into its own fixed array slot (fCpuHistory handles up to 40)
+            if (i < 40) {
+                fCpuHistory[i] = coreLoad;
+            }
         }
         delete[] cpuInfos;
-
-        bigtime_t currentTotal = system_time() * info.cpu_count;
-
-        bigtime_t activeDelta = currentActive - fPrevActiveTicks;
-        bigtime_t totalDelta = currentTotal - fPrevTotalTicks;
-
-        float combinedLoad = 0.0f;
-        if (totalDelta > 0) {
-            combinedLoad = static_cast<float>(activeDelta) / static_cast<float>(totalDelta);
-        }
-
-        // Clamp the float safely between a normalized 0.0 and 1.0 boundary socket range
-        if (combinedLoad < 0.0f) combinedLoad = 0.0f;
-        if (combinedLoad > 1.0f) combinedLoad = 1.0f;
-
-        // Cache parameters for the next frame delta pulse cycle calculation
-        fPrevActiveTicks = currentActive;
-        fPrevTotalTicks = currentTotal;
-
-        // Push structural results into our historical graph line buffer array
-        fCpuHistory[fCpuHistoryIndex] = combinedLoad;
-        fCpuHistoryIndex = (fCpuHistoryIndex + 1) % 40;
+        
+        // Cache the total count of active cores currently being tracked
+        fCpuHistoryIndex = info.cpu_count; 
     }
+
 
 
 
@@ -3379,7 +4787,8 @@ void FetchHaikuMixerVolume() {
 	float fCachedVolWidth = 0.0f;
 	float fCachedVolHeight = 0.0f;
 	float fPreMuteVolumeLevel = 0.5f; 
-
+	uint32 fLastTrackerMenuCloseTime; 
+	
 //@private    
 
 public:
@@ -3452,10 +4861,13 @@ void LoadConfiguration() {
         BMessage settings;
         
         if (settings.Unflatten(&file) == B_OK) {
-            // 1. Recover your existing auto-hide tracking value
+            // 1. Recover existing settings
             bool savedValue;
             if (settings.FindBool("auto_hide", &savedValue) == B_OK) {
                 autoHideEnabled = savedValue;
+            }
+            if (settings.FindBool("sys_tray", &savedValue) == B_OK) {
+                showSystemTray = savedValue;
             }
             
             // 2. Recover the favorites string index array
@@ -3480,8 +4892,9 @@ void SaveConfiguration() {
         BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
         BMessage settings;
         
-        // 1. Pack your existing auto-hide setting
+        // 1. Pack existing settings
         settings.AddBool("auto_hide", autoHideEnabled);
+        settings.AddBool("sys_tray", showSystemTray);
         
         // 2. Pack all live favorites keys sequentially into the same field name
         std::set<std::string>::iterator it;
@@ -3595,6 +5008,8 @@ int main(int argc, char* argv[]) {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();    
     HaikuGlDesktopEngine desktopEngine(screenWidth, screenHeight);
+
+
     bool appExecuting = true;
     SDL_Event incomingEventPackage;
     
@@ -3602,7 +5017,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.10"; 
+    const char* localVersion = "v1.0.11"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -3885,7 +5300,10 @@ int main(int argc, char* argv[]) {
         }
 
         if (needsRender) {
-            desktopEngine.RenderFrame(currentY); 
+            // A. Instruct your engine to paint the core dock backdrop textures
+            desktopEngine.RenderFrame(currentY);   
+            
+            // B. Flush out the double buffer canvas matrix to the monitor screen display safely
             SDL_GL_SwapWindow(window);
             needsRender = false; 
         }
@@ -3893,6 +5311,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "[System Terminal] Closing hDesktop context cleanly." << std::endl;
+
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
     SDL_Quit();

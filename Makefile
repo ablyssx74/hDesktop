@@ -1,11 +1,11 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app
+CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/develop/headers/private/tracker -I/boot/home/Dev/haiku/src/kits/tracker
 
 
 # Target binary definitions
 GUI_TARGET = hdesktop
-VERSION = 1.0.10
+VERSION = 1.0.11
 PACKAGE_DIR := build/package
 
 # Shared target architectures
@@ -20,14 +20,16 @@ else ifeq ($(UNAME_M), x86_64)
     INCLUDE = -L/boot/system/lib
 endif
 
-# Source mapping parameters
-GUI_SRCS = hdesktop.cpp
+# =========================================================================
+# FIXED SOURCE MAPPING PARAMETERS (Merged the new tray component target)
+# =========================================================================
+GUI_SRCS = hdesktop.cpp 
 GUI_OBJS = $(GUI_SRCS:.cpp=.o)
 GUI_RSRCS = hdesktop.rsrc
 
 
 # Shared linking assets
-LIBS = -L./lib -lbe -ltranslation -lmedia -lSDL2 -lGL -lGLU
+LIBS = -L./lib -lbe -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -llocalestub
 
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
@@ -59,6 +61,7 @@ clean:
 	rm -rf build
 
 .PHONY: all clean
+
 
 
 
