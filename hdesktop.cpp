@@ -24,6 +24,7 @@
 #include <GL/glu.h>
 #include <IconUtils.h>
 #include <InterfaceDefs.h>
+#include <InterfaceKit.h>
 #include <iostream>
 #include <map>
 #include <MediaNode.h>
@@ -54,6 +55,13 @@
 #include <View.h>
 #include <Window.h>
 #include <NavMenu.h> 
+
+
+class HaikuGlDesktopEngine;
+
+
+
+
 
 using BPrivate::BNavMenu;
 // =========================================================================
@@ -596,6 +604,56 @@ protected:
 private:
     BBitmap* fIcon;
 };
+
+
+
+
+
+struct CpuMenuArgs {
+    HaikuGlDesktopEngine* engine;
+    int32 winX;
+    int32 winY;
+    int32 mouseX;
+    int32 mouseY;
+};
+
+// Streamlined structural definition block
+class AsyncCpuMenuRunner : public BWindow {
+public:
+    AsyncCpuMenuRunner(CpuMenuArgs* args)
+        : BWindow(BRect(-50, -50, -10, -10), "AsyncCpuMenuLooper", B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 0),
+          fArgs(args)
+    {
+        BView* dummyView = new BView(Bounds(), "dummy", B_FOLLOW_ALL, B_WILL_DRAW);
+        AddChild(dummyView);
+        
+        Run();
+        PostMessage(MSG_LAUNCH_MENU);
+    }
+
+    virtual void MessageReceived(BMessage* message) override {
+        switch (message->what) {
+            case MSG_LAUNCH_MENU:
+                _DisplayProcessControllerMenu(); // Will be resolved downstream
+                Quit(); 
+                break;
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+
+private:
+    enum { MSG_LAUNCH_MENU = 'lmnc' };
+    void _DisplayProcessControllerMenu(); // Declaration only!
+
+    CpuMenuArgs* fArgs;
+};
+
+
+
+
+
 
 
 
@@ -1939,203 +1997,6 @@ public:
 
 
 
-	void SpawnProcessControllerFAUXMenu(int32 winX, int32 winY, int32 mouseX, int32 mouseY)
-	{
-	    std::cout << "[CPU Graph] Initializing dynamic system activity menu..." << std::endl;
-	
-	    // 1. Create the base container. Set handling to asynchronous so it doesn't freeze the dock rendering loop.
-	    BPopUpMenu* pcMenu = new BPopUpMenu("CPUGraphContext", false, false);
-	    
-	
-    // =========================================================================
-    // DYNAMIC SUBMENU 1: QUIT AN APPLICATION (FIXED ROBUST ICON TRACKING)
-    // =========================================================================
-    BMenu* quitAppMenu = new BMenu("Quit an application");
-    
-    team_info teamInfo;
-    int32 cookie = 0; 
-    bool addedApps = false;
-
-    while (get_next_team_info(&cookie, &teamInfo) == B_OK) {
-        std::string fullArgs(teamInfo.args);
-        
-        size_t lastSlash = fullArgs.find_last_of('/');
-        std::string appName = (lastSlash != std::string::npos) ? fullArgs.substr(lastSlash + 1) : fullArgs;
-        
-        size_t firstSpace = appName.find_first_of(" \t\r\n");
-        if (firstSpace != std::string::npos) {
-            appName = appName.substr(0, firstSpace);
-        }
-
-        if (appName.empty() || teamInfo.team == 1 || appName == "kernel") {
-            continue;
-        }
-
-        if (appName == "app_server" || appName == "input_server" || 
-            appName == "registrar"  || appName == "Deskbar" || 
-            appName == "hdesktop"   || appName == "Tracker" ||
-            appName == "syslog_daemon") {
-            continue;
-        }
-
-        // Initialize the messaging payload parameters
-        BMessage* killMsg = new BMessage('kill');
-        killMsg->AddInt32("target_team", teamInfo.team);
-        killMsg->AddString("target_name", appName.c_str());
-        
-        BBitmap* miniIcon = nullptr;
-
-        // Extract system vector/bitmap graphics via image structures
-        image_info imgInfo;
-        int32 imgCookie = 0;
-        
-        if (get_next_image_info(teamInfo.team, &imgCookie, &imgInfo) == B_OK) {
-            BEntry appEntry(imgInfo.name);
-            if (appEntry.Exists()) {
-                // Resolve entry_ref object to accommodate static GetTrackerIcon signature
-                entry_ref ref;
-                if (appEntry.GetRef(&ref) == B_OK) {
-                    BRect iconBounds(0, 0, 15, 15);
-                    BBitmap* tempIcon = new BBitmap(iconBounds, B_RGBA32);
-                    
-                    if (BNodeInfo::GetTrackerIcon(&ref, tempIcon, B_MINI_ICON) == B_OK) {
-                        miniIcon = tempIcon; // Successfully loaded structural graphic
-                    } else {
-                        delete tempIcon; // Clean up allocations if lookups fail
-                    }
-                }
-            }
-        }
-
-        // Use custom subclass to bind the application icon alongside its label
-        BIconMenuItem* processItem = new BIconMenuItem(appName.c_str(), killMsg, miniIcon);
-        quitAppMenu->AddItem(processItem);
-        addedApps = true;
-    }
-
-    if (!addedApps) {
-        BMenuItem* emptyItem = new BMenuItem("No system applications running", nullptr);
-        emptyItem->SetEnabled(false);
-        quitAppMenu->AddItem(emptyItem);
-    }
-    
-    pcMenu->AddItem(quitAppMenu);
-
-
-    // =========================================================================
-    // DYNAMIC SUBMENU 3: THREADS AND CPU USAGE (LIVE INTERACTIVE PULSING TARGET)
-    // =========================================================================
-    BLiveMemoryMenu* memUsageMenu = new BLiveMemoryMenu("Memory usage");
-    pcMenu->AddItem(memUsageMenu);
-    
-    BRealtimeCpuMenu* threadCpuMenu = new BRealtimeCpuMenu("Threads and CPU usage");
-
-    pcMenu->AddItem(threadCpuMenu);
-
-
-/*
-	
-	    // =========================================================================
-	    // PROCESSOR AFFINITY CORE MAPPINGS
-	    // =========================================================================
-	    // Get actual system core count using Haiku's OS.h system info framework
-	    system_info sysInfo;
-	    int32 cpuCount = 1;
-	    if (get_system_info(&sysInfo) == B_OK) {
-	        cpuCount = sysInfo.cpu_count;
-	    } else {
-	        cpuCount = 4; // Fallback simulation parameter
-	    }
-	
-	    for (int32 i = 1; i <= cpuCount; ++i) {
-	        std::string coreLabel = "Processor " + std::to_string(i);
-	        BMenuItem* cpuCoreItem = new BMenuItem(coreLabel.c_str(), new BMessage('tcpu'));
-	        cpuCoreItem->SetMarked(true); // Default active checkmark status matching the OS behavior
-	        pcMenu->AddItem(cpuCoreItem);
-	    }
-	
-	    pcMenu->AddSeparatorItem();
-	*/
-	    // =========================================================================
-	    // CORE NATIVE UTILITIES & MISC ACTIONS
-	    // =========================================================================
-	    pcMenu->AddItem(new BMenuItem("Power saving", new BMessage('pwrS')));
-
-	
-		// =========================================================================
-	    // EXECUTION MATRIX (ASYNCHRONOUS TARGETING ROUTER)
-	    // =========================================================================
-	    BPoint screenClickPoint(static_cast<float>(winX + mouseX), static_cast<float>(winY + mouseY));
-	    
-	    // Point the selection messenger back to your primary window/loop layer or execute a blocker evaluation
-	    // The parameters are: Go(screenPoint, deliverMessageToTarget=false, openAsync=true, pinMenu=false)
-	    BMenuItem* chosenAction = pcMenu->Go(screenClickPoint, false, true);
-	
-	    if (chosenAction != nullptr) {
-	        BMessage* actionMsg = chosenAction->Message();
-	        if (actionMsg != nullptr) {
-	            switch (actionMsg->what) {
-	                case 'kthr': {
-	                    team_id targetTeam = -1;
-	                    const char* thName = "Unknown";
-	                    
-	                    if (actionMsg->FindInt32("target_thread", &targetTeam) == B_OK) {
-	                        actionMsg->FindString("target_name", &thName);
-	                        std::cout << "[CPU Graph] Forcing termination of application process: " 
-	                                  << thName << " (Team ID " << targetTeam << ")" << std::endl;
-	                        
-	                        // Terminate the entire multi-threaded application footprint smoothly
-	                        kill_team(targetTeam);
-	                    }
-	                    break;
-	                }
-	
-	
-	                case 'kill': {
-	                    team_id targetTeam = -1;
-	                    const char* appName = "Unknown";
-	                    
-	                    if (actionMsg->FindInt32("target_team", &targetTeam) == B_OK) {
-	                        actionMsg->FindString("target_name", &appName);
-	                        std::cout << "[CPU Graph] Terminating application cleanly: " << appName << " (Team " << targetTeam << ")" << std::endl;
-	                        
-	                        // Send standard polite request to terminate the target message loop
-	                        BMessenger appTarget(nullptr, targetTeam);
-	                        if (appTarget.IsValid()) {
-	                            appTarget.SendMessage(B_QUIT_REQUESTED);
-	                        } else {
-	                            // Hard kill fallback if message target maps cleanly to dead loops
-	                            kill_team(targetTeam);
-	                        }
-	                    }
-	                    break;
-	                }
-	
-	                case 'pwrS': {
-	                    std::cout << "[CPU Graph] Activating system Power Saving configuration profiles..." << std::endl;
-	                    std::system("/boot/system/apps/PowerStatus --toggle &"); 
-	                    break;
-	                }
-	
-	
-	
-	
-	                default:
-	                    std::cout << "[CPU Graph] Unhandled menu flag: " << actionMsg->what << std::endl;
-	                    break;
-	            }
-	        }
-	    }
-    
-    // Clean up memory leaks cleanly
-    delete pcMenu;
-}
-
-
-
-
-
-
 	void ReloadWallpaperBackground() {
 	    std::cout << "[Engine] Reloading wallpaper graphics assets..." << std::endl;
 	
@@ -3440,14 +3301,32 @@ void SyncDockWithRunningDeskbarApps() {
 	            SDL_GetWindowPosition(activeWin, &winX, &winY);
 	        }
 	
-	        // Handle structural fallback or single left click variant
+	        // ACTIVE MENU CLOSE CHECK: Let the menu naturally collapse if they click again
+	        if (fCpuMenuIsActive) {
+	            std::cout << "[CPU Monitor] Active Intercept: Letting menu canvas close cleanly." << std::endl;
+	            return; 
+	        }
+	
 	        if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
-	            // Deploy the multi-tiered ProcessController-like tracking menu cascade
-	            SpawnProcessControllerFAUXMenu(winX, winY, x, y);
+	            std::cout << "[CPU Monitor] Offloading ProcessController menus to async window looper..." << std::endl;
+	            fCpuMenuIsActive = true; // Engage active state safety shield latch
+	
+	            // Bundle coordinates to pass safely across the memory barrier
+	            CpuMenuArgs* args = new CpuMenuArgs();
+	            args->engine = this;
+	            args->winX = winX;
+	            args->winY = winY;
+	            args->mouseX = x;
+	            args->mouseY = y;
+	
+	            // Spawns and detaches the menu runner immediately.
+	            // Your core SDL graphics framework thread can now render frames uninterrupted.
+	            new AsyncCpuMenuRunner(args);
 	        }
 	        return;
 	    }
 	} // HandleMouseClick end closing brace
+
 
 
 
@@ -4794,10 +4673,12 @@ void FetchHaikuMixerVolume() {
 	float fPreMuteVolumeLevel = 0.5f; 
 	uint32 fLastTrackerMenuCloseTime; 
 	bool fTrackerMenuIsActive = false;
+	
 //@private    
 
 public:
     float fLastCalculatedWidth = 0.0f;	
+    bool fCpuMenuIsActive; 
 };
 
 
@@ -4911,6 +4792,225 @@ void SaveConfiguration() {
     }
 }
 
+// =========================================================================
+// ASYNC CPU MENU RUNNER 
+// =========================================================================
+void AsyncCpuMenuRunner::_DisplayProcessControllerMenu() {
+    std::cout << "[CPU Graph] Initializing dynamic async system activity menu..." << std::endl;
+
+    // 1. Create the base context menu shell container.
+    BPopUpMenu* pcMenu = new BPopUpMenu("CPUGraphContext", false, false);
+    pcMenu->SetRadioMode(false);
+
+    // =========================================================================
+    // DYNAMIC SUBMENU 1: QUIT AN APPLICATION (RESTORED WITH ROBUST ICON TRACKING)
+    // =========================================================================
+    BMenu* quitAppMenu = new BMenu("Quit an application");
+    
+    team_info teamInfo;
+    int32 cookie = 0; 
+    bool addedApps = false;
+
+    while (get_next_team_info(&cookie, &teamInfo) == B_OK) {
+        std::string fullArgs(teamInfo.args);
+        
+        size_t lastSlash = fullArgs.find_last_of('/');
+        std::string appName = (lastSlash != std::string::npos) ? fullArgs.substr(lastSlash + 1) : fullArgs;
+        
+        size_t firstSpace = appName.find_first_of(" \t\r\n");
+        if (firstSpace != std::string::npos) {
+            appName = appName.substr(0, firstSpace);
+        }
+
+        if (appName.empty() || teamInfo.team == 1 || appName == "kernel") {
+            continue;
+        }
+
+        // Keep core servers isolated from unexpected/accidental close clicks
+        if (appName == "app_server" || appName == "input_server" || 
+            appName == "registrar"  || appName == "Deskbar" || 
+            appName == "hdesktop"   || appName == "Tracker" ||
+            appName == "syslog_daemon") {
+            continue;
+        }
+
+        // Initialize the messaging payload parameters
+        BMessage* killMsg = new BMessage('kill');
+        killMsg->AddInt32("target_team", teamInfo.team);
+        killMsg->AddString("target_name", appName.c_str());
+        
+        BBitmap* miniIcon = nullptr;
+
+        // Extract system vector/bitmap graphics via image structures
+        image_info imgInfo;
+        int32 imgCookie = 0;
+        
+        if (get_next_image_info(teamInfo.team, &imgCookie, &imgInfo) == B_OK) {
+            BEntry appEntry(imgInfo.name);
+            if (appEntry.Exists()) {
+                entry_ref ref;
+                if (appEntry.GetRef(&ref) == B_OK) {
+                    BRect iconBounds(0, 0, 15, 15);
+                    BBitmap* tempIcon = new BBitmap(iconBounds, B_RGBA32);
+                    
+                    if (BNodeInfo::GetTrackerIcon(&ref, tempIcon, B_MINI_ICON) == B_OK) {
+                        miniIcon = tempIcon; 
+                    } else {
+                        delete tempIcon; 
+                    }
+                }
+            }
+        }
+
+        // Use your custom subclass to bind the application icon alongside its label
+        BIconMenuItem* processItem = new BIconMenuItem(appName.c_str(), killMsg, miniIcon);
+        quitAppMenu->AddItem(processItem);
+        addedApps = true;
+    }
+
+    if (!addedApps) {
+        BMenuItem* emptyItem = new BMenuItem("No system applications running", nullptr);
+        emptyItem->SetEnabled(false);
+        quitAppMenu->AddItem(emptyItem);
+    }
+    
+    pcMenu->AddItem(quitAppMenu);
+
+    // =========================================================================
+    // DYNAMIC SUBMENU 2 & 3: MEMORY AND LIVE-THREAD RECYCLERS
+    // =========================================================================
+    BLiveMemoryMenu* memUsageMenu = new BLiveMemoryMenu("Memory usage");
+    pcMenu->AddItem(memUsageMenu);
+    
+    BRealtimeCpuMenu* threadCpuMenu = new BRealtimeCpuMenu("Threads and CPU usage");
+    pcMenu->AddItem(threadCpuMenu);
+
+    // =========================================================================
+    // CORE NATIVE UTILITIES & MISC ACTIONS
+    // =========================================================================
+    pcMenu->AddItem(new BMenuItem("Power saving", new BMessage('pwrS')));
+
+    // =========================================================================
+    // POSITION CALCULATIONS AND SYNCHRONOUS RUNNER INVOKATION
+    // =========================================================================
+    float anchoredMenuX = static_cast<float>(fArgs->winX + fArgs->mouseX) - 45.0f;
+    if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+    
+    float anchoredMenuY = static_cast<float>(fArgs->winY) - 5.0f;
+    BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+
+    // Notice we use Go(..., false, false) intentionally here!
+    // Since this method runs exclusively within our separate worker looper window thread, 
+    // blocking synchronously here is completely safe and won't lock your main SDL loop.
+    BMenuItem* chosenAction = pcMenu->Go(screenClickPoint, false, false);
+
+    // =========================================================================
+    // ROUTING AND SIGNAL HANDLING MATRIX (WITH MODAL CONFIRMATION ALERTS)
+    // =========================================================================
+    if (chosenAction != nullptr) {
+        BMessage* actionMsg = chosenAction->Message();
+        if (actionMsg != nullptr) {
+            switch (actionMsg->what) {
+                case 'kthr': {
+                    team_id targetTeam = -1;
+                    const char* thName = "Unknown";
+                    
+                    if (actionMsg->FindInt32("target_thread", &targetTeam) == B_OK) {
+                        actionMsg->FindString("target_name", &thName);
+                        
+                        char alertText[256];
+                        std::snprintf(alertText, sizeof(alertText), 
+                            "Are you sure you want to force terminate the process '%s' (Team ID: %d)?\n\n"
+                            "Unsaved progress inside this application will be lost.", thName, targetTeam);
+
+                        BAlert* confirmationBox = new BAlert("Force Terminate", alertText, 
+                            "Cancel", "Force Kill", nullptr, 
+                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                        
+                        confirmationBox->SetShortcut(0, B_ESCAPE);
+
+                        // =========================================================================
+                        // CENTER ON SCREEN FIX
+                        // =========================================================================
+                        confirmationBox->CenterOnScreen(); // Automatically calculates center bounds
+
+                        int32 userChoice = confirmationBox->Go();
+
+                        if (userChoice == 1) { 
+                            std::cout << "[CPU Graph] Forcing termination of application process: " 
+                                      << thName << " (Team ID " << targetTeam << ")" << std::endl;
+                            kill_team(targetTeam); 
+                        } else {
+                            std::cout << "[CPU Graph] Force termination cancelled by user." << std::endl;
+                        }
+                    }
+                    break;
+                }
+
+                case 'kill': {
+                    team_id targetTeam = -1;
+                    const char* appName = "Unknown";
+                    
+                    if (actionMsg->FindInt32("target_team", &targetTeam) == B_OK) {
+                        actionMsg->FindString("target_name", &appName);
+                        
+                        char alertText[256];
+                        std::snprintf(alertText, sizeof(alertText), 
+                            "Do you want to close '%s' smoothly?\n\n"
+                            "This will send a standard quit request to the application loop layer.", appName);
+
+                        BAlert* confirmationBox = new BAlert("Close Application", alertText, 
+                            "Cancel", "Close App", nullptr, 
+                            B_WIDTH_AS_USUAL, B_INFO_ALERT);
+                        
+                        confirmationBox->SetShortcut(0, B_ESCAPE);
+
+                        // =========================================================================
+                        // CENTER ON SCREEN FIX
+                        // =========================================================================
+                        confirmationBox->CenterOnScreen(); // Automatically calculates center bounds
+
+                        int32 userChoice = confirmationBox->Go();
+
+                        if (userChoice == 1) { 
+                            std::cout << "[CPU Graph] Terminating application cleanly: " << appName << " (Team " << targetTeam << ")" << std::endl;
+                            
+                            BMessenger appTarget(nullptr, targetTeam);
+                            if (appTarget.IsValid()) {
+                                appTarget.SendMessage(B_QUIT_REQUESTED);
+                            } else {
+                                kill_team(targetTeam); 
+                            }
+                        } else {
+                            std::cout << "[CPU Graph] Clean termination cancelled by user." << std::endl;
+                        }
+                    }
+                    break;
+                }
+
+
+                case 'pwrS': {
+                    std::cout << "[CPU Graph] Activating system Power Saving configuration profiles..." << std::endl;
+                    std::system("/boot/system/apps/PowerStatus --toggle &"); 
+                    break;
+                }
+
+                default:
+                    std::cout << "[CPU Graph] Unhandled menu flag: " << actionMsg->what << std::endl;
+                    break;
+            }
+        }
+    }
+
+
+    // Release the active menu latch safety shield on your engine instance before exiting
+    fArgs->engine->fCpuMenuIsActive = false;
+
+    // Clean up our instances inside our thread bubble
+    delete pcMenu;
+    delete fArgs;
+}
+
 
 
 
@@ -5022,7 +5122,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.12"; 
+    const char* localVersion = "v1.0.13"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
