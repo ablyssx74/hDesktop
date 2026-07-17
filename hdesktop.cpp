@@ -2455,7 +2455,77 @@ void SyncDockWithRunningDeskbarApps() {
    
 
 
-
+	struct TrackerMenuArgs {
+	    HaikuGlDesktopEngine* engine;
+	    int32 winX;
+	    int32 winY;
+	    int32 mouseX;
+	};
+	
+	// 2. UPDATED BACKGROUND THREAD FUNCTION
+	static int32 SpawnTrackerMenuThread(void* cookie) {
+	    TrackerMenuArgs* args = static_cast<TrackerMenuArgs*>(cookie);
+	    
+	    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+	
+	    entry_ref rootRef;
+	    BEntry rootEntry("/boot/");
+	    if (rootEntry.GetRef(&rootRef) != B_OK) {
+	        args->engine->fTrackerMenuIsActive = false; // Release safety latch
+	        delete args;
+	        return B_ERROR;
+	    }
+	
+	    BPopUpMenu* navMenuWrapper = new BPopUpMenu("", false, false);
+	    navMenuWrapper->SetRadioMode(false);
+	
+	    BPrivate::BNavMenu* asyncNavMenu = new BPrivate::BNavMenu("TempNav", B_REFS_RECEIVED, trackerMessenger);
+	    asyncNavMenu->SetNavDir(&rootRef);
+	
+	    asyncNavMenu->AttachedToWindow();
+	    snooze(10000); 
+	
+	    int32 totalNavItems = asyncNavMenu->CountItems();
+	    if (totalNavItems > 0) {
+	        for (int32 idx = 0; idx < totalNavItems; ++idx) {
+	            BMenuItem* extractedItem = asyncNavMenu->RemoveItem(static_cast<int32>(0));
+	            if (extractedItem) {
+	                navMenuWrapper->AddItem(extractedItem);
+	            }
+	        }
+	    } else {
+	        navMenuWrapper->AddItem(new BMenuItem("Open Tracker /boot/", new BMessage(B_REFS_RECEIVED)));
+	    }
+	
+	    float anchoredMenuX = static_cast<float>(args->winX + args->mouseX) - 45.0f;
+	    if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+	    
+	    float anchoredMenuY = static_cast<float>(args->winY) - 5.0f;
+	    BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+	
+	    // BLOCKING CALL (Inside background thread only): Freezes safely until user chooses or clicks away
+	    BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
+	
+	    // =========================================================================
+	    // RESTORED SHIELD LOGIC: LOG TIMESTAMPS ONLY ON ACTUAL MENU COLLAPSE
+	    // =========================================================================
+	    args->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
+	    args->engine->fTrackerMenuIsActive = false; // Reset the active status lock flag
+	
+	    if (chosenAction != nullptr) {
+	        BMessage* actionMsg = chosenAction->Message();
+	        if (actionMsg != nullptr && actionMsg->what == B_REFS_RECEIVED) {
+	            if (trackerMessenger.IsValid()) {
+	                trackerMessenger.SendMessage(actionMsg);
+	            }
+	        }
+	    }
+	
+	    delete asyncNavMenu;
+	    delete navMenuWrapper;
+	    delete args; 
+	    return B_OK;
+	}
 
 
    
@@ -2927,98 +2997,50 @@ void SyncDockWithRunningDeskbarApps() {
             fShowMainMenu = false;
 
 
-
-            if (isTracker) {
-                uint32 currentClickTick = SDL_GetTicks();
-                
-                // =========================================================================
-                // SEQUENTIAL TOGGLE SHIELD: CHANCE DEBOUNCE DETECTION CLOSURE GAP
-                // =========================================================================
-                // If the user left-clicks the Tracker icon while the menu was dismissed 
-                // less than 150ms ago, it means this click was meant to CLOSE the menu.
-                // We intercept the action, update our timeline, and exit safely without popping it open again!
-                if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
-                    std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
-                    fLastTrackerMenuCloseTime = 0; // Clear latch state
-                    return; // ABSOLUTE SHIELD: Block double-firing instantiation loops
-                }
-
-                std::cout << "[Tracker Menu] Deploying native asynchronous file navigator directly on root..." << std::endl;
-
-                // Fetch absolute coordinate offsets via active screen handles
-                int32 winX = 0, winY = 0;
-                SDL_Window* activeWin = SDL_GetMouseFocus();
-                if (activeWin) {
-                    SDL_GetWindowPosition(activeWin, &winX, &winY);
-                }
-
-                // Resolve the live background system Messenger for Tracker
-                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
-
-                // Point entry reference back to "/boot/" to completely bypass the "Haiku" partition layer
-                entry_ref rootRef;
-                BEntry rootEntry("/boot/");
-                if (rootEntry.GetRef(&rootRef) != B_OK) {
-                    return;
-                }
-
-                // Initialize a clean parent pop-up shell container to handle SDL layout boundaries safely
-                BPopUpMenu* navMenuWrapper = new BPopUpMenu("", false, false);
-                navMenuWrapper->SetRadioMode(false);
-
-                // Instantiate the native background-threaded navigation menu to pull your system icons
-                BPrivate::BNavMenu* asyncNavMenu = new BPrivate::BNavMenu("TempNav", B_REFS_RECEIVED, trackerMessenger);
-                asyncNavMenu->SetNavDir(&rootRef);
-
-                // Flattening Matrix: Move all items out of the background tracker class straight into the root wrapper level
-                asyncNavMenu->AttachedToWindow();
-
-                int32 totalNavItems = asyncNavMenu->CountItems();
-                if (totalNavItems > 0) {
-                    for (int32 idx = 0; idx < totalNavItems; ++idx) {
-                        BMenuItem* extractedItem = asyncNavMenu->RemoveItem(static_cast<int32>(0));
-                        if (extractedItem) {
-                            navMenuWrapper->AddItem(extractedItem);
-                        }
-                    }
-                } else {
-                    navMenuWrapper->AddItem(new BMenuItem("Open Tracker /boot/", new BMessage(B_REFS_RECEIVED)));
-                }
-
-                // Horizontal pixel-perfect centering and vertical anchoring math over your icon
-                float anchoredMenuX = static_cast<float>(winX + x) - 45.0f;
-                if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
-                
-                float anchoredMenuY = static_cast<float>(winY) - 5.0f;
-                BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
-
-                // Launch the menu container synchronously via parent pop-up tracking boundaries
-                BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
-
-                // =========================================================================
-                // CAPTURE THE CLOSURE FRAME TIMELINE TIMESTAMP IMMEDIATELY ON COLLAPSE
-                // =========================================================================
-                // The moment Go() returns, we log the exact tick time. If this closure was caused
-                // by the user clicking down right on the Tracker dog icon, the next click event
-                // loop execution will hit our shield check above and prevent re-opening!
-                fLastTrackerMenuCloseTime = SDL_GetTicks();
-
-                if (chosenAction != nullptr) {
-                    BMessage* actionMsg = chosenAction->Message();
-                    if (actionMsg != nullptr && actionMsg->what == B_REFS_RECEIVED) {
-                        if (trackerMessenger.IsValid()) {
-                            std::cout << "[Tracker Menu] Forwarding chosen ref to active Tracker loop daemon..." << std::endl;
-                            trackerMessenger.SendMessage(actionMsg);
-                        }
-                    }
-                }
-
-                // Safely clean up menu allocations on collapse
-                delete asyncNavMenu;
-                delete navMenuWrapper;
-                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
-            }
-
+			
+			if (isTracker) {
+			    uint32 currentClickTick = SDL_GetTicks();
+			    
+			    // SEQUENTIAL TOGGLE SHIELD: Check rapid click limits
+			    if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
+			        std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
+			        fLastTrackerMenuCloseTime = 0; 
+			        return; 
+			    }
+			
+			    // ACTIVE MENU CLOSE CHECK: If the menu is currently visible and they click again, close it
+			    if (fTrackerMenuIsActive) {
+			        std::cout << "[Tracker Menu] Active Close Match: Intercepting click to let menu close naturally." << std::endl;
+			        // Sending an empty click notification to your main system screen coordinates 
+			        // can help explicitly pop Haiku's window out of focus if needed.
+			        return; 
+			    }
+			
+			    std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
+			    fTrackerMenuIsActive = true; // Engage active state safety latch
+			
+			    int32 winX = 0, winY = 0;
+			    SDL_Window* activeWin = SDL_GetMouseFocus();
+			    if (activeWin) {
+			        SDL_GetWindowPosition(activeWin, &winX, &winY);
+			    }
+			
+			    TrackerMenuArgs* args = new TrackerMenuArgs();
+			    args->engine = this; // Pass engine instance pointer safely
+			    args->winX = winX;
+			    args->winY = winY;
+			    args->mouseX = x; 
+			
+			    thread_id menuThread = spawn_thread(SpawnTrackerMenuThread, "async_tracker_menu", B_NORMAL_PRIORITY, args);
+			    if (menuThread >= B_OK) {
+			        resume_thread(menuThread);
+			    } else {
+			        fTrackerMenuIsActive = false;
+			        delete args;
+			    }
+			
+			    return; 
+			}
 
 
             // -----------------------------------------------------------
@@ -4297,11 +4319,7 @@ void SyncDockWithRunningDeskbarApps() {
         }
         glEnd();
 
-        // 3. FIXED: Apply a matching rounded outer wireframe stroke layer outline
-        DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.15f, 0.15f, 0.20f, 0.6f, false);
-
-
-        // =========================================================================
+               // =========================================================================
         // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
         // =========================================================================
         if (cpuGraphBounds.Contains(fMouseX, fMouseY)) {
@@ -4319,8 +4337,7 @@ void SyncDockWithRunningDeskbarApps() {
                 } 
                 fLastCpuTooltipStr = currentTooltipStr;
                 fCpuTooltipTex = RenderTextToTexture(fLastCpuTooltipStr.c_str(), &fCpuTooltipW, &fCpuTooltipH);
-            }
-                                 
+            }                                 
 
             float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f; 
             float tooltipH = static_cast<float>(fCpuTooltipH) + 8.0f;
@@ -4340,39 +4357,27 @@ void SyncDockWithRunningDeskbarApps() {
 
             if (fCpuTooltipTex.id != 0) {
                 glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
-                
-                // =========================================================================
-                // FIX: FORCE NEON GREEN COLOR BY OVERRIDING BLACK TEXTURE RGB CHANNELS
-                // =========================================================================
-                // Tell the GPU to replace the texture's color channels with our glColor4f selection,
-                // while preserving the texture's native anti-aliased font alpha masking channel.
                 glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
                 glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
                 glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
-                
-                // Set the blending color filter to an illuminated matrix neon green
-                glColor4f(0.2f, 1.0f, 0.2f, 1.0f); 
-                // =========================================================================
-                
+                glColor4f(0.2f, 1.0f, 0.2f, 1.0f);                
                 float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
+                
                 glBegin(GL_QUADS);
                     glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
                     glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fCpuTooltipW, textY);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fCpuTooltipW, textY + fTrashTooltipH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fTrashTooltipH);
-                glEnd();
-                
-                // =========================================================================
-                // FIX: Cleanly reset texture environment mode back to standard modulation
-                // so your system app launchers don't inherit the color replacement flags!
-                // =========================================================================
+                    // FIXED: Replaced fTrashTooltipH with fCpuTooltipH to fix empty initialization geometry layout bug
+                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fCpuTooltipW, textY + fCpuTooltipH);
+                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fCpuTooltipH);
+                glEnd();               
+
                 glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
                 glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-                // =========================================================================
             }
         }
         
         glDisable(GL_BLEND);
+
 
    
         
@@ -4788,7 +4793,7 @@ void FetchHaikuMixerVolume() {
 	float fCachedVolHeight = 0.0f;
 	float fPreMuteVolumeLevel = 0.5f; 
 	uint32 fLastTrackerMenuCloseTime; 
-	
+	bool fTrackerMenuIsActive = false;
 //@private    
 
 public:
@@ -5017,7 +5022,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.11"; 
+    const char* localVersion = "v1.0.12"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
