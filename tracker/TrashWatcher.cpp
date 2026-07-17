@@ -1,0 +1,247 @@
+/*
+Open Tracker License
+
+Terms and Conditions
+
+Copyright (c) 1991-2000, Be Incorporated. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice applies to all licensees
+and shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF TITLE, MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+BE INCORPORATED BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Except as contained in this notice, the name of Be Incorporated shall not be
+used in advertising or otherwise to promote the sale, use or other dealings in
+this Software without prior written authorization from Be Incorporated.
+
+Tracker(TM), Be(R), BeOS(R), and BeIA(TM) are trademarks or registered trademarks
+of Be Incorporated in the United States and other countries. Other brand product
+names are registered trademarks or trademarks of their respective holders.
+All rights reserved.
+*/
+
+
+#include "TrashWatcher.h"
+
+#include <string.h>
+
+#include <Debug.h>
+#include <Directory.h>
+#include <NodeMonitor.h>
+#include <Path.h>
+#include <Volume.h>
+#include <VolumeRoster.h>
+
+#include "Attributes.h"
+#include "Bitmaps.h"
+#include "FSUtils.h"
+#include "IconCache.h"
+#include "Tracker.h"
+
+
+//	 #pragma mark - BTrashWatcher
+
+
+BTrashWatcher::BTrashWatcher()
+	:
+	BLooper("TrashWatcher", B_LOW_PRIORITY),
+	fTrashNodeList(20)
+{
+	FSCreateTrashDirs();
+	WatchTrashDirs();
+	fTrashFull = CheckTrashDirs();
+	UpdateTrashIcon();
+
+	// watch volumes
+	TTracker::WatchNode(0, B_WATCH_MOUNT, this);
+}
+
+
+thread_id
+BTrashWatcher::Run()
+{
+	// refresh Trash icon cache
+	BPath path;
+	if (find_directory(B_TRASH_DIRECTORY, &path) == B_OK) {
+		BDirectory trashDir(path.Path());
+		BEntry entry;
+		if (trashDir.GetEntry(&entry) == B_OK) {
+			Model trashModel(&entry);
+			IconCache::sIconCache->IconChanged(&trashModel);
+		}
+	}
+
+	return BLooper::Run();
+}
+
+
+BTrashWatcher::~BTrashWatcher()
+{
+	stop_watching(this);
+}
+
+
+bool
+BTrashWatcher::IsTrashNode(const node_ref* testNode) const
+{
+	int32 count = fTrashNodeList.CountItems();
+	for (int32 index = 0; index < count; index++) {
+		node_ref* nref = fTrashNodeList.ItemAt(index);
+		if (nref->node == testNode->node && nref->device == testNode->device)
+			return true;
+	}
+
+	return false;
+}
+
+
+void
+BTrashWatcher::MessageReceived(BMessage* message)
+{
+	if (message->what != B_NODE_MONITOR) {
+		_inherited::MessageReceived(message);
+		return;
+	}
+
+	switch (message->GetInt32("opcode", 0)) {
+		case B_ENTRY_CREATED:
+			if (!fTrashFull) {
+				fTrashFull = true;
+				UpdateTrashIcon();
+			}
+			break;
+
+		case B_ENTRY_MOVED:
+		{
+			// allow code to fall through if move is from/to trash
+			// but do nothing for moves in the same directory
+			ino_t toDir;
+			ino_t fromDir;
+			message->FindInt64("from directory", &fromDir);
+			message->FindInt64("to directory", &toDir);
+			if (fromDir == toDir)
+				break;
+		}
+		// fall-through
+		case B_DEVICE_UNMOUNTED:
+		case B_ENTRY_REMOVED:
+		{
+			bool full = CheckTrashDirs();
+			if (fTrashFull != full) {
+				fTrashFull = full;
+				UpdateTrashIcon();
+			}
+			break;
+		}
+		// We should handle DEVICE_UNMOUNTED here too to remove trash
+
+		case B_DEVICE_MOUNTED:
+		{
+			dev_t device;
+			BDirectory trashDir;
+			if (message->FindInt32("new device", &device) == B_OK
+				&& FSGetTrashDir(&trashDir, device) == B_OK) {
+				node_ref trashNode;
+				trashDir.GetNodeRef(&trashNode);
+				TTracker::WatchNode(&trashNode, B_WATCH_DIRECTORY, this);
+				fTrashNodeList.AddItem(new node_ref(trashNode));
+
+				// Check if the new volume has anything trashed.
+				if (CheckTrashDirs() && !fTrashFull) {
+					fTrashFull = true;
+					UpdateTrashIcon();
+				}
+			}
+			break;
+		}
+	}
+}
+
+
+void
+BTrashWatcher::UpdateTrashIcon()
+{
+	// only update Trash icon attributes on boot volume
+	BPath path;
+	if (find_directory(B_TRASH_DIRECTORY, &path) != B_OK)
+		return;
+
+	BDirectory trashDir(path.Path());
+
+	// pull out the icons for the current trash state from resources
+	// and apply them onto the trash directory node
+	int32 id = fTrashFull ? R_TrashFullIcon : R_TrashIcon;
+	size_t size = 0;
+	const void* data = GetTrackerResources()->LoadResource(B_VECTOR_ICON_TYPE, id, &size);
+
+	if (data != NULL && size > 0) {
+		// write vector icon attribute
+		trashDir.WriteAttr(kAttrIcon, B_VECTOR_ICON_TYPE, 0, data, size);
+	} else {
+		// write large and mini icon attributes
+		data = GetTrackerResources()->LoadResource('ICON', id, &size);
+		if (data != NULL && size > 0)
+			trashDir.WriteAttr(kAttrLargeIcon, 'ICON', 0, data, size);
+
+		data = GetTrackerResources()->LoadResource('MICN', id, &size);
+		if (data != NULL && size > 0)
+			trashDir.WriteAttr(kAttrMiniIcon, 'MICN', 0, data, size);
+	}
+}
+
+
+void
+BTrashWatcher::WatchTrashDirs()
+{
+	BVolumeRoster volRoster;
+	volRoster.Rewind();
+	BVolume volume;
+	while (volRoster.GetNextVolume(&volume) == B_OK) {
+		if (volume.IsReadOnly() || !volume.IsPersistent() || volume.Capacity() == 0)
+			continue;
+
+		BDirectory trashDir;
+		if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+			node_ref trashNode;
+			trashDir.GetNodeRef(&trashNode);
+			watch_node(&trashNode, B_WATCH_DIRECTORY, this);
+			fTrashNodeList.AddItem(new node_ref(trashNode));
+		}
+	}
+}
+
+
+bool
+BTrashWatcher::CheckTrashDirs()
+{
+	BVolumeRoster volRoster;
+	volRoster.Rewind();
+	BVolume	volume;
+	while (volRoster.GetNextVolume(&volume) == B_OK) {
+		if (volume.IsReadOnly() || !volume.IsPersistent() || volume.Capacity() == 0)
+			continue;
+
+		BDirectory trashDir;
+		if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+			trashDir.Rewind();
+			// GetNextRef() is a bit faster than GetNextEntry()
+			entry_ref ref;
+			if (trashDir.GetNextRef(&ref) == B_OK)
+				return true;
+		}
+	}
+
+	return false;
+}
