@@ -58,6 +58,7 @@
 
 
 class HaikuGlDesktopEngine;
+int32 SpawnTrashMenuThread(void* data);
 
 
 
@@ -606,6 +607,14 @@ private:
 };
 
 
+struct SystrayMenuArgs {
+    HaikuGlDesktopEngine* engine;
+    int32 winX;
+    int32 winY;
+    int32 mouseX;
+    int32 mouseY;
+    std::string itemName; // Safe isolated string copy
+};
 
 
 
@@ -2321,6 +2330,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    int32 winX;
 	    int32 winY;
 	    int32 mouseX;
+	    int32 mouseY; 
 	};
 	
 	// 2. UPDATED BACKGROUND THREAD FUNCTION
@@ -2388,8 +2398,6 @@ void SyncDockWithRunningDeskbarApps() {
 	    return B_OK;
 	}
 
-
-   
    
 	void HandleMouseClick(int x, int y, int button) {
 		
@@ -2397,122 +2405,174 @@ void SyncDockWithRunningDeskbarApps() {
 	    fMouseX = x; 
 	    fMouseY = y;
 	
-    // =========================================================================
-    // DYNAMIC SYSTEM TRAY INTERCEPTOR & SERIALIZED PROPERTY INSPECTOR
-    // =========================================================================
-    for (const auto& item : fLiveTrayItems) {
-        if (item.currentRenderWidth <= 0.0f) continue;
-
-        if (x >= item.currentRenderX && x <= (item.currentRenderX + item.currentRenderWidth) &&
-   		 y >= fCachedVolTop && y <= (fCachedVolTop + fCachedVolHeight)) {
-
-            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
-            if (deskbarMessenger.IsValid()) {
-                
-                // =========================================================================
-                // CASE A: RIGHT-CLICK -> PARSE AND PRESENT SYSTEM CONTEXT PARAMETERS
-                // =========================================================================
-                if (button == SDL_BUTTON_RIGHT) {
-                    std::cout << "[Dock Input] Querying serialized menu archive tree for: " << item.name << std::endl;
-
-                    BMessage menuRequest(B_GET_PROPERTY);
-                    menuRequest.AddSpecifier("Menu");
-                    menuRequest.AddSpecifier("Replicant", item.name.c_str());
-                    menuRequest.AddSpecifier("View", "Status");
-                    menuRequest.AddSpecifier("View", "Deskbar");
-
-                    BMessage menuReply;
-                    if (deskbarMessenger.SendMessage(&menuRequest, &menuReply) == B_OK) {
-                        
-                        // Create a clean local popup window structure right at your cursor bounds
-                        BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
-                        
-                        // Parse out the systemic menu entries archived inside the reply packet
-                        BMessage archivedItem;
-                        int32 itemIdx = 0;
-                        bool foundItems = false;
-
-                        // Haiku archives nested sub-items inside an array named "valucs" or "item"
-                        while (menuReply.FindMessage("item", itemIdx, &archivedItem) == B_OK || 
-                               menuReply.FindMessage("_items", itemIdx, &archivedItem) == B_OK) {
+	    // =========================================================================
+	    // DYNAMIC SYSTEM TRAY INTERCEPTOR & SERIALIZED PROPERTY INSPECTOR (NON-BLOCKING)
+	    // =========================================================================
+	    if (showSystemTray) {
+		    for (const auto& item : fLiveTrayItems) {
+		        if (item.currentRenderWidth <= 0.0f) continue;
+		
+		        if (x >= item.currentRenderX && x <= (item.currentRenderX + item.currentRenderWidth) &&
+		   		    y >= fCachedVolTop && y <= (fCachedVolTop + fCachedVolHeight)) {
+		
+		            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
+		            if (deskbarMessenger.IsValid()) {
+		                
+		                // =========================================================================
+		                // CASE A: RIGHT-CLICK -> ASYNCHRONOUS DESKBAR REPLICANT MENU RESOLVER
+		                // =========================================================================
+		                if (button == SDL_BUTTON_RIGHT) {
+                            uint32 currentClickTick = SDL_GetTicks();
                             
-                            const char* label = nullptr;
-                            if (archivedItem.FindString("label", &label) == B_OK && label != nullptr) {
-                                // Re-create the item signature cleanly into our local scope window
-                                BMessage* forwardMsg = new BMessage(archivedItem);
-                                localMenu->AddItem(new BMenuItem(label, forwardMsg));
-                                foundItems = true;
+                            // Reused sequential toggle shield
+                            if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
+                                std::cout << "[Systray Menu] Toggle Match: Dismissing menu canvas cleanly." << std::endl;
+                                fLastTrackerMenuCloseTime = 0; 
+                                return; 
                             }
-                            archivedItem.MakeEmpty();
-                            itemIdx++;
-                        }
 
-                        // FALLBACK MASTERSTROKE: If the target replicant maps its items via a custom protocol 
-                        // that hides raw text entries, populate the exact core native control actions!
-                        if (!foundItems) {
-                            std::cout << "    [Profile] Replicant uses private layout specs. Injecting native system actions..." << std::endl;
-                            if (item.name == "ProcessController" || item.name == "ProcessControllerView") {
-                               // localMenu->AddItem(new BMenuItem("Open Performance Monitor...", new BMessage('act1')));
-                                localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
-                            } else if (item.name == "NetworkStatus") {
-                                localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
-                            } else if (item.name == "MediaReplicant") {
-                                localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+                            // Reused active menu latch check
+                            if (fTrackerMenuIsActive) {
+                                std::cout << "[Systray Menu] Active Close Match: Letting menu close naturally." << std::endl;
+                                return; 
                             }
-                        }
 
-                        // Determine absolute screen location coordinates matching standard window mappings
-                        int32 winX = 0, winY = 0;
-                        SDL_Window* activeWin = SDL_GetMouseFocus();
-                        if (activeWin) {
-                            SDL_GetWindowPosition(activeWin, &winX, &winY);
-                        }
-                        BPoint screenClickPoint(static_cast<float>(winX + x), static_cast<float>(winY + y));
+                            std::cout << "[Systray Menu] Offloading replicant query to background thread: " << item.name << std::endl;
+                            fTrackerMenuIsActive = true; 
 
-                        // Launch the menu natively right under your cursor!
-                        BMenuItem* chosenItem = localMenu->Go(screenClickPoint);
-                        
-                        if (chosenItem != nullptr) {
-                            BMessage* choiceAction = chosenItem->Message();
-                            if (choiceAction != nullptr) {
-                                // Determine if it was a default placeholder action or a routed command
-                                if (choiceAction->what == 'act1') {
-                                    //std::system("/boot/system/apps/ProcessController &");
-                                } else if (choiceAction->what == 'act2') {
-                                    std::system("/boot/system/apps/ActivityMonitor &");
-                                } else if (choiceAction->what == 'net1') {
-                                    std::system("/boot/system/preferences/Network &");
-                                } else if (choiceAction->what == 'aud1') {
-                                    std::system("/boot/system/preferences/Media &");
-                                } else {
-                                    // Forward the authentic underlying system command back to the true Replicant!
-                                    BMessenger replicantTarget("application/x-vnd.be-tskb");
-                                    replicantTarget.SendMessage(choiceAction);
+                            int32 winX = 0, winY = 0;
+                            SDL_Window* activeWin = SDL_GetMouseFocus();
+                            if (activeWin) {
+                                SDL_GetWindowPosition(activeWin, &winX, &winY);
+                            }
+
+                            // Package specialized isolated heap variables for the background thread context
+                            SystrayMenuArgs* args = new SystrayMenuArgs();
+                            args->engine = this; 
+                            args->winX = winX;
+                            args->winY = winY;
+                            args->mouseX = x; 
+                            args->mouseY = y; 
+                            args->itemName = item.name; // Deep string copy guarantees memory protection
+
+                            // SELF-CONTAINED INLINE THREAD POINTER
+                            int32 (*inlineSystrayFunc)(void*) = [](void* data) -> int32 {
+                                SystrayMenuArgs* threadArgs = static_cast<SystrayMenuArgs*>(data);
+                                if (!threadArgs || !threadArgs->engine) {
+                                    delete threadArgs;
+                                    return B_ERROR;
                                 }
+
+                                BMessenger deskbarMessenger("application/x-vnd.be-tskb");
+                                if (deskbarMessenger.IsValid()) {
+                                    
+                                    BMessage menuRequest(B_GET_PROPERTY);
+                                    menuRequest.AddSpecifier("Menu");
+                                    menuRequest.AddSpecifier("Replicant", threadArgs->itemName.c_str());
+                                    menuRequest.AddSpecifier("View", "Status");
+                                    menuRequest.AddSpecifier("View", "Deskbar");
+
+                                    BMessage menuReply;
+                                    // Synchronous query happens entirely inside this worker thread context!
+                                    if (deskbarMessenger.SendMessage(&menuRequest, &menuReply) == B_OK) {
+                                        
+                                        BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
+                                        localMenu->SetRadioMode(false);
+                                        
+                                        BMessage archivedItem;
+                                        int32 itemIdx = 0;
+                                        bool foundItems = false;
+
+                                        while (menuReply.FindMessage("item", itemIdx, &archivedItem) == B_OK || 
+                                               menuReply.FindMessage("_items", itemIdx, &archivedItem) == B_OK) {
+                                            
+                                            const char* label = nullptr;
+                                            if (archivedItem.FindString("label", &label) == B_OK && label != nullptr) {
+                                                BMessage* forwardMsg = new BMessage(archivedItem);
+                                                localMenu->AddItem(new BMenuItem(label, forwardMsg));
+                                                foundItems = true;
+                                            }
+                                            archivedItem.MakeEmpty();
+                                            itemIdx++;
+                                        }
+
+                                        if (!foundItems) {
+                                            std::cout << "    [Profile] Replicant uses private layout specs. Injecting native system actions..." << std::endl;
+                                            if (threadArgs->itemName == "ProcessController" || threadArgs->itemName == "ProcessControllerView") {
+                                                localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
+                                            } else if (threadArgs->itemName == "NetworkStatus") {
+                                                localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
+                                            } else if (threadArgs->itemName == "MediaReplicant") {
+                                                localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+                                            }
+                                        }
+
+                                        // Aligns popup horizontally, then places it right above the dock frame
+                                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
+                                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+                                        
+                                        // TWEAKED: Changed from -5.0f to +20.0f to slide the menu downwards
+                                        float anchoredMenuY = static_cast<float>(threadArgs->winY) + 10.0f; 
+                                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+
+                                        BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, false);
+
+                                        
+                                        if (chosenItem != nullptr) {
+                                            BMessage* choiceAction = chosenItem->Message();
+                                            if (choiceAction != nullptr) {
+                                                if (choiceAction->what == 'act2') {
+                                                    std::system("/boot/system/apps/ActivityMonitor &");
+                                                } else if (choiceAction->what == 'net1') {
+                                                    std::system("/boot/system/preferences/Network &");
+                                                } else if (choiceAction->what == 'aud1') {
+                                                    std::system("/boot/system/preferences/Media &");
+                                                } else {
+                                                    BMessenger replicantTarget("application/x-vnd.be-tskb");
+                                                    replicantTarget.SendMessage(choiceAction);
+                                                }
+                                            }
+                                        }
+                                        delete localMenu;
+                                    }
+                                }
+
+                                // Reset structural security latches safely upon loop completion
+                                threadArgs->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
+                                threadArgs->engine->fTrackerMenuIsActive = false;
+
+                                delete threadArgs; 
+                                return B_OK;
+                            };
+
+                            thread_id menuThread = spawn_thread(inlineSystrayFunc, "async_systray_menu", B_NORMAL_PRIORITY, args);
+                            if (menuThread >= B_OK) {
+                                resume_thread(menuThread);
+                            } else {
+                                fTrackerMenuIsActive = false;
+                                delete args;
                             }
-                        }
-                        delete localMenu;
-                    }
-                } 
-                // =========================================================================
-                // CASE B: LEFT-CLICK -> RESILIENT PREFERENCE PANEL LAUNCHERS
-                // =========================================================================
-                else if (button == SDL_BUTTON_LEFT) {
-                    std::cout << "[Dock Input] Launching control panel for tray applet: " << item.name << std::endl;
-                    if (item.name == "MediaReplicant") {
-                        std::system("/boot/system/preferences/Media &");
-                    } else if (item.name == "NetworkStatus") {
-                        std::system("/boot/system/preferences/Network &");
-                    } else if (item.name == "ProcessController" || item.name == "ProcessControllerView") {
-                        //std::system("/boot/system/apps/ProcessController &");
-                    } else if (item.name == "SuperMusicTrayIcon") {
-                        std::system("/boot/system/apps/HaikuSuperMusicThingy &");
-                    }
-                }
-            }
-            return; // Intercept event completely, preventing dock launcher execution bypass down-stream!
-        }
-    }
+		                } 
+		                // =========================================================================
+		                // CASE B: LEFT-CLICK -> RESILIENT PREFERENCE PANEL LAUNCHERS (NON-BLOCKING)
+		                // =========================================================================
+		                else if (button == SDL_BUTTON_LEFT) {
+		                    std::cout << "[Dock Input] Launching control panel for tray applet: " << item.name << std::endl;
+		                    if (item.name == "MediaReplicant") {
+		                        std::system("/boot/system/preferences/Media &");
+		                    } else if (item.name == "NetworkStatus") {
+		                        std::system("/boot/system/preferences/Network &");
+		                    } else if (item.name == "ProcessController" || item.name == "ProcessControllerView") {
+		                        //std::system("/boot/system/apps/ProcessController &");
+		                    } else if (item.name == "SuperMusicTrayIcon") {
+		                        std::system("/boot/system/apps/HaikuSuperMusicThingy &");
+		                    }
+		                }
+		            }
+		            return; // Intercept event completely!
+		        }
+		    }
+	    }
 
 
 	
@@ -2622,7 +2682,24 @@ void SyncDockWithRunningDeskbarApps() {
 	        if (activeWindowsCount > 0) {
 	            progressiveX += separatorGapPadding;
 	        }
-	
+			
+			// Process Haiku Trash Can Component Metrics
+	        progressiveX += clockSectionPadding;
+	        float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
+	        float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+	        
+	        float trashScale = 1.0f;
+	        if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
+	            float ratio = distanceTrashX / 160.0f;
+	            trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	        }
+	        
+	        float finalTrashSize = baseTrashSize * trashScale;
+	        dynamicWidths.push_back(finalTrashSize);
+	        dynamicScales.push_back(trashScale);
+	        if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
+	        progressiveX += finalTrashSize;
+
 	        // =========================================================================
 	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (NEW DYNAMIC CODE)
 	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
@@ -2649,8 +2726,9 @@ void SyncDockWithRunningDeskbarApps() {
 	        dynamicScales.push_back(trayScale);
 	        progressiveX += (baselineTrayWidth * trayScale);
 	        // =========================================================================
+	        
 	
-	        // 2. Process System Clock Component Metrics
+	        // Process System Clock Component Metrics
 	        if (fClockTexture.id != 0) {
 	            progressiveX += clockSectionPadding;             
 	            float highDpiCompensateFactor = 0.42f;
@@ -2672,7 +2750,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            dynamicScales.push_back(1.0f);
 	        }
 	
-	        // 3. Process Dynamic Volume Slider Component Metrics
+	        // Process Dynamic Volume Slider Component Metrics
 	        progressiveX += clockSectionPadding;
 	        float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
 	        float distanceVolX = std::abs(fMouseX - approxVolCenterX);
@@ -2686,23 +2764,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        dynamicScales.push_back(volScale);
 	        progressiveX += (baseVolumeWidth * volScale);
 	
-	        // 4. Process Haiku Trash Can Component Metrics
-	        progressiveX += clockSectionPadding;
-	        float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
-	        float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
-	        
-	        float trashScale = 1.0f;
-	        if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
-	            float ratio = distanceTrashX / 160.0f;
-	            trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	        }
-	        
-	        float finalTrashSize = baseTrashSize * trashScale;
-	        dynamicWidths.push_back(finalTrashSize);
-	        dynamicScales.push_back(trashScale);
-	        if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
-	        progressiveX += finalTrashSize;
-	        
+
 	        // 5. Process Graphical CPU Monitor Metrics
 	        progressiveX += clockSectionPadding; 
 	        float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
@@ -2728,11 +2790,12 @@ void SyncDockWithRunningDeskbarApps() {
 	    // -------------------------------------------------------------------------
 	    // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
 	    // -------------------------------------------------------------------------
-	    size_t traySlotIdx   = totalIconsCount;
-	    size_t clockSlotIdx  = totalIconsCount + 1;
-	    size_t volumeSlotIdx = totalIconsCount + 2;
-	    size_t trashSlotIdx  = totalIconsCount + 3;
+	    size_t trashSlotIdx   = totalIconsCount;
+	    size_t traySlotIdx  = totalIconsCount + 1;
+	    size_t clockSlotIdx  = totalIconsCount + 2;
+	    size_t volumeSlotIdx = totalIconsCount + 3;
 	    size_t cpuSlotIdx    = totalIconsCount + 4;
+	    
 
 	    float dockMarginBottom = 15.0f;
 	    HaikuRect dockPlate;
@@ -2806,313 +2869,455 @@ void SyncDockWithRunningDeskbarApps() {
 	    if (activeWindowsCount > 0) {
 	        currentX += separatorGapPadding;
 	    }
+	    
 	    // STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
-
-    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-        auto& activeTaskWin = fTaskbarWindows[w];
-        if (*activeTaskWin.openStateFlag == false) continue;
-
-        float size = dynamicWidths[evaluationSlotIdx];
-        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-        
-        // --- TRACKER SAFETY TOGGLE PIPELINES ---
-        bool isTracker = false;
-        app_info appInfo;
-        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
-            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
-        }
-
-        if (x >= realIconBounds.left && x <= realIconBounds.right &&
-            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-            // =========================================================================
-            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
-            // =========================================================================
-            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
-            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
-                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
-                
-                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
-                if (targetAppMessenger.IsValid()) {
-                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
-                } else {
-                    char closeCmdBuffer[256];
-                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
-                    std::system(closeCmdBuffer);
-                }
-                
-                fShowMainMenu = false;
-                std::cout << "========================================\n" << std::endl;
-                return; 
-            }
-
-
-            if (fShowMainMenu) {
-                BWindow* nativeWin = be_app->WindowAt(0);
-                if (nativeWin != nullptr && nativeWin->Lock()) {
-                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-                    nativeWin->ResizeBy(0, -220.0f);
-                    nativeWin->MoveBy(0, 220.0f);
-                    nativeWin->Unlock();
-                }
-            }
-            fShowMainMenu = false;
-
-
-			
-			if (isTracker) {
-			    uint32 currentClickTick = SDL_GetTicks();
-			    
-			    // SEQUENTIAL TOGGLE SHIELD: Check rapid click limits
-			    if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
-			        std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
-			        fLastTrackerMenuCloseTime = 0; 
-			        return; 
-			    }
-			
-			    // ACTIVE MENU CLOSE CHECK: If the menu is currently visible and they click again, close it
-			    if (fTrackerMenuIsActive) {
-			        std::cout << "[Tracker Menu] Active Close Match: Intercepting click to let menu close naturally." << std::endl;
-			        // Sending an empty click notification to your main system screen coordinates 
-			        // can help explicitly pop Haiku's window out of focus if needed.
-			        return; 
-			    }
-			
-			    std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
-			    fTrackerMenuIsActive = true; // Engage active state safety latch
-			
-			    int32 winX = 0, winY = 0;
-			    SDL_Window* activeWin = SDL_GetMouseFocus();
-			    if (activeWin) {
-			        SDL_GetWindowPosition(activeWin, &winX, &winY);
-			    }
-			
-			    TrackerMenuArgs* args = new TrackerMenuArgs();
-			    args->engine = this; // Pass engine instance pointer safely
-			    args->winX = winX;
-			    args->winY = winY;
-			    args->mouseX = x; 
-			
-			    thread_id menuThread = spawn_thread(SpawnTrackerMenuThread, "async_tracker_menu", B_NORMAL_PRIORITY, args);
-			    if (menuThread >= B_OK) {
-			        resume_thread(menuThread);
-			    } else {
-			        fTrackerMenuIsActive = false;
-			        delete args;
-			    }
-			
-			    return; 
-			}
-
-
-            // -----------------------------------------------------------
-
-            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
-            char systemCmdBuffer[512]; 
-
-            if (activeTaskWin.isMinimized == false) {
-                std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
-                
-                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-                    "hey \"%s\" Set Minimize of Window 0 to true &", 
-                    activeTaskWin.title.c_str());
-                
-                std::system(systemCmdBuffer); 
-                be_roster->ActivateApp(-1);
-                activeTaskWin.isMinimized = true; 
-            } 
-            else {
-                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
-                
-                app_info targetAppInfo;
-                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
-                    be_roster->ActivateApp(targetAppInfo.team);
-                } else {
-                    be_roster->ActivateApp(activeTaskWin.teamId);
-                }
-                
-                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-                    "hey \"%s\" Set Minimize of Window 0 to false &", 
-                    activeTaskWin.title.c_str());
-                
-                std::system(systemCmdBuffer);
-                activeTaskWin.isMinimized = false; 
-            }
-            
-            std::cout << "========================================\n" << std::endl;
-            return; 
-        }
-        
-        currentX += size + padding;
-        evaluationSlotIdx++;
-    }
-	    
-	    
-	    
-	/*
-	// STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
-    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-        auto& activeTaskWin = fTaskbarWindows[w];
-        if (*activeTaskWin.openStateFlag == false) continue;
-
-        float size = dynamicWidths[evaluationSlotIdx];
-        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-        
-        // --- TRACKER SAFETY TOGGLE PIPELINES ---
-        bool isTracker = false;
-        app_info appInfo;
-        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
-            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
-        }
-
-        if (x >= realIconBounds.left && x <= realIconBounds.right &&
-            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-            // =========================================================================
-            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
-            // =========================================================================
-            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
-            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
-                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
-                
-                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
-                if (targetAppMessenger.IsValid()) {
-                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
-                } else {
-                    char closeCmdBuffer[256];
-                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
-                    std::system(closeCmdBuffer);
-                }
-                
-                fShowMainMenu = false;
-                std::cout << "========================================\n" << std::endl;
-                return; 
-            }
-
-
-            if (fShowMainMenu) {
-                BWindow* nativeWin = be_app->WindowAt(0);
-                if (nativeWin != nullptr && nativeWin->Lock()) {
-                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-                    nativeWin->ResizeBy(0, -220.0f);
-                    nativeWin->MoveBy(0, 220.0f);
-                    nativeWin->Unlock();
-                }
-            }
-            fShowMainMenu = false;
-
-
-
-            if (isTracker) {
-                char safeTrackerCmdBuffer[256];
-                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
-
-                if (activeTaskWin.isMinimized == false) {
-                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
-                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
-                    std::system(safeTrackerCmdBuffer);
-                    
-                    be_roster->ActivateApp(-1);
-                    activeTaskWin.isMinimized = true;
-                } 
-                else {
-                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
-                    app_info realTrackerInfo;
-                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
-                        be_roster->ActivateApp(realTrackerInfo.team);
-                    } else {
-                        be_roster->ActivateApp(activeTaskWin.teamId);
-                    }
-                    
-                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
-                    std::system(safeTrackerCmdBuffer);
-
-                    if (trackerMessenger.IsValid()) {
-                        BEntry homeEntry("/boot/home");
-                        entry_ref homeRef;
-                        if (homeEntry.GetRef(&homeRef) == B_OK) {
-                            BMessage openMsg(B_REFS_RECEIVED);
-                            openMsg.AddRef("refs", &homeRef);
-                            trackerMessenger.SendMessage(&openMsg);
-                        }
-                    }
-                    activeTaskWin.isMinimized = false;
-                }
-                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
-            }
-            // -----------------------------------------------------------
-
-	        // GENERAL APPLICATION BEHAVIOR (UNIVERSAL TITLE-BASED WITH X11/GTK FALLBACKS)
-	        char systemCmdBuffer[512]; 
+	    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+	        auto& activeTaskWin = fTaskbarWindows[w];
+	        if (*activeTaskWin.openStateFlag == false) continue;
 	
-	        if (activeTaskWin.isMinimized == false) {
-	            std::cout << "[SYSTEM CALL] ---> Action: MINIMIZING APPNAMED \"" << activeTaskWin.appName 
-	                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
-	            
+	        float size = dynamicWidths[evaluationSlotIdx];
+	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	        
+	        // --- TRACKER SAFETY TOGGLE PIPELINES ---
+	        bool isTracker = false;
+	        app_info appInfo;
+	        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
+	            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
+	        }
+	
+	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
+	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
 	            // =========================================================================
-	            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
+	            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
 	            // =========================================================================
-	            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
-	                // Target Window 0 directly since ported browser panes don't expose Title strings
+	            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
+	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
+	                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
+	                
+	                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
+	                if (targetAppMessenger.IsValid()) {
+	                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+	                } else {
+	                    char closeCmdBuffer[256];
+	                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
+	                    std::system(closeCmdBuffer);
+	                }
+	                
+	                fShowMainMenu = false;
+	                std::cout << "========================================\n" << std::endl;
+	                return; 
+	            }
+	
+	
+	            if (fShowMainMenu) {
+	                BWindow* nativeWin = be_app->WindowAt(0);
+	                if (nativeWin != nullptr && nativeWin->Lock()) {
+	                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
+	                    nativeWin->ResizeBy(0, -220.0f);
+	                    nativeWin->MoveBy(0, 220.0f);
+	                    nativeWin->Unlock();
+	                }
+	            }
+	            fShowMainMenu = false;
+	
+	
+				
+				if (isTracker) {
+				    uint32 currentClickTick = SDL_GetTicks();
+				    
+				    // SEQUENTIAL TOGGLE SHIELD: Check rapid click limits
+				    if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
+				        std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
+				        fLastTrackerMenuCloseTime = 0; 
+				        return; 
+				    }
+				
+				    // ACTIVE MENU CLOSE CHECK: If the menu is currently visible and they click again, close it
+				    if (fTrackerMenuIsActive) {
+				        std::cout << "[Tracker Menu] Active Close Match: Intercepting click to let menu close naturally." << std::endl;
+				        // Sending an empty click notification to your main system screen coordinates 
+				        // can help explicitly pop Haiku's window out of focus if needed.
+				        return; 
+				    }
+				
+				    std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
+				    fTrackerMenuIsActive = true; // Engage active state safety latch
+				
+				    int32 winX = 0, winY = 0;
+				    SDL_Window* activeWin = SDL_GetMouseFocus();
+				    if (activeWin) {
+				        SDL_GetWindowPosition(activeWin, &winX, &winY);
+				    }
+				
+				    TrackerMenuArgs* args = new TrackerMenuArgs();
+				    args->engine = this; // Pass engine instance pointer safely
+				    args->winX = winX;
+				    args->winY = winY;
+				    args->mouseX = x; 
+				
+				    thread_id menuThread = spawn_thread(SpawnTrackerMenuThread, "async_tracker_menu", B_NORMAL_PRIORITY, args);
+				    if (menuThread >= B_OK) {
+				        resume_thread(menuThread);
+				    } else {
+				        fTrackerMenuIsActive = false;
+				        delete args;
+				    }
+				
+				    return; 
+				}
+	
+	
+	            // -----------------------------------------------------------
+	
+	            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
+	            char systemCmdBuffer[512]; 
+	
+	            if (activeTaskWin.isMinimized == false) {
+	                std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
+	                
 	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
 	                    "hey \"%s\" Set Minimize of Window 0 to true &", 
-	                    activeTaskWin.appName.c_str());
-	            } else {
-	                // Standard native application track using explicit title matching
-	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-	                    "hey \"%s\" Set Minimize of Window \"%s\" to true &", 
-	                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
-	            }
-	            // =========================================================================
-	            
-	            std::system(systemCmdBuffer); 
-	            be_roster->ActivateApp(-1);
-	            activeTaskWin.isMinimized = true; 
-	        } 
-	        else {
-	            std::cout << "[SYSTEM CALL] ---> Action: RESTORING APPNAMED \"" << activeTaskWin.appName 
-	                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
-	            
-	            app_info targetAppInfo;
-	            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
-	                be_roster->ActivateApp(targetAppInfo.team);
-	            } else {
-	                be_roster->ActivateApp(activeTaskWin.teamId);
-	            }
-	            
-	            // =========================================================================
-	            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
-	            // =========================================================================
-	            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
+	                    activeTaskWin.title.c_str());
+	                
+	                std::system(systemCmdBuffer); 
+	                be_roster->ActivateApp(-1);
+	                activeTaskWin.isMinimized = true; 
+	            } 
+	            else {
+	                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
+	                
+	                app_info targetAppInfo;
+	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
+	                    be_roster->ActivateApp(targetAppInfo.team);
+	                } else {
+	                    be_roster->ActivateApp(activeTaskWin.teamId);
+	                }
+	                
 	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
 	                    "hey \"%s\" Set Minimize of Window 0 to false &", 
-	                    activeTaskWin.appName.c_str());
-	            } else {
-	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-	                    "hey \"%s\" Set Minimize of Window \"%s\" to false &", 
-	                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
+	                    activeTaskWin.title.c_str());
+	                
+	                std::system(systemCmdBuffer);
+	                activeTaskWin.isMinimized = false; 
 	            }
-	            // =========================================================================
 	            
-	            std::system(systemCmdBuffer);
-	            activeTaskWin.isMinimized = false; 
+	            std::cout << "========================================\n" << std::endl;
+	            return; 
 	        }
 	        
-	        std::cout << "========================================\n" << std::endl;
-	        return; 
+	        currentX += size + padding;
+	        evaluationSlotIdx++;
 	    }
 	    
-	    currentX += size + padding;
-	    evaluationSlotIdx++;
-    }
-	*/
+	    
+	    
+		/*
+		// STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
+	    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+	        auto& activeTaskWin = fTaskbarWindows[w];
+	        if (*activeTaskWin.openStateFlag == false) continue;
+	
+	        float size = dynamicWidths[evaluationSlotIdx];
+	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	        
+	        // --- TRACKER SAFETY TOGGLE PIPELINES ---
+	        bool isTracker = false;
+	        app_info appInfo;
+	        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
+	            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
+	        }
+	
+	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
+	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+	            // =========================================================================
+	            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
+	            // =========================================================================
+	            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
+	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
+	                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
+	                
+	                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
+	                if (targetAppMessenger.IsValid()) {
+	                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+	                } else {
+	                    char closeCmdBuffer[256];
+	                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
+	                    std::system(closeCmdBuffer);
+	                }
+	                
+	                fShowMainMenu = false;
+	                std::cout << "========================================\n" << std::endl;
+	                return; 
+	            }
+	
+	
+	            if (fShowMainMenu) {
+	                BWindow* nativeWin = be_app->WindowAt(0);
+	                if (nativeWin != nullptr && nativeWin->Lock()) {
+	                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
+	                    nativeWin->ResizeBy(0, -220.0f);
+	                    nativeWin->MoveBy(0, 220.0f);
+	                    nativeWin->Unlock();
+	                }
+	            }
+	            fShowMainMenu = false;
+	
+	
+	
+	            if (isTracker) {
+	                char safeTrackerCmdBuffer[256];
+	                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+	
+	                if (activeTaskWin.isMinimized == false) {
+	                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
+	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+	                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
+	                    std::system(safeTrackerCmdBuffer);
+	                    
+	                    be_roster->ActivateApp(-1);
+	                    activeTaskWin.isMinimized = true;
+	                } 
+	                else {
+	                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
+	                    app_info realTrackerInfo;
+	                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
+	                        be_roster->ActivateApp(realTrackerInfo.team);
+	                    } else {
+	                        be_roster->ActivateApp(activeTaskWin.teamId);
+	                    }
+	                    
+	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
+	                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
+	                    std::system(safeTrackerCmdBuffer);
+	
+	                    if (trackerMessenger.IsValid()) {
+	                        BEntry homeEntry("/boot/home");
+	                        entry_ref homeRef;
+	                        if (homeEntry.GetRef(&homeRef) == B_OK) {
+	                            BMessage openMsg(B_REFS_RECEIVED);
+	                            openMsg.AddRef("refs", &homeRef);
+	                            trackerMessenger.SendMessage(&openMsg);
+	                        }
+	                    }
+	                    activeTaskWin.isMinimized = false;
+	                }
+	                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
+	            }
+	            // -----------------------------------------------------------
+	
+		        // GENERAL APPLICATION BEHAVIOR (UNIVERSAL TITLE-BASED WITH X11/GTK FALLBACKS)
+		        char systemCmdBuffer[512]; 
+		
+		        if (activeTaskWin.isMinimized == false) {
+		            std::cout << "[SYSTEM CALL] ---> Action: MINIMIZING APPNAMED \"" << activeTaskWin.appName 
+		                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
+		            
+		            // =========================================================================
+		            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
+		            // =========================================================================
+		            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
+		                // Target Window 0 directly since ported browser panes don't expose Title strings
+		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+		                    "hey \"%s\" Set Minimize of Window 0 to true &", 
+		                    activeTaskWin.appName.c_str());
+		            } else {
+		                // Standard native application track using explicit title matching
+		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+		                    "hey \"%s\" Set Minimize of Window \"%s\" to true &", 
+		                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
+		            }
+		            // =========================================================================
+		            
+		            std::system(systemCmdBuffer); 
+		            be_roster->ActivateApp(-1);
+		            activeTaskWin.isMinimized = true; 
+		        } 
+		        else {
+		            std::cout << "[SYSTEM CALL] ---> Action: RESTORING APPNAMED \"" << activeTaskWin.appName 
+		                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
+		            
+		            app_info targetAppInfo;
+		            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
+		                be_roster->ActivateApp(targetAppInfo.team);
+		            } else {
+		                be_roster->ActivateApp(activeTaskWin.teamId);
+		            }
+		            
+		            // =========================================================================
+		            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
+		            // =========================================================================
+		            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
+		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+		                    "hey \"%s\" Set Minimize of Window 0 to false &", 
+		                    activeTaskWin.appName.c_str());
+		            } else {
+		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
+		                    "hey \"%s\" Set Minimize of Window \"%s\" to false &", 
+		                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
+		            }
+		            // =========================================================================
+		            
+		            std::system(systemCmdBuffer);
+		            activeTaskWin.isMinimized = false; 
+		        }
+		        
+		        std::cout << "========================================\n" << std::endl;
+		        return; 
+		    }
+		    
+		    currentX += size + padding;
+		    evaluationSlotIdx++;
+	    }
+		*/
+		
+		
+		
 
 	    // =========================================================================
-	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS (TRAY -> CLOCK -> VOLUME -> TRASH BIN -> CPU)
-	    // =========================================================================
+	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS ( TRASH BIN -> TRAY -> CLOCK -> VOLUME -> CPU)
+	    // =========================================================================	    
 	    
 	    // -------------------------------------------------------------------------
-	    // 1. INTERCEPT AND EVALUATE CLICK BOUNDS FOR THE REPLICANT SYSTEM TRAY
+	    // Evaluate Click Bounds for Haiku Trash Bin Component
+	    // -------------------------------------------------------------------------
+	    // -------------------------------------------------------------------------
+	    // Evaluate Click Bounds for Haiku Trash Bin Component
+	    // -------------------------------------------------------------------------
+	    currentX += clockSectionPadding;
+	    float dynamicTrashSize = dynamicWidths[trashSlotIdx];
+	    HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
+	    
+	    if (x >= trashBounds.left && x <= trashBounds.right &&
+	        y >= trashBounds.top  && y <= trashBounds.bottom) {
+	        
+	        if (fShowMainMenu) {
+	            BWindow* nativeWin = be_app->WindowAt(0);
+	            if (nativeWin != nullptr && nativeWin->Lock()) {
+	                nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
+	                nativeWin->ResizeBy(0, -220.0f);
+	                nativeWin->MoveBy(0, 220.0f);
+	                nativeWin->Unlock();
+	            }
+	        }
+	        fShowMainMenu = false;
+	
+	        if (button == SDL_BUTTON_LEFT) {
+	            std::system("/boot/system/Tracker /boot/trash &");
+	            return;
+	        }
+	        else if (button == SDL_BUTTON_MIDDLE) {
+	            std::system("trash --empty &"); 
+	            fLastTrashCheckTime = 0; 
+	            return;
+	        }
+	        else if (button == SDL_BUTTON_RIGHT) {
+	            uint32 currentClickTick = SDL_GetTicks();
+	            
+	            // Reused sequential toggle shield
+	            if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
+	                std::cout << "[Trash Menu] Toggle Match: Dismissing menu canvas cleanly." << std::endl;
+	                fLastTrackerMenuCloseTime = 0; 
+	                return; 
+	            }
+	
+	            // Reused active menu latch check
+	            if (fTrackerMenuIsActive) {
+	                std::cout << "[Trash Menu] Active Close Match: Letting menu close naturally." << std::endl;
+	                return; 
+	            }
+	
+	            std::cout << "[Trash Menu] Offloading trash context menu to background thread..." << std::endl;
+	            fTrackerMenuIsActive = true; 
+	
+	            int32 winX = 0, winY = 0;
+	            SDL_Window* activeWin = SDL_GetMouseFocus();
+	            if (activeWin) {
+	                SDL_GetWindowPosition(activeWin, &winX, &winY);
+	            }
+	
+	            TrackerMenuArgs* args = new TrackerMenuArgs();
+	            args->engine = this; 
+	            args->winX = winX;
+	            args->winY = winY;
+	            args->mouseX = x; 
+	            args->mouseY = y; 
+	
+	            // SELF-CONTAINED INLINE THREAD POINTER
+	            int32 (*inlineThreadFunc)(void*) = [](void* data) -> int32 {
+	                TrackerMenuArgs* threadArgs = static_cast<TrackerMenuArgs*>(data);
+	                if (!threadArgs || !threadArgs->engine) {
+	                    delete threadArgs;
+	                    return B_ERROR;
+	                }
+	
+	                // Establish a native messenger channel directly to Tracker
+	                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+	
+	                BPopUpMenu* trashMenu = new BPopUpMenu("TrashPopup", false, false);
+	                trashMenu->SetRadioMode(false);
+	                
+	                // Streamlined to match the exact 2 clean operational choices
+	                BMenuItem* emptyItem = new BMenuItem("Empty Trash", new BMessage('mEMP')); 
+	                BMenuItem* openItem  = new BMenuItem("Open", new BMessage(B_REFS_RECEIVED), 'O');
+	                
+	                trashMenu->AddItem(emptyItem);
+	                trashMenu->AddItem(openItem);
+	                
+	                // EXACT TRACKER POSITION MATCHING
+	                float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
+	                if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+	                
+	                float anchoredMenuY = static_cast<float>(threadArgs->winY) - 5.0f; 
+	                BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+	
+	                // Open synchronously inside our background thread
+	                BMenuItem* chosenAction = trashMenu->Go(screenClickPoint, false, false);
+	                
+	                // Reset active safety flags
+	                threadArgs->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
+	                threadArgs->engine->fTrackerMenuIsActive = false; 
+	
+	                // PROCESS SELECTIONS VIA TRACKER MESSENGER LOOP
+	                if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
+	                    uint32 command = chosenAction->Message()->what;
+	                    
+	                    if (command == B_REFS_RECEIVED) {
+	                        entry_ref ref;
+	                        if (get_ref_for_path("/boot/trash", &ref) == B_OK) {
+	                            BMessage openMsg(B_REFS_RECEIVED);
+	                            openMsg.AddRef("refs", &ref);
+	                            if (trackerMessenger.IsValid()) {
+	                                trackerMessenger.SendMessage(&openMsg);
+	                            }
+	                        }
+	                    } 
+	                    else if (command == 'mEMP') {
+	                        std::system("trash --empty &");
+	                    }
+	                }
+	
+	                delete trashMenu;
+	                delete threadArgs; 
+	                return B_OK;
+	            };
+	
+	            thread_id menuThread = spawn_thread(inlineThreadFunc, "async_trash_menu", B_NORMAL_PRIORITY, args);
+	            if (menuThread >= B_OK) {
+	                resume_thread(menuThread);
+	            } else {
+	                fTrackerMenuIsActive = false;
+	                delete args;
+	            }
+	
+	            return; 
+	        }
+	
+	
+	    } 
+	    currentX += dynamicTrashSize;
+
+	    // -------------------------------------------------------------------------
+	    // INTERCEPT AND EVALUATE CLICK BOUNDS FOR THE REPLICANT SYSTEM TRAY
 	    // -------------------------------------------------------------------------
 	    float dynamicTrayWidth = dynamicWidths[traySlotIdx];
 	    float trayScaleFactor  = dynamicScales[traySlotIdx];
@@ -3232,9 +3437,11 @@ void SyncDockWithRunningDeskbarApps() {
 	        }
 	        currentX += dynamicTrayWidth;
 	    }
+	    
+
 	
 	    // -------------------------------------------------------------------------
-	    // 2. Evaluate Click Bounds for System Clock Component
+	    // Evaluate Click Bounds for System Clock Component
 	    // -------------------------------------------------------------------------
 	    if (fClockTexture.id != 0) {
 	        float dynamicClockW = dynamicWidths[clockSlotIdx];
@@ -3249,45 +3456,14 @@ void SyncDockWithRunningDeskbarApps() {
 	    }
 	
 	    // -------------------------------------------------------------------------
-	    // 3. Skip past Volume Slider component space footprint natively 
+	    // Skip past Volume Slider component space footprint natively 
 	    // -------------------------------------------------------------------------
 	    currentX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
 	
-	     // -------------------------------------------------------------------------
-	    // 4. Evaluate Click Bounds for Haiku Trash Bin Component
-	    // -------------------------------------------------------------------------
-	    currentX += clockSectionPadding;
-	    float dynamicTrashSize = dynamicWidths[trashSlotIdx];
-	    HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
-	    
-	    if (x >= trashBounds.left && x <= trashBounds.right &&
-	        y >= trashBounds.top  && y <= trashBounds.bottom) {
-	        
-	        if (fShowMainMenu) {
-	            BWindow* nativeWin = be_app->WindowAt(0);
-	            if (nativeWin != nullptr && nativeWin->Lock()) {
-	                nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-	                nativeWin->ResizeBy(0, -220.0f);
-	                nativeWin->MoveBy(0, 220.0f);
-	                nativeWin->Unlock();
-	            }
-	        }
-	        fShowMainMenu = false;
-	
-	        if (button == SDL_BUTTON_LEFT) {
-	            std::system("/boot/system/Tracker /boot/trash &");
-	            return;
-	        }
-	        else if (button == SDL_BUTTON_MIDDLE) {
-	            std::system("trash --empty &"); 
-	            fLastTrashCheckTime = 0; 
-	            return;
-	        }
-	    }
-	    currentX += dynamicTrashSize;
+
 	
 	    // -------------------------------------------------------------------------
-	    // 5. Evaluate Click Bounds for Graphical LED CPU Monitor Component
+	    // Evaluate Click Bounds for Graphical LED CPU Monitor Component
 	    // -------------------------------------------------------------------------
 	    currentX += clockSectionPadding;
 	    float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
@@ -3536,16 +3712,36 @@ void SyncDockWithRunningDeskbarApps() {
             if (activeWindowsCount > 0) {
                 progressiveX += separatorGapPadding;
             }
-			if (showSystemTray) {
-            	// Run our throttled texture sync check
-            	SyncDynamicSystrayTextures();
-			}
-            
 
+            
+            // =========================================================================
+            // PROCESS HAIKU TRASH CAN COMPONENT METRICS
+            // =========================================================================
+            progressiveX += clockSectionPadding;
+            float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
+            float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+            
+            float trashScale = 1.0f;
+            if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
+                float ratio = distanceTrashX / 160.0f;
+                trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+            }
+            
+            float finalTrashSize = baseTrashSize * trashScale;
+            dynamicWidths.push_back(finalTrashSize);
+            dynamicScales.push_back(trashScale);
+            if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
+            progressiveX += finalTrashSize;
+ 			
 	        // =========================================================================
 	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (NEW DYNAMIC CODE)
 	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
 	        // =========================================================================
+	        
+	        if (showSystemTray) {
+            	// Run our throttled texture sync check
+            	SyncDynamicSystrayTextures();
+			}
 	        float traySectionPadding = clockSectionPadding;
 	        size_t trayCount = fLiveTrayItems.size();
 	        
@@ -3569,8 +3765,9 @@ void SyncDockWithRunningDeskbarApps() {
 	        progressiveX += (baselineTrayWidth * trayScale);
 	        // =========================================================================
 
+ 			
             // =========================================================================
-            // 2. PROCESS SYSTEM CLOCK COMPONENT METRICS
+            // PROCESS SYSTEM CLOCK COMPONENT METRICS
             // =========================================================================
             if (fClockTexture.id != 0) {
 
@@ -3598,7 +3795,7 @@ void SyncDockWithRunningDeskbarApps() {
             }
 
             // =========================================================================
-            // NEW: PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS
+            // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS
             // =========================================================================
             progressiveX += clockSectionPadding;
             float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
@@ -3613,27 +3810,9 @@ void SyncDockWithRunningDeskbarApps() {
             dynamicScales.push_back(volScale);
             progressiveX += (baseVolumeWidth * volScale);
 
+
             // =========================================================================
-            // 3. PROCESS HAIKU TRASH CAN COMPONENT METRICS
-            // =========================================================================
-            progressiveX += clockSectionPadding;
-            float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
-            float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
-            
-            float trashScale = 1.0f;
-            if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
-                float ratio = distanceTrashX / 160.0f;
-                trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-            }
-            
-            float finalTrashSize = baseTrashSize * trashScale;
-            dynamicWidths.push_back(finalTrashSize);
-            dynamicScales.push_back(trashScale);
-            if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
-            progressiveX += finalTrashSize;
- 			
-            // =========================================================================
-            // 4. PROCESS GRAPHICAL CPU MONITOR METRICS
+            // PROCESS GRAPHICAL CPU MONITOR METRICS
             // =========================================================================
             progressiveX += clockSectionPadding; 
             float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
@@ -3659,11 +3838,13 @@ void SyncDockWithRunningDeskbarApps() {
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
         // -------------------------------------------------------------------------
         // FIXED: Added local explicit type declarations for every tracking index
-        size_t traySlotIdx   = totalIconsCount;
-        size_t clockSlotIdx  = totalIconsCount + 1;
-        size_t volumeSlotIdx = totalIconsCount + 2;
-        size_t trashSlotIdx  = totalIconsCount + 3;
+        size_t trashSlotIdx   = totalIconsCount;
+        size_t traySlotIdx  = totalIconsCount + 1;
+        size_t clockSlotIdx  = totalIconsCount + 2;
+        size_t volumeSlotIdx = totalIconsCount + 3;
         size_t cpuSlotIdx    = totalIconsCount + 4;
+        
+
 
         float dockMarginBottom = 15.0f;
         HaikuRect dockPlate;
@@ -3683,13 +3864,13 @@ void SyncDockWithRunningDeskbarApps() {
         if (totalIconsCount > 0) layoutTrackerX -= padding;
         if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
         
-        // A. Add System Tray width first
+        // Add System Tray width first
         layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
         
-        // B. Add Clock width second
+        // Add Clock width second
         if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
         
-        // C. Add Volume slider width third
+        // Add Volume slider width third
         layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
 
         
@@ -3914,6 +4095,103 @@ void SyncDockWithRunningDeskbarApps() {
 	           glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
 	           glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
 	       glEnd();
+	       
+	    // =========================================================================
+        // 6C. DRAW HAIKU TRASH BIN
+        // =========================================================================
+        uint32 currentTicks = SDL_GetTicks();
+        if (currentTicks - fLastTrashCheckTime > 500) { 
+            fLastTrashCheckTime = currentTicks;
+            if (fHaikuTrashIcon.id != 0) {
+                glDeleteTextures(1, &fHaikuTrashIcon.id);
+                fHaikuTrashIcon.id = 0;
+            }
+            fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
+        }
+		
+        // Extra divider lines cleanly neutralized to maintain your preferred borderless style
+        currentX += clockSectionPadding;
+		
+        // Pin hitbox geometry directly to our current track pointer
+        fTrashRect.left   = currentX;
+        fTrashRect.right  = fTrashRect.left + renderingTrashSize;
+        fTrashRect.top    = dockPlate.bottom - 10.0f - renderingTrashSize;
+        fTrashRect.bottom = dockPlate.bottom - 10.0f;
+
+        if (fHaikuTrashIcon.id != 0) {
+            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fHaikuTrashIcon.id);
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+            glBegin(GL_QUADS);
+                glTexCoord2f(0.0f, 0.0f); glVertex2f(fTrashRect.left,  fTrashRect.top);
+                glTexCoord2f(1.0f, 0.0f); glVertex2f(fTrashRect.right, fTrashRect.top);
+                glTexCoord2f(1.0f, 1.0f); glVertex2f(fTrashRect.right, fTrashRect.bottom);
+                glTexCoord2f(0.0f, 1.0f); glVertex2f(fTrashRect.left,  fTrashRect.bottom);
+            glEnd();
+            glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
+        }
+		/*
+        if (fTrashRect.Contains(fMouseX, fMouseY)) {
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            if (!fTrashTextGenerated) {
+                if (fTrashTooltipTexId != 0) { glDeleteTextures(1, &fTrashTooltipTexId); fTrashTooltipTexId = 0; }
+                auto generatedTex = RenderTextToTexture("Middle click to empty Trash", &fTrashTooltipW, &fTrashTooltipH);
+                fTrashTooltipTexId = generatedTex.id; 
+                fTrashTextGenerated = true; 
+            }
+
+            float tooltipW = static_cast<float>(fTrashTooltipW) + 12.0f;
+            float tooltipH = static_cast<float>(fTrashTooltipH) + 8.0f;
+            float tooltipLeft = fTrashRect.left + ((fTrashRect.right - fTrashRect.left) / 2.0f) - (tooltipW / 2.0f);
+            float tooltipBottom = fTrashRect.top - 1.0f; 
+
+            HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
+            DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
+
+            glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
+            glBegin(GL_LINE_LOOP);
+                glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
+                glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
+            glEnd();
+			
+            if (fTrashTooltipTexId != 0) {
+
+                glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fTrashTooltipTexId);
+                
+                // =========================================================================
+                // FORCE NEON GREEN COLOR BY OVERRIDING BLACK TEXTURE RGB CHANNELS
+                // =========================================================================
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
+                
+                // Set the blending color filter to match your illuminated matrix neon green
+                glColor4f(0.2f, 1.0f, 0.2f, 1.0f); 
+                // =========================================================================
+                
+                float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
+                glBegin(GL_QUADS);
+                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
+                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fTrashTooltipW, textY);
+                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fTrashTooltipW, textY + fTrashTooltipH);
+                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fTrashTooltipH);
+                glEnd();
+                
+                // =========================================================================
+                // Cleanly reset texture environment mode back to standard modulation
+                // =========================================================================
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
+                // =========================================================================
+            }
+			
+        } else {
+            fTrashTextGenerated = false;
+        }
+		*/
+        currentX = fTrashRect.right;   
+	       
+	       
 
         // =========================================================================
         // NATIVE INTEGRATION: DRAW THE SYSTEM TRAY (DYNAMIC DOCK ENGINE REWRITE)
@@ -3974,6 +4252,10 @@ void SyncDockWithRunningDeskbarApps() {
 	        currentX += dynamicTrayWidth;
         }
 
+
+
+
+
         // =========================================================================
         // 6. DRAW SYSTEM CLOCK STATUS TEXT (MATHEMATICALLY LOCKED SYMMETRY)
         // =========================================================================
@@ -3983,15 +4265,7 @@ void SyncDockWithRunningDeskbarApps() {
             float dynamicClockW = dynamicWidths[clockSlotIdx]; 
             float highDpiCompensateFactor = 0.42f; 
             float dynamicClockH = static_cast<float>(fClockHeight) * highDpiCompensateFactor * clockScale;
-            /*
-            // Left Clock Divider Line
-            float lineLeftSnappedX = std::floor(currentX + 0.5f);
-            glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
-            glBegin(GL_LINES);
-                glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
-                glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
-            glEnd();
-			*/
+
             currentX += clockSectionPadding;
             float clockY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicClockH / 2.0f));
             
@@ -4058,100 +4332,7 @@ void SyncDockWithRunningDeskbarApps() {
         currentX += dynamicVolWidth;
 
 
-        // =========================================================================
-        // 6C. DRAW HAIKU TRASH BIN (RIGHT OF THE CLOCK)
-        // =========================================================================
-        uint32 currentTicks = SDL_GetTicks();
-        if (currentTicks - fLastTrashCheckTime > 500) { 
-            fLastTrashCheckTime = currentTicks;
-            if (fHaikuTrashIcon.id != 0) {
-                glDeleteTextures(1, &fHaikuTrashIcon.id);
-                fHaikuTrashIcon.id = 0;
-            }
-            fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
-        }
-		
-        // Extra divider lines cleanly neutralized to maintain your preferred borderless style
-        currentX += clockSectionPadding;
-		
-        // Pin hitbox geometry directly to our current track pointer
-        fTrashRect.left   = currentX;
-        fTrashRect.right  = fTrashRect.left + renderingTrashSize;
-        fTrashRect.top    = dockPlate.bottom - 10.0f - renderingTrashSize;
-        fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
-        if (fHaikuTrashIcon.id != 0) {
-            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fHaikuTrashIcon.id);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
-            glBegin(GL_QUADS);
-                glTexCoord2f(0.0f, 0.0f); glVertex2f(fTrashRect.left,  fTrashRect.top);
-                glTexCoord2f(1.0f, 0.0f); glVertex2f(fTrashRect.right, fTrashRect.top);
-                glTexCoord2f(1.0f, 1.0f); glVertex2f(fTrashRect.right, fTrashRect.bottom);
-                glTexCoord2f(0.0f, 1.0f); glVertex2f(fTrashRect.left,  fTrashRect.bottom);
-            glEnd();
-            glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-        }
-
-        if (fTrashRect.Contains(fMouseX, fMouseY)) {
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-            if (!fTrashTextGenerated) {
-                if (fTrashTooltipTexId != 0) { glDeleteTextures(1, &fTrashTooltipTexId); fTrashTooltipTexId = 0; }
-                auto generatedTex = RenderTextToTexture("Middle click to empty Trash", &fTrashTooltipW, &fTrashTooltipH);
-                fTrashTooltipTexId = generatedTex.id; 
-                fTrashTextGenerated = true; 
-            }
-
-            float tooltipW = static_cast<float>(fTrashTooltipW) + 12.0f;
-            float tooltipH = static_cast<float>(fTrashTooltipH) + 8.0f;
-            float tooltipLeft = fTrashRect.left + ((fTrashRect.right - fTrashRect.left) / 2.0f) - (tooltipW / 2.0f);
-            float tooltipBottom = fTrashRect.top - 1.0f; 
-
-            HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
-            DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
-
-            glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
-            glBegin(GL_LINE_LOOP);
-                glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
-                glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
-            glEnd();
-
-            if (fTrashTooltipTexId != 0) {
-
-                glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fTrashTooltipTexId);
-                
-                // =========================================================================
-                // FIX: FORCE NEON GREEN COLOR BY OVERRIDING BLACK TEXTURE RGB CHANNELS
-                // =========================================================================
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
-                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
-                glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
-                
-                // Set the blending color filter to match your illuminated matrix neon green
-                glColor4f(0.2f, 1.0f, 0.2f, 1.0f); 
-                // =========================================================================
-                
-                float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
-                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fTrashTooltipW, textY);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fTrashTooltipW, textY + fTrashTooltipH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fTrashTooltipH);
-                glEnd();
-                
-                // =========================================================================
-                // FIX: Cleanly reset texture environment mode back to standard modulation
-                // =========================================================================
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-                glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-                // =========================================================================
-            }
-
-        } else {
-            fTrashTextGenerated = false;
-        }
-
-        currentX = fTrashRect.right;
 
         // =========================================================================
         // 6B. DRAW GRAPHICAL PURPLE BOUNCING CPU METERS (ROUNDED CORNER CASING)
@@ -4198,7 +4379,7 @@ void SyncDockWithRunningDeskbarApps() {
         }
         glEnd();
 
-               // =========================================================================
+        // =========================================================================
         // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
         // =========================================================================
         if (cpuGraphBounds.Contains(fMouseX, fMouseY)) {
@@ -5122,7 +5303,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.13"; 
+    const char* localVersion = "v1.0.14"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
