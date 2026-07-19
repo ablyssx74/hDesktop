@@ -2053,13 +2053,15 @@ public:
         std::cout << "[Tracker window] Scrolled canvas position offset: " << fScrollOffset << std::endl;
     }
 
-/*
 void SyncDockWithRunningDeskbarApps() {
     // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
+    // =================================================================
     for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
+        // Look inside your existing TaskbarItem layout parameters
         if (fTaskbarWindows[i].icon.id > 0) {
+            // Force OpenGL to instantly liberate the graphic texture memory allocations
             glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
-            fTaskbarWindows[i].icon.id = 0; 
+            fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
         }
     }
     
@@ -2089,29 +2091,21 @@ void SyncDockWithRunningDeskbarApps() {
         if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
             if ((info.flags & B_BACKGROUND_APP) != 0) continue;
             if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
-            
-            std::string appSignature(info.signature);
-            bool isDuplicate = false;
-            
-            // =========================================================================
-            // COHESIVE MULTI-INSTANCE APPLICATION WHITELIST
-            // =========================================================================
-            bool allowsMultipleInstances = (
-                appSignature == "application/x-vnd.Haiku-Terminal" ||
-                appSignature == "application/x-vnd.Haiku-WebPositive" ||
-                appSignature == "application/x-vnd.Heka-Pe"
-            );
 
-            // Only check for duplicates if it is NOT a whitelisted multi-instance application
-            if (!allowsMultipleInstances) {
+            std::string appSignature(info.signature);
+            
+            // --- MODIFIED EXCLUSIVE DUPLICATE FILTER FOR ICEWEASEL ONLY ---
+            // =================================================================
+            bool isDuplicate = false;
+            if (appSignature == "application/x-vnd.iceweasel") {
                 for (const auto& sig : processedSignatures) {
-                    if (sig == appSignature && !appSignature.empty()) {
+                    if (sig == appSignature) {
                         isDuplicate = true; 
                         break;
                     }
                 }
             }
-            if (isDuplicate) continue; 
+            if (isDuplicate) continue; // Skip subsequent Iceweasel teams, allow all other apps
 
             BEntry entry(&info.ref);
             if (entry.InitCheck() != B_OK) continue;
@@ -2127,96 +2121,50 @@ void SyncDockWithRunningDeskbarApps() {
             BPath path;
             entry.GetPath(&path);
 
-            // =========================================================================
-            // DYNAMIC INDIVIDUAL WINDOW TITLE RESOLUTION PIPELINE
-            // =========================================================================
-            std::vector<std::string> targetInstanceTitles;
-            BMessenger appMessenger(info.signature, id);
-            
-            // Now queries titles for Terminal, WebPositive, and Pe alike!
-            if (appMessenger.IsValid() && allowsMultipleInstances) {
-                // 1. Ask the application team how many window containers it currently holds
-                BMessage countRequest(B_GET_PROPERTY);
-                countRequest.AddSpecifier("Count");
-                countRequest.AddSpecifier("Window");
-                BMessage countReply;
-                
-                int32 foundWindowCount = 1;
-                if (appMessenger.SendMessage(&countRequest, &countReply) == B_OK) {
-                    int32 trackedCount = 0;
-                    if (countReply.FindInt32("result", &trackedCount) == B_OK && trackedCount > 0) {
-                        foundWindowCount = trackedCount;
-                    }
-                }
+            TaskbarItem openApp;
+            openApp.title = appTitle;
+            openApp.icon = LoadIconFromNode(path.Path(), 128); 
+            openApp.teamId = id; 
 
-                // 2. Fetch the explicit Title text string for each active window slot
-                for (int32 wIdx = 0; wIdx < foundWindowCount; ++wIdx) {
-                    BMessage titleRequest(B_GET_PROPERTY);
-                    titleRequest.AddSpecifier("Title");
-                    titleRequest.AddSpecifier("Window", wIdx);
-                    BMessage titleReply;
-                    
-                    std::string extractedTitle = appTitle; // Fallback
-                    if (appMessenger.SendMessage(&titleRequest, &titleReply) == B_OK) {
-                        const char* titleStr = nullptr;
-                        if (titleReply.FindString("result", &titleStr) == B_OK && titleStr != nullptr) {
-                            extractedTitle = titleStr;
-                        }
-                    }
-                    targetInstanceTitles.push_back(extractedTitle);
+            // --- FIXED STATE RESTORE LAYER WITH FOREGROUND CHECK ---
+            bool foundOldInstance = false;
+            for (const auto& oldWin : oldTaskbarWindows) {
+                if (oldWin.teamId == id) {
+                    openApp.isMinimized = oldWin.isMinimized;
+                    foundOldInstance = true;
+                    break;
                 }
-            } else {
-                // Singleton application fallback (including Iceweasel pathing channels)
-                targetInstanceTitles.push_back(appTitle);
             }
 
-            // =========================================================================
-            // LOOP AND GENERATE DOCK ENTRIES PER RESOLVED TITLE STRING
-            // =========================================================================
-            for (size_t winIdx = 0; winIdx < targetInstanceTitles.size(); ++winIdx) {
-                TaskbarItem openApp;
-                openApp.title = targetInstanceTitles[winIdx]; // Dynamically tracks web pages / documents!
-                openApp.appName = appTitle;                    
-                openApp.icon = LoadIconFromNode(path.Path(), 128); 
-                openApp.teamId = id; 
-                openApp.windowIndex = static_cast<int32>(winIdx); 
-
-                // --- FIXED STATE RESTORE LAYER (MATCH BY INDEX) ---
-                bool foundOldInstance = false;
-                for (const auto& oldWin : oldTaskbarWindows) {
-                    if (oldWin.teamId == id && oldWin.windowIndex == openApp.windowIndex) {
-                        openApp.isMinimized = oldWin.isMinimized;
-                        foundOldInstance = true;
-                        break;
-                    }
+            // CORRECTION: If it's a completely new application node or our dock app itself 
+            // currently holds stolen click focus, evaluate it cleanly via the roster information.
+            if (!foundOldInstance || activeTeamId == id) {
+                // If it's the absolute front window, it is not minimized
+                if (activeTeamId == id) {
+                    openApp.isMinimized = false;
+                } 
+                // If our dock app currently holds focus, fallback safely to its previous state 
+                // or assume it's minimized if it wasn't tracked yet and isn't us
+                else if (activeTeamId == be_app->Team()) {
+                    openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
+                } 
+                else {
+                    openApp.isMinimized = true;
                 }
-
-                if (!foundOldInstance || activeTeamId == id) {
-                    if (activeTeamId == id) {
-                        openApp.isMinimized = false;
-                    } 
-                    else if (activeTeamId == be_app->Team()) {
-                        openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
-                    } 
-                    else {
-                        openApp.isMinimized = true;
-                    }
-                }
-
-                static bool sAlwaysTrue = true;
-                openApp.openStateFlag = &sAlwaysTrue;
-                openApp.minimizeStateFlag = &openApp.isMinimized; 
-
-                fTaskbarWindows.push_back(openApp);
             }
 
+            static bool sAlwaysTrue = true;
+            openApp.openStateFlag = &sAlwaysTrue;
+            openApp.minimizeStateFlag = &openApp.isMinimized; 
+
+            // Store signatures to maintain historical state tracking for the filtered targets
             processedSignatures.push_back(appSignature);
+            fTaskbarWindows.push_back(openApp);
         }
     }
 }
 
-*/
-
+/*
 void SyncDockWithRunningDeskbarApps() {
 		// --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
 	    // =================================================================
@@ -2320,7 +2268,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        }
 	    }
 	}
-
+*/
    
    
 
@@ -2896,11 +2844,12 @@ void SyncDockWithRunningDeskbarApps() {
 	                
 	                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
 	                if (targetAppMessenger.IsValid()) {
+	                    // Standard graceful exit request handled natively by the app loop thread
 	                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
 	                } else {
-	                    char closeCmdBuffer[256];
-	                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
-	                    std::system(closeCmdBuffer);
+	                    std::cout << "   [Fallback] Messenger invalid. Issuing kernel kill_team to free thread structures." << std::endl;
+	                    // Native Haiku OS kernel primitive to cleanly reclaim memory allocations from non-responsive teams
+	                    kill_team(activeTaskWin.teamId);
 	                }
 	                
 	                fShowMainMenu = false;
@@ -2919,73 +2868,89 @@ void SyncDockWithRunningDeskbarApps() {
 	                }
 	            }
 	            fShowMainMenu = false;
-	
+
 	
 				
 				if (isTracker) {
-				    uint32 currentClickTick = SDL_GetTicks();
+				    // --- FIX: ONLY RIGHT CLICK SPAWNS THE ASYNC POPUP MENU ---
+				    // =========================================================================
+				    if (button == SDL_BUTTON_RIGHT) {
+				        uint32 currentClickTick = SDL_GetTicks();
+				        
+				        // SEQUENTIAL TOGGLE SHIELD: Check rapid click limits
+				        if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
+				            std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
+				            fLastTrackerMenuCloseTime = 0; 
+				            return; 
+				        }
 				    
-				    // SEQUENTIAL TOGGLE SHIELD: Check rapid click limits
-				    if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
-				        std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
-				        fLastTrackerMenuCloseTime = 0; 
-				        return; 
+				        // ACTIVE MENU CLOSE CHECK: If the menu is currently visible and they click again, close it
+				        if (fTrackerMenuIsActive) {
+				            std::cout << "[Tracker Menu] Active Close Match: Intercepting click to let menu close naturally." << std::endl;
+				            return; 
+				        }
+				    
+				        std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
+				        fTrackerMenuIsActive = true; // Engage active state safety latch
+				    
+				        int32 winX = 0, winY = 0;
+				        SDL_Window* activeWin = SDL_GetMouseFocus();
+				        if (activeWin) {
+				            SDL_GetWindowPosition(activeWin, &winX, &winY);
+				        }
+				    
+				        TrackerMenuArgs* args = new TrackerMenuArgs();
+				        args->engine = this; // Pass engine instance pointer safely
+				        args->winX = winX;
+				        args->winY = winY;
+				        args->mouseX = x; 
+				    
+				        thread_id menuThread = spawn_thread(SpawnTrackerMenuThread, "async_tracker_menu", B_NORMAL_PRIORITY, args);
+				        if (menuThread >= B_OK) {
+				            resume_thread(menuThread);
+				        } else {
+				            fTrackerMenuIsActive = false;
+				            delete args;
+				        }
+				    
+				        return; // Intercept right click so it doesn't fire window minimize/restore macros
 				    }
-				
-				    // ACTIVE MENU CLOSE CHECK: If the menu is currently visible and they click again, close it
-				    if (fTrackerMenuIsActive) {
-				        std::cout << "[Tracker Menu] Active Close Match: Intercepting click to let menu close naturally." << std::endl;
-				        // Sending an empty click notification to your main system screen coordinates 
-				        // can help explicitly pop Haiku's window out of focus if needed.
-				        return; 
-				    }
-				
-				    std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
-				    fTrackerMenuIsActive = true; // Engage active state safety latch
-				
-				    int32 winX = 0, winY = 0;
-				    SDL_Window* activeWin = SDL_GetMouseFocus();
-				    if (activeWin) {
-				        SDL_GetWindowPosition(activeWin, &winX, &winY);
-				    }
-				
-				    TrackerMenuArgs* args = new TrackerMenuArgs();
-				    args->engine = this; // Pass engine instance pointer safely
-				    args->winX = winX;
-				    args->winY = winY;
-				    args->mouseX = x; 
-				
-				    thread_id menuThread = spawn_thread(SpawnTrackerMenuThread, "async_tracker_menu", B_NORMAL_PRIORITY, args);
-				    if (menuThread >= B_OK) {
-				        resume_thread(menuThread);
-				    } else {
-				        fTrackerMenuIsActive = false;
-				        delete args;
-				    }
-				
-				    return; 
+				    // =========================================================================
+				    
+				    // Left-clicks (or other mouse inputs) fall completely through this block!
+				    // They will land right into your AppServerLink pipeline codes below,
+				    // minimizing or restoring your open desktop/folder panels naturally.
 				}
-	
-	
-	            // -----------------------------------------------------------
-	
-	            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
-	            char systemCmdBuffer[512]; 
+
+				
+			
+		            // -----------------------------------------------------------
+					
+		            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
+	            #ifndef AS_MINIMIZE_TEAM
+	            #define AS_MINIMIZE_TEAM 5
+	            #endif
+	            #ifndef AS_BRING_TEAM_TO_FRONT
+	            #define AS_BRING_TEAM_TO_FRONT 6
+	            #endif
 	
 	            if (activeTaskWin.isMinimized == false) {
-	                std::cout << "[SYSTEM CALL FIX] ---> Action: RUNNING 'hey' TO MINIMIZE WINDOW SUITE" << std::endl;
+	                std::cout << "[APP_SERVER ROUTING] ---> Action: MINIMIZE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
-	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-	                    "hey \"%s\" Set Minimize of Window 0 to true &", 
-	                    activeTaskWin.title.c_str());
+	                // Establish direct connection straight to the central window management loop
+	                BPrivate::AppServerLink link;
+	                link.StartMessage(AS_MINIMIZE_TEAM);
+	                link.Attach<team_id>(activeTaskWin.teamId);
+	                link.Flush();
 	                
-	                std::system(systemCmdBuffer); 
+	                // Safely drop window workspace focus via native roster management
 	                be_roster->ActivateApp(-1);
 	                activeTaskWin.isMinimized = true; 
 	            } 
 	            else {
-	                std::cout << "[SYSTEM CALL FIX] ---> Action: RESTORING VIA ROSTER & 'hey' UNMINIMIZE" << std::endl;
+	                std::cout << "[APP_SERVER ROUTING] ---> Action: RESTORE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
+	                // First, pull the windows into active workspace focus pools natively
 	                app_info targetAppInfo;
 	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
 	                    be_roster->ActivateApp(targetAppInfo.team);
@@ -2993,11 +2958,12 @@ void SyncDockWithRunningDeskbarApps() {
 	                    be_roster->ActivateApp(activeTaskWin.teamId);
 	                }
 	                
-	                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-	                    "hey \"%s\" Set Minimize of Window 0 to false &", 
-	                    activeTaskWin.title.c_str());
+	                // Open low-level connection to bring every window surface frame to foreground
+	                BPrivate::AppServerLink link;
+	                link.StartMessage(AS_BRING_TEAM_TO_FRONT);
+	                link.Attach<team_id>(activeTaskWin.teamId);
+	                link.Flush();
 	                
-	                std::system(systemCmdBuffer);
 	                activeTaskWin.isMinimized = false; 
 	            }
 	            
@@ -3009,167 +2975,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        evaluationSlotIdx++;
 	    }
 	    
-	    
-	    
-		/*
-		// STEP B: EVALUATE LIVE OPEN RUNNING TASKBAR WINDOW APP TOGGLES
-	    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-	        auto& activeTaskWin = fTaskbarWindows[w];
-	        if (*activeTaskWin.openStateFlag == false) continue;
-	
-	        float size = dynamicWidths[evaluationSlotIdx];
-	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-	        
-	        // --- TRACKER SAFETY TOGGLE PIPELINES ---
-	        bool isTracker = false;
-	        app_info appInfo;
-	        if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &appInfo) == B_OK) {
-	            if (strcmp(appInfo.signature, "application/x-vnd.Be-TRAK") == 0) isTracker = true;
-	        }
-	
-	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
-	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-	            // =========================================================================
-	            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
-	            // =========================================================================
-	            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
-	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
-	                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
-	                
-	                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
-	                if (targetAppMessenger.IsValid()) {
-	                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
-	                } else {
-	                    char closeCmdBuffer[256];
-	                    std::snprintf(closeCmdBuffer, sizeof(closeCmdBuffer), "hey \"%s\" Quit &", activeTaskWin.title.c_str());
-	                    std::system(closeCmdBuffer);
-	                }
-	                
-	                fShowMainMenu = false;
-	                std::cout << "========================================\n" << std::endl;
-	                return; 
-	            }
-	
-	
-	            if (fShowMainMenu) {
-	                BWindow* nativeWin = be_app->WindowAt(0);
-	                if (nativeWin != nullptr && nativeWin->Lock()) {
-	                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-	                    nativeWin->ResizeBy(0, -220.0f);
-	                    nativeWin->MoveBy(0, 220.0f);
-	                    nativeWin->Unlock();
-	                }
-	            }
-	            fShowMainMenu = false;
-	
-	
-	
-	            if (isTracker) {
-	                char safeTrackerCmdBuffer[256];
-	                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
-	
-	                if (activeTaskWin.isMinimized == false) {
-	                    std::cout << "[SYSTEM FIX] ---> Action: NATIVELY HIDING TRACKER FOLDERS" << std::endl;
-	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-	                        "hey \"Tracker\" Set Minimize of Window 1 to true &");
-	                    std::system(safeTrackerCmdBuffer);
-	                    
-	                    be_roster->ActivateApp(-1);
-	                    activeTaskWin.isMinimized = true;
-	                } 
-	                else {
-	                    std::cout << "[SYSTEM FIX] ---> Action: ENSURING TRACKER FOLDER IS SPUN UP" << std::endl;
-	                    app_info realTrackerInfo;
-	                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &realTrackerInfo) == B_OK) {
-	                        be_roster->ActivateApp(realTrackerInfo.team);
-	                    } else {
-	                        be_roster->ActivateApp(activeTaskWin.teamId);
-	                    }
-	                    
-	                    std::snprintf(safeTrackerCmdBuffer, sizeof(safeTrackerCmdBuffer),
-	                        "hey \"Tracker\" Set Minimize of Window 1 to false &");
-	                    std::system(safeTrackerCmdBuffer);
-	
-	                    if (trackerMessenger.IsValid()) {
-	                        BEntry homeEntry("/boot/home");
-	                        entry_ref homeRef;
-	                        if (homeEntry.GetRef(&homeRef) == B_OK) {
-	                            BMessage openMsg(B_REFS_RECEIVED);
-	                            openMsg.AddRef("refs", &homeRef);
-	                            trackerMessenger.SendMessage(&openMsg);
-	                        }
-	                    }
-	                    activeTaskWin.isMinimized = false;
-	                }
-	                return; // ABSOLUTE SHIELD: Double-fire mouse loops are terminated safely here
-	            }
-	            // -----------------------------------------------------------
-	
-		        // GENERAL APPLICATION BEHAVIOR (UNIVERSAL TITLE-BASED WITH X11/GTK FALLBACKS)
-		        char systemCmdBuffer[512]; 
-		
-		        if (activeTaskWin.isMinimized == false) {
-		            std::cout << "[SYSTEM CALL] ---> Action: MINIMIZING APPNAMED \"" << activeTaskWin.appName 
-		                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
-		            
-		            // =========================================================================
-		            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
-		            // =========================================================================
-		            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
-		                // Target Window 0 directly since ported browser panes don't expose Title strings
-		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-		                    "hey \"%s\" Set Minimize of Window 0 to true &", 
-		                    activeTaskWin.appName.c_str());
-		            } else {
-		                // Standard native application track using explicit title matching
-		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-		                    "hey \"%s\" Set Minimize of Window \"%s\" to true &", 
-		                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
-		            }
-		            // =========================================================================
-		            
-		            std::system(systemCmdBuffer); 
-		            be_roster->ActivateApp(-1);
-		            activeTaskWin.isMinimized = true; 
-		        } 
-		        else {
-		            std::cout << "[SYSTEM CALL] ---> Action: RESTORING APPNAMED \"" << activeTaskWin.appName 
-		                      << "\" WITH WINDOW TITLE: \"" << activeTaskWin.title << "\"" << std::endl;
-		            
-		            app_info targetAppInfo;
-		            if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
-		                be_roster->ActivateApp(targetAppInfo.team);
-		            } else {
-		                be_roster->ActivateApp(activeTaskWin.teamId);
-		            }
-		            
-		            // =========================================================================
-		            // ICEWEASEL / NON-NATIVE APP SPECIFIC ROUTING FALLBACK
-		            // =========================================================================
-		            if (activeTaskWin.appName == "Iceweasel" || activeTaskWin.appName == "iceweasel") {
-		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-		                    "hey \"%s\" Set Minimize of Window 0 to false &", 
-		                    activeTaskWin.appName.c_str());
-		            } else {
-		                std::snprintf(systemCmdBuffer, sizeof(systemCmdBuffer),
-		                    "hey \"%s\" Set Minimize of Window \"%s\" to false &", 
-		                    activeTaskWin.appName.c_str(), activeTaskWin.title.c_str());
-		            }
-		            // =========================================================================
-		            
-		            std::system(systemCmdBuffer);
-		            activeTaskWin.isMinimized = false; 
-		        }
-		        
-		        std::cout << "========================================\n" << std::endl;
-		        return; 
-		    }
-		    
-		    currentX += size + padding;
-		    evaluationSlotIdx++;
-	    }
-		*/
-		
+
 		
 		
 
@@ -3180,9 +2986,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    // -------------------------------------------------------------------------
 	    // Evaluate Click Bounds for Haiku Trash Bin Component
 	    // -------------------------------------------------------------------------
-	    // -------------------------------------------------------------------------
-	    // Evaluate Click Bounds for Haiku Trash Bin Component
-	    // -------------------------------------------------------------------------
+
 	    currentX += clockSectionPadding;
 	    float dynamicTrashSize = dynamicWidths[trashSlotIdx];
 	    HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
@@ -3969,12 +3773,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    float size = dynamicWidths[renderingSlotIdx];
 		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 		
-            if (activeTaskWin.title == "Tracker") {
-                // TRACKER EXCLUSIVITY: Preserve your original working strategy.
-                // Do not override 'isMinimized' using global counts or cached threads.
-                // Let your verified click-handling states manage Tracker's visibility.
-            } 
-            else {
+
                  // GENERAL APPLICATIONS: Keep the fast thread execution checks 
                 bool generalAppIsVisible = false;
                 thread_info info;
@@ -3991,7 +3790,7 @@ void SyncDockWithRunningDeskbarApps() {
                             break;
                         }
                     }
-                }
+                
                 
                 // Check system-wide foreground focus
                 app_info activeAppInfo;
@@ -4020,11 +3819,26 @@ void SyncDockWithRunningDeskbarApps() {
 
                 bool nextState = activeTaskWin.isMinimized;
 
+                // FIX: Establish a temporal guard to allow newly woken app threads to stabilize 
+                // before letting thread profiling override the click event state.
+                static std::map<std::pair<team_id, int32>, uint32> lastStateChangeTicks;
+                uint32 currentTicks = SDL_GetTicks();
+                
+                // Track if a manual state shift just occurred
+                static std::map<std::pair<team_id, int32>, bool> lastKnownState;
+                if (lastKnownState[instanceKey] != activeTaskWin.isMinimized) {
+                    lastStateChangeTicks[instanceKey] = currentTicks;
+                    lastKnownState[instanceKey] = activeTaskWin.isMinimized;
+                }
+
+                // Grace period: Lock the state to what the click handler set for 500ms
+                bool inGracePeriod = (currentTicks - lastStateChangeTicks[instanceKey] < 500);
+
                 if (isCurrentlyForeground) {
                     invisibleStreak[instanceKey] = 0;
                     visibleStreak[instanceKey] = 0;
                     nextState = false;
-                } else {
+                } else if (!inGracePeriod) { // Only evaluate streaks if outside the grace period
                     if (!generalAppIsVisible) {
                         invisibleStreak[instanceKey]++;
                         visibleStreak[instanceKey] = 0;
@@ -4049,14 +3863,17 @@ void SyncDockWithRunningDeskbarApps() {
                     }
                 }
 
-                // Smoothly toggle the state for non-Tracker applications
-                activeTaskWin.isMinimized = nextState;          
+                // Smoothly toggle the state for non-Tracker applications if outside grace period
+                if (!inGracePeriod) {
+                    activeTaskWin.isMinimized = nextState;          
+                }
+        
             }             
                 
 		    // A. Draw active task window application vector icon thumbnail
 		    if (activeTaskWin.icon.id != 0) {
 		        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
-		        if (activeTaskWin.isMinimized == true && activeTaskWin.title != "Tracker") {
+		        if (activeTaskWin.isMinimized == true) {
 		            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
 		        } else {
 		            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Bright full opacity active focus
@@ -5303,7 +5120,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.14"; 
+    const char* localVersion = "v1.0.15"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
