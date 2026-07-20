@@ -58,11 +58,97 @@
 
 
 class HaikuGlDesktopEngine;
-int32 SpawnTrashMenuThread(void* data);
+class HaikuAppDrawerWindow; 
+HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
+BWindow* gActiveConfigInstance = nullptr; 
+std::set<std::string> gFavoritePaths; 
+bool autoHideEnabled; 
+bool showSystemTray; 
+void SaveConfiguration(); 
 
+enum {
+	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
+    MSG_AUTOHIDE_TOGGLED = 'ahtg',
+    MSG_SYSTEMTRAY_TOGGLED = 'sttg' 
+};
 
+struct TrayItem {
+    std::string name;
+    int32 internalId;
+    GLuint textureId;
+    float currentRenderX; // Cached during Pass 2 for Mouse Click math!
+    float currentRenderWidth;
+};
+std::vector<TrayItem> fLiveTrayItems;
+bigtime_t fLastTrayUpdateTime = 0;
 
+struct SystrayMenuArgs {
+    HaikuGlDesktopEngine* engine;
+    int32 winX;
+    int32 winY;
+    int32 mouseX;
+    int32 mouseY;
+    std::string itemName; // Safe isolated string copy
+};
 
+struct CpuMenuArgs {
+    HaikuGlDesktopEngine* engine;
+    int32 winX;
+    int32 winY;
+    int32 mouseX;
+    int32 mouseY;
+};
+
+struct HaikuRect {
+    float left, top, right, bottom;    
+    bool Contains(float x, float y) const {
+        return (x >= left && x <= right && y >= top && y <= bottom);
+    }    
+    float Width() const { 
+        return right - left; 
+    }
+};
+
+struct HaikuPoint {
+    float x;
+    float y;
+};
+
+struct HaikuTexture {
+    GLuint id = 0;
+    int width = 0;
+    int height = 0;
+};
+
+struct BrowserFileItem {
+    std::string name;
+    HaikuTexture icon;
+    HaikuTexture textTex;
+    int textW = 0, textH = 0;
+    HaikuRect clickBounds;
+    bool isFolder;
+    std::string fullPath;
+};
+
+struct TaskbarItem {
+    std::string title;       
+    std::string appName;     
+    HaikuTexture icon;       
+    bool isMinimized;       
+    bool* openStateFlag;     
+    bool* minimizeStateFlag; 
+    team_id teamId;       
+    int32 windowIndex;       
+};
+
+struct DesktopIconItem {
+    std::string name;
+    HaikuTexture texture;       // Core 48x48 icon file asset
+    HaikuTexture textTexture;   // Dynamic text string label texture
+    HaikuRect bounds;
+    HaikuRect textBounds;       // Layout boundaries for label text box below the icon
+    bool isFolder;
+};
 
 using BPrivate::BNavMenu;
 // =========================================================================
@@ -607,24 +693,7 @@ private:
 };
 
 
-struct SystrayMenuArgs {
-    HaikuGlDesktopEngine* engine;
-    int32 winX;
-    int32 winY;
-    int32 mouseX;
-    int32 mouseY;
-    std::string itemName; // Safe isolated string copy
-};
 
-
-
-struct CpuMenuArgs {
-    HaikuGlDesktopEngine* engine;
-    int32 winX;
-    int32 winY;
-    int32 mouseX;
-    int32 mouseY;
-};
 
 // Streamlined structural definition block
 class AsyncCpuMenuRunner : public BWindow {
@@ -643,7 +712,7 @@ public:
     virtual void MessageReceived(BMessage* message) override {
         switch (message->what) {
             case MSG_LAUNCH_MENU:
-                _DisplayProcessControllerMenu(); // Will be resolved downstream
+                _DisplayCPUGraphMenu(); // Will be resolved downstream
                 Quit(); 
                 break;
             default:
@@ -654,42 +723,13 @@ public:
 
 private:
     enum { MSG_LAUNCH_MENU = 'lmnc' };
-    void _DisplayProcessControllerMenu(); // Declaration only!
+    void _DisplayCPUGraphMenu(); // Declaration only!
 
     CpuMenuArgs* fArgs;
 };
 
 
 
-
-
-
-
-
-
-// Custom SDL Event definition
-enum {
-    SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1
-};
-
-
-
-class HaikuAppDrawerWindow; 
-HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
-BWindow* gActiveConfigInstance = nullptr; 
-
-
-struct TrayItem {
-    std::string name;
-    int32 internalId;
-    GLuint textureId;
-    float currentRenderX; // Cached during Pass 2 for Mouse Click math!
-    float currentRenderWidth;
-};
-
-// Class member variables
-std::vector<TrayItem> fLiveTrayItems;
-bigtime_t fLastTrayUpdateTime = 0;
 
 
 void SyncDynamicSystrayTextures() {
@@ -770,10 +810,7 @@ void SyncDynamicSystrayTextures() {
             } else {
                 const char* fallbackDirectories[] = {
                     "/boot/system/apps",
-                    "/boot/system/preferences",
-                    "/boot/home/config/apps",
-                    "/boot/system/apps/Deskbar",
-                    "/boot/home/Desktop"
+                    "/boot/system/preferences"  
                 };
 
                 for (const char* dir : fallbackDirectories) {
@@ -843,25 +880,9 @@ void SyncDynamicSystrayTextures() {
 }
 
 
-std::map<team_id, int32> gInvisibleStreak;
-std::map<team_id, int32> gVisibleStreak;
-
-const int32 kThresholdMinimize = 1;   
-const int32 kThresholdMaximize = 33;  
 
 
-// Global communication flags (or place them in an accessible global/namespace config struct)
-bool autoHideEnabled; 
-bool showSystemTray; 
 
-enum {
-    MSG_AUTOHIDE_TOGGLED = 'ahtg',
-    MSG_SYSTEMTRAY_TOGGLED = 'sttg' 
-};
-
-std::set<std::string> gFavoritePaths; 
-
-void SaveConfiguration(); 
 
 
 
@@ -1717,166 +1738,7 @@ public:
 };
 
 
-// =========================================================================
-// MODERN OPENGL FRAMEBUFFER EXTENSION PROTOTYPES FOR HAIKU OS
-// =========================================================================
-typedef void (APIENTRY * PFNGLGENFRAMEBUFFERSPROC) (GLsizei n, GLuint *framebuffers);
-typedef void (APIENTRY * PFNGLBINDFRAMEBUFFERPROC) (GLenum target, GLuint framebuffer);
-typedef void (APIENTRY * PFNGLFRAMEBUFFERTEXTURE2DPROC) (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
-typedef GLenum (APIENTRY * PFNGLCHECKFRAMEBUFFERSTATUSPROC) (GLenum target);
 
-// Global function pointers
-PFNGLGENFRAMEBUFFERSPROC          glGenFramebuffers = nullptr;
-PFNGLBINDFRAMEBUFFERPROC          glBindFramebuffer = nullptr;
-PFNGLFRAMEBUFFERTEXTURE2DPROC      glFramebufferTexture2D = nullptr;
-PFNGLCHECKFRAMEBUFFERSTATUSPROC   glCheckFramebufferStatus = nullptr;
-
-
-struct HaikuRect {
-    float left, top, right, bottom;
-    
-    bool Contains(float x, float y) const {
-        return (x >= left && x <= right && y >= top && y <= bottom);
-    }
-    
-    float Width() const { 
-        return right - left; 
-    }
-};
-
-
-struct HaikuPoint {
-    float x;
-    float y;
-};
-
-struct HaikuTexture {
-    GLuint id = 0;
-    int width = 0;
-    int height = 0;
-};
-
-struct BrowserFileItem {
-    std::string name;
-    HaikuTexture icon;
-    HaikuTexture textTex;
-    int textW = 0, textH = 0;
-    HaikuRect clickBounds;
-    bool isFolder;
-    std::string fullPath;
-};
-
-struct TaskbarItem {
-    std::string title;       
-    std::string appName;     
-    HaikuTexture icon;       
-    bool isMinimized;       
-    bool* openStateFlag;     
-    bool* minimizeStateFlag; 
-    team_id teamId;       
-    int32 windowIndex;       
-};
-
-
-
-
-
-// 2. Complex Structural Groupings Dependent on Base Types
-struct DesktopIconItem {
-    std::string name;
-    HaikuTexture texture;       // Core 48x48 icon file asset
-    HaikuTexture textTexture;   // Dynamic text string label texture
-    HaikuRect bounds;
-    HaikuRect textBounds;       // Layout boundaries for label text box below the icon
-    bool isFolder;
-};
-
-
-
-enum {
-    BG_MODE_CENTER  = 1,
-    BG_MODE_TILE    = 2,
-    BG_MODE_STRETCH = 3,
-    BG_MODE_SCALE   = 4
-};
-
-status_t ForceActiveWallpaperMode(int32 newMode) {
-    BPath desktopPath;
-    status_t status = find_directory(B_DESKTOP_DIRECTORY, &desktopPath);
-    if (status != B_OK) return status;
-
-    BNode desktopNode(desktopPath.Path());
-    status = desktopNode.InitCheck();
-    if (status != B_OK) return status;
-
-    attr_info info;
-    status = desktopNode.GetAttrInfo("be:bgndimginfo", &info);
-    if (status != B_OK || info.size <= 0) return status;
-
-    char* buffer = new(std::nothrow) char[info.size];
-    if (buffer == nullptr) return B_NO_MEMORY;
-
-    // 1. Read the current configuration message
-    if (desktopNode.ReadAttr("be:bgndimginfo", info.type, 0, buffer, info.size) != info.size) {
-        delete[] buffer;
-        return B_IO_ERROR;
-    }
-
-    BMessage container;
-    status = container.Unflatten(buffer);
-    delete[] buffer; 
-    if (status != B_OK) return status;
-
-    // 2. Identify the active workspace mask to target the correct array item
-    int32 currentWorkspaceIndex = current_workspace();
-    uint32 currentWorkspaceMask = 1 << currentWorkspaceIndex;
-    bool matchedAndUpdated = false;
-
-    // 3. Loop through indices to locate our active workspace entry
-    for (int32 index = 0; ; index++) {
-        int32 workspaceMask = 0;
-        if (container.FindInt32("be:bgndimginfoworkspaces", index, &workspaceMask) != B_OK) {
-            break; 
-        }
-
-        if ((workspaceMask & currentWorkspaceMask) != 0) {
-            status = container.ReplaceInt32("be:bgndimginfomode", index, newMode);
-            if (status == B_OK) {
-                matchedAndUpdated = true;
-            }
-            break; 
-        }
-    }
-
-    // Fallback to index 0 if workspace mapping wasn't matched explicitly
-    if (!matchedAndUpdated) {
-        status = container.ReplaceInt32("be:bgndimginfomode", 0, newMode);
-        if (status != B_OK) return status;
-    }
-
-    // 4. Flatten the updated BMessage back into raw bytes
-    BMallocIO mallocIO;
-    status = container.Flatten(&mallocIO);
-    if (status != B_OK) return status;
-
-    // 5. Rewrite the data back into Tracker's persistent node attribute
-    ssize_t bytesWritten = desktopNode.WriteAttr(
-        "be:bgndimginfo", 
-        info.type, 
-        0, 
-        mallocIO.Buffer(), 
-        mallocIO.BufferLength()
-    );
-
-    if (bytesWritten != (ssize_t)mallocIO.BufferLength()) {
-        return B_IO_ERROR;
-    }
-
-    // 6. Force Tracker to refresh by executing the native Haiku background refresher command
-    std::system("hey Tracker 'wbre' to Desktop");
-
-    return B_OK;
-}
 
 
 
@@ -1948,13 +1810,6 @@ BString GetActiveHaikuWallpaperPath() {
 
     return targetWallpaperPath;
 }
-
-
-
-
-
-
-
 
 
 // =========================================================================
@@ -2053,120 +1908,9 @@ public:
         std::cout << "[Tracker window] Scrolled canvas position offset: " << fScrollOffset << std::endl;
     }
 
-void SyncDockWithRunningDeskbarApps() {
-    // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
-    // =================================================================
-    for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
-        // Look inside your existing TaskbarItem layout parameters
-        if (fTaskbarWindows[i].icon.id > 0) {
-            // Force OpenGL to instantly liberate the graphic texture memory allocations
-            glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
-            fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
-        }
-    }
-    
-    // 1. Keep a local backup so we don't blow away our click modifications
-    std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
-    fTaskbarWindows.clear();
 
-    std::vector<std::string> processedSignatures;
-
-    // Fetch the absolute active app info once up front to optimize the loop
-    app_info activeAppInfo;
-    team_id activeTeamId = -1;
-    if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-        activeTeamId = activeAppInfo.team;
-    }
-
-    // 2. Query the global Haiku roster for all active running teams
-    BList teamList;
-    be_roster->GetAppList(&teamList);
-
-    int32 count = teamList.CountItems();
-    for (int32 i = 0; i < count; ++i) {
-        team_id id = (team_id)(addr_t)teamList.ItemAt(i);
-        
-        app_info info;
-        // Hide background apps and/or other apps we don't want to see.
-        if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
-            if ((info.flags & B_BACKGROUND_APP) != 0) continue;
-            if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
-
-            std::string appSignature(info.signature);
-            
-            // --- MODIFIED EXCLUSIVE DUPLICATE FILTER FOR ICEWEASEL ONLY ---
-            // =================================================================
-            bool isDuplicate = false;
-            if (appSignature == "application/x-vnd.iceweasel") {
-                for (const auto& sig : processedSignatures) {
-                    if (sig == appSignature) {
-                        isDuplicate = true; 
-                        break;
-                    }
-                }
-            }
-            if (isDuplicate) continue; // Skip subsequent Iceweasel teams, allow all other apps
-
-            BEntry entry(&info.ref);
-            if (entry.InitCheck() != B_OK) continue;
-
-            char nameBuf[B_FILE_NAME_LENGTH];
-            entry.GetName(nameBuf);
-            std::string appTitle(nameBuf);
-
-            if (appTitle == "Deskbar") {
-                continue;
-            }
-
-            BPath path;
-            entry.GetPath(&path);
-
-            TaskbarItem openApp;
-            openApp.title = appTitle;
-            openApp.icon = LoadIconFromNode(path.Path(), 128); 
-            openApp.teamId = id; 
-
-            // --- FIXED STATE RESTORE LAYER WITH FOREGROUND CHECK ---
-            bool foundOldInstance = false;
-            for (const auto& oldWin : oldTaskbarWindows) {
-                if (oldWin.teamId == id) {
-                    openApp.isMinimized = oldWin.isMinimized;
-                    foundOldInstance = true;
-                    break;
-                }
-            }
-
-            // CORRECTION: If it's a completely new application node or our dock app itself 
-            // currently holds stolen click focus, evaluate it cleanly via the roster information.
-            if (!foundOldInstance || activeTeamId == id) {
-                // If it's the absolute front window, it is not minimized
-                if (activeTeamId == id) {
-                    openApp.isMinimized = false;
-                } 
-                // If our dock app currently holds focus, fallback safely to its previous state 
-                // or assume it's minimized if it wasn't tracked yet and isn't us
-                else if (activeTeamId == be_app->Team()) {
-                    openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
-                } 
-                else {
-                    openApp.isMinimized = true;
-                }
-            }
-
-            static bool sAlwaysTrue = true;
-            openApp.openStateFlag = &sAlwaysTrue;
-            openApp.minimizeStateFlag = &openApp.isMinimized; 
-
-            // Store signatures to maintain historical state tracking for the filtered targets
-            processedSignatures.push_back(appSignature);
-            fTaskbarWindows.push_back(openApp);
-        }
-    }
-}
-
-/*
-void SyncDockWithRunningDeskbarApps() {
-		// --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
+	void SyncDockWithRunningDeskbarApps() {
+	    // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
 	    // =================================================================
 	    for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
 	        // Look inside your existing TaskbarItem layout parameters
@@ -2176,7 +1920,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
 	        }
 	    }
-		
+	    
 	    // 1. Keep a local backup so we don't blow away our click modifications
 	    std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
 	    fTaskbarWindows.clear();
@@ -2205,13 +1949,19 @@ void SyncDockWithRunningDeskbarApps() {
 	            if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
 	
 	            std::string appSignature(info.signature);
+	            
+	            // --- MODIFIED EXCLUSIVE DUPLICATE FILTER FOR ICEWEASEL ONLY ---
+	            // =================================================================
 	            bool isDuplicate = false;
-	            for (const auto& sig : processedSignatures) {
-	                if (sig == appSignature && !appSignature.empty()) {
-	                    isDuplicate = true; break;
+	            if (appSignature == "application/x-vnd.iceweasel") {
+	                for (const auto& sig : processedSignatures) {
+	                    if (sig == appSignature) {
+	                        isDuplicate = true; 
+	                        break;
+	                    }
 	                }
 	            }
-	            if (isDuplicate) continue; 
+	            if (isDuplicate) continue; // Skip subsequent Iceweasel teams, allow all other apps
 	
 	            BEntry entry(&info.ref);
 	            if (entry.InitCheck() != B_OK) continue;
@@ -2263,14 +2013,13 @@ void SyncDockWithRunningDeskbarApps() {
 	            openApp.openStateFlag = &sAlwaysTrue;
 	            openApp.minimizeStateFlag = &openApp.isMinimized; 
 	
+	            // Store signatures to maintain historical state tracking for the filtered targets
 	            processedSignatures.push_back(appSignature);
 	            fTaskbarWindows.push_back(openApp);
 	        }
 	    }
 	}
-*/
-   
-   
+
 
 
 	struct TrackerMenuArgs {
@@ -3348,7 +3097,7 @@ void SyncDockWithRunningDeskbarApps() {
 
                 	
 
-       void HandleMouseInput(int x, int y, Uint32 buttonState) {    	
+   void HandleMouseInput(int x, int y, Uint32 buttonState) {    	
         fMouseX = x; fMouseY = y;
         fIsResizing = false;
        if (fShowMainMenu && !fMainMenuBounds.Contains(x, y)) {
@@ -4384,48 +4133,48 @@ private:
     }
 
 
-void FetchHaikuMixerVolume() {
-    uint32 ticksNow = SDL_GetTicks();
-    if (ticksNow - fLastVolumeCheckTime < 250) return; // Rate-limit checking to save CPU
-    fLastVolumeCheckTime = ticksNow;
-
-    BMediaRoster* roster = BMediaRoster::Roster();
-    if (!roster) return;
-
-    media_node mixerNode;
-    if (roster->GetAudioMixer(&mixerNode) == B_OK) {
-        BParameterWeb* parameterWeb = nullptr;
-        // Query the active hardware routing configuration graph properties
-        if (roster->GetParameterWebFor(mixerNode, &parameterWeb) == B_OK && parameterWeb != nullptr) {
-            int32 count = parameterWeb->CountParameters();
-            for (int32 i = 0; i < count; i++) {
-                BParameter* param = parameterWeb->ParameterAt(i);
-                // Look for the absolute master output volume gain slider controller item
-                if (param && (param->Type() == BParameter::B_CONTINUOUS_PARAMETER) &&
-                    (strcmp(param->Kind(), B_MASTER_GAIN) == 0 || strcmp(param->Name(), "Master") == 0)) {
-                    
-                    BContinuousParameter* gainSlider = static_cast<BContinuousParameter*>(param);
-                    float rawGain = 0.0f;
-                    bigtime_t lastChanged;
-                    size_t bytesRead = sizeof(float);
-                    
-                    if (gainSlider->GetValue(&rawGain, &bytesRead, &lastChanged) == B_OK) {
-                        float minGain = gainSlider->MinValue();
-                        float maxGain = gainSlider->MaxValue();
-                        // Normalize the raw DB float metrics directly into a clean 0.0f - 1.0f range
-                        fCurrentVolumeLevel = (rawGain - minGain) / (maxGain - minGain);
-                        if (fCurrentVolumeLevel < 0.0f) fCurrentVolumeLevel = 0.0f;
-                        if (fCurrentVolumeLevel > 1.0f) fCurrentVolumeLevel = 1.0f;
-                    }
-                    break;
-                }
-            }
-            delete parameterWeb; // Clean up parameter tree to prevent memory leaks
-        }
-        // Release hardware node thread reference counters
-        roster->ReleaseNode(mixerNode);
-    }
-}
+	void FetchHaikuMixerVolume() {
+	    uint32 ticksNow = SDL_GetTicks();
+	    if (ticksNow - fLastVolumeCheckTime < 250) return; // Rate-limit checking to save CPU
+	    fLastVolumeCheckTime = ticksNow;
+	
+	    BMediaRoster* roster = BMediaRoster::Roster();
+	    if (!roster) return;
+	
+	    media_node mixerNode;
+	    if (roster->GetAudioMixer(&mixerNode) == B_OK) {
+	        BParameterWeb* parameterWeb = nullptr;
+	        // Query the active hardware routing configuration graph properties
+	        if (roster->GetParameterWebFor(mixerNode, &parameterWeb) == B_OK && parameterWeb != nullptr) {
+	            int32 count = parameterWeb->CountParameters();
+	            for (int32 i = 0; i < count; i++) {
+	                BParameter* param = parameterWeb->ParameterAt(i);
+	                // Look for the absolute master output volume gain slider controller item
+	                if (param && (param->Type() == BParameter::B_CONTINUOUS_PARAMETER) &&
+	                    (strcmp(param->Kind(), B_MASTER_GAIN) == 0 || strcmp(param->Name(), "Master") == 0)) {
+	                    
+	                    BContinuousParameter* gainSlider = static_cast<BContinuousParameter*>(param);
+	                    float rawGain = 0.0f;
+	                    bigtime_t lastChanged;
+	                    size_t bytesRead = sizeof(float);
+	                    
+	                    if (gainSlider->GetValue(&rawGain, &bytesRead, &lastChanged) == B_OK) {
+	                        float minGain = gainSlider->MinValue();
+	                        float maxGain = gainSlider->MaxValue();
+	                        // Normalize the raw DB float metrics directly into a clean 0.0f - 1.0f range
+	                        fCurrentVolumeLevel = (rawGain - minGain) / (maxGain - minGain);
+	                        if (fCurrentVolumeLevel < 0.0f) fCurrentVolumeLevel = 0.0f;
+	                        if (fCurrentVolumeLevel > 1.0f) fCurrentVolumeLevel = 1.0f;
+	                    }
+	                    break;
+	                }
+	            }
+	            delete parameterWeb; // Clean up parameter tree to prevent memory leaks
+	        }
+	        // Release hardware node thread reference counters
+	        roster->ReleaseNode(mixerNode);
+	    }
+	}
 
 
 
@@ -4614,12 +4363,9 @@ void FetchHaikuMixerVolume() {
     
     bool      fShowMainMenu = false;
     HaikuRect fMainMenuBounds = { 0.0f, 0.0f, 0.0f, 0.0f };    
-  
-    std::string fCurrentPath;
-    std::vector<BrowserFileItem> fBrowserItems;
-    
+
     // Tracking parameters for mouse interaction
-    uint32 fLastClickTime = 0;
+   // uint32 fLastClickTime = 0;
     int fLastClickedIndex = -1;  
     
     float fScrollOffset = 0.0f;
@@ -4643,12 +4389,6 @@ void FetchHaikuMixerVolume() {
     float fResizeStartY = 0.0f;
     float fResizeStartWidth = 0.0f;
     float fResizeStartHeight = 0.0f;
-
-    bool  fWindowIsMaximized = false;
-    float fSavedWindowX = 300.0f;
-    float fSavedWindowY = 200.0f;
-    float fSavedWindowW = 450.0f;
-    float fSavedWindowH = 300.0f;
     
     std::vector<TaskbarItem> fTaskbarWindows;
     HaikuRect fTrashRect; 
@@ -4793,7 +4533,7 @@ void SaveConfiguration() {
 // =========================================================================
 // ASYNC CPU MENU RUNNER 
 // =========================================================================
-void AsyncCpuMenuRunner::_DisplayProcessControllerMenu() {
+void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
     std::cout << "[CPU Graph] Initializing dynamic async system activity menu..." << std::endl;
 
     // 1. Create the base context menu shell container.
@@ -4826,8 +4566,7 @@ void AsyncCpuMenuRunner::_DisplayProcessControllerMenu() {
 
         // Keep core servers isolated from unexpected/accidental close clicks
         if (appName == "app_server" || appName == "input_server" || 
-            appName == "registrar"  || appName == "Deskbar" || 
-            appName == "hdesktop"   || appName == "Tracker" ||
+            appName == "registrar"  ||
             appName == "syslog_daemon") {
             continue;
         }
@@ -5054,12 +4793,11 @@ int main(int argc, char* argv[]) {
     int screenHeight = currentDisplayMode.h;
     
     int dockPanelW = screenWidth;
-    int dockPanelH = 160; 
+    int dockPanelH = 140; 
     int sensorHeight = 4; 
 
     // Use yExpanded to position the actual SDL window frame at the bottom
     int yExpanded  = screenHeight - dockPanelH; 
-    //int yCollapsed = screenHeight - sensorHeight; // Silences the second warning
 
     // Animation tracking (0.0f means elements draw normally inside the bottom window)
     float currentY = 0.0f;
@@ -5075,9 +4813,8 @@ int main(int argc, char* argv[]) {
         0, yExpanded,
         dockPanelW, dockPanelH,
         SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS
+        //SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP
     );
-
-
 
 
     if (!window) {
@@ -5087,7 +4824,6 @@ int main(int argc, char* argv[]) {
     }
 
 
-
     SDL_GLContext glContext = SDL_GL_CreateContext(window);
 
     if (!glContext) {
@@ -5095,16 +4831,15 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return -1;
     }
-
     
 
     SDL_GL_SetSwapInterval(1);
-    glViewport(0, 0, screenWidth, 160);
+    glViewport(0, 0, screenWidth, 140);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     
     // --- WALLPAPER RE-STITCH ALIGNMENT MATH ---
-    float panelTopY    = static_cast<float>(screenHeight) - 160.0f;
+    float panelTopY    = static_cast<float>(screenHeight) - 140.0f;
     float panelBottomY = static_cast<float>(screenHeight);
     
     gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
@@ -5158,6 +4893,7 @@ int main(int argc, char* argv[]) {
                 // =========================================================================
                 // ANTI-FOCUS HIJACK INTERCEPTION PROTOCOL
                 // =========================================================================
+                
                 if (incomingEventPackage.type == SDL_WINDOWEVENT) {
                     if (incomingEventPackage.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
                         incomingEventPackage.window.event == SDL_WINDOWEVENT_TAKE_FOCUS) {
@@ -5177,6 +4913,7 @@ int main(int argc, char* argv[]) {
                         continue; 
                     }
                 }
+                
                 // =========================================================================
 
                 if (incomingEventPackage.type == SDL_QUIT) {
@@ -5209,7 +4946,7 @@ int main(int argc, char* argv[]) {
 				    Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
 				
 				    // =========================================================================
-				    // BUGFIX FIX: BLOCK ENGINE CLICKS/HOVERS IF THE DOCK IS HIDDEN
+				    // BLOCK ENGINE CLICKS/HOVERS IF THE DOCK IS HIDDEN
 				    // =========================================================================
 				    // If hidden, only pass mouse input if the pointer is within the active sensor strip bounds.
 				    if (dockState == STATE_HIDDEN && !cursorIsInsideDock) {
@@ -5219,7 +4956,7 @@ int main(int argc, char* argv[]) {
 				    }
 				    // =========================================================================
 				
-				    int hiddenScreenOffset = screenHeight - 165; 
+				    int hiddenScreenOffset = screenHeight - 140; 
 				    int adjustedMouseY = mouseY + hiddenScreenOffset;
 				
 				    desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
@@ -5232,6 +4969,7 @@ int main(int argc, char* argv[]) {
 				            desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
 				            
 				            // Defensive click-down drop to ensure Apps stays on top
+				            /*
 				            if (be_app && be_app->Lock()) {                            	
 				                int32 windowCount = be_app->CountWindows();
 				                if (windowCount > 0) {
@@ -5242,8 +4980,11 @@ int main(int argc, char* argv[]) {
 				                    }
 				                }
 				                be_app->Unlock();
+				                
 				            }
+				            */
 				        }
+				        
 				    }
 				
 				    needsRender = true; 
@@ -5258,8 +4999,6 @@ int main(int argc, char* argv[]) {
 
         // =========================================================================
         // NATIVE HAIKU BOUNDARY & INTERNAL SLIDE TRIGGER LOGIC (STAGE 3 - FIXED)
-
-
         if (be_app && be_app->Lock()) {
             int32 windowCount = be_app->CountWindows();
             if (windowCount > 0) {
@@ -5292,7 +5031,6 @@ int main(int argc, char* argv[]) {
         // =========================================================================
         // NATIVE HAIKU BOUNDARY & LOCAL OFFSET CONSTRAINTS
         // =========================================================================
-        //bool autoHideEnabled = true;
 
         // FIX: Directly reading your public field variable member token cleanly!
         float dockWidth = desktopEngine.fLastCalculatedWidth;
@@ -5366,7 +5104,7 @@ int main(int argc, char* argv[]) {
         static int lastSentY = -1;
         static uint32 lastSentButtons = 0;
 
-        int hiddenScreenOffset = screenHeight - 165; 
+        int hiddenScreenOffset = screenHeight - 140;
         int adjustedMouseY = localMouseY + hiddenScreenOffset;
 
         if (!cursorIsInsideDock) {
