@@ -5,7 +5,7 @@ CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/d
 
 # Target binary definitions
 GUI_TARGET = hdesktop
-VERSION = 1.0.16
+VERSION = 1.0.17
 PACKAGE_DIR := build/package
 
 # Shared target architectures

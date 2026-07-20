@@ -4388,7 +4388,7 @@ private:
     HaikuRect fMainMenuBounds = { 0.0f, 0.0f, 0.0f, 0.0f };    
 
     // Tracking parameters for mouse interaction
-   // uint32 fLastClickTime = 0;
+    uint32 fLastClickTime = 0;
     int fLastClickedIndex = -1;  
     
     float fScrollOffset = 0.0f;
@@ -4882,7 +4882,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.16"; 
+    const char* localVersion = "v1.0.17"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -4913,7 +4913,7 @@ int main(int argc, char* argv[]) {
     int localMouseY = 0;
     uint32 nativeButtons = 0;
     bool cursorIsInsideDock = false;
-	//bool dockAlwaysOnTop = true; 
+
     while (appExecuting) {
         if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
             do {
@@ -4985,9 +4985,6 @@ int main(int argc, char* argv[]) {
                     // ---> DYNAMIC HOVER LAYERING SYSTEM REMOVED FROM HERE <---
 
                     if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
-                        // ... rest of your original click actions ...
-
-
 				        if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
 				            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
 				            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
@@ -5078,7 +5075,7 @@ int main(int argc, char* argv[]) {
         }
 
         // =========================================================================
-        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM (FIXED)
+        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM (TRACKER COMPATIBLE)
         // =========================================================================
         static bool lastHoverState = false; // Tracks state shifts across frames
         
@@ -5090,18 +5087,26 @@ int main(int argc, char* argv[]) {
                 for (int32 i = 0; i < windowCount; i++) {
                     BWindow* win = be_app->WindowAt(i);
                     if (win != nullptr && win->Lock()) {
-                        win->SetFeel(B_NORMAL_WINDOW_FEEL);
-                        uint32 flags = win->Flags() | B_AVOID_FOCUS;
+                        uint32 flags = win->Flags();
 
                         if (cursorIsInsideDock) {
-                            // Pop forward safely when entering the bounds
-                            win->Activate(true);
+                            // 1. Elevate instantly above all standard applications
+                            win->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
                             flags &= ~B_AVOID_FRONT;
+                            flags &= ~B_AVOID_FOCUS;
+                            
+                            win->Activate(true);
                         } else {
-                            // Sink behind other windows instantly when leaving in ANY direction
-                            win->SendBehind(nullptr);
+                            // 2. Return to normal window layer
+                            win->SetFeel(B_NORMAL_WINDOW_FEEL);
                             flags |= B_AVOID_FRONT;
+                            flags |= B_AVOID_FOCUS;
+                            
+                            // 3. Drop exactly once. This gives focus back to Tracker
+                            // without trapping the window behind the wallpaper loop.
+                            win->SendBehind(nullptr);
                         }
+                        
                         win->SetFlags(flags);
                         win->Unlock();
                         break;
@@ -5112,6 +5117,7 @@ int main(int argc, char* argv[]) {
             needsRender = true;
         }
         // =========================================================================
+
 
         if (autoHideEnabled) {
             if (cursorIsInsideDock) {
