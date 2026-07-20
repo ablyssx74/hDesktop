@@ -64,12 +64,14 @@ BWindow* gActiveConfigInstance = nullptr;
 std::set<std::string> gFavoritePaths; 
 bool autoHideEnabled; 
 bool showSystemTray; 
+bool dockAlwaysOnTop;
 void SaveConfiguration(); 
 
 enum {
 	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
-    MSG_AUTOHIDE_TOGGLED = 'ahtg',
-    MSG_SYSTEMTRAY_TOGGLED = 'sttg' 
+    MSG_AUTOHIDE_TOGGLED   = 'ahtg',
+    MSG_SYSTEMTRAY_TOGGLED = 'sttg',
+    MSG_AUTORAISE_TOGGLED  = 'srdt' 
 };
 
 struct TrayItem {
@@ -890,28 +892,37 @@ class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
 	BCheckBox* fSystemTrayCheckbox;
+	BCheckBox* fAutoRaiseCheckbox;
 public:
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255});
 
-        BRect checkboxRect(25.0f, 115.0f, frame.Width() - 25.0f, 135.0f);
+        // Row 1: Dropped down slightly to account for the tighter shutdown button
+        BRect checkboxRect(25.0f, 105.0f, frame.Width() - 25.0f, 120.0f);
         fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide Dock", 
             new BMessage(MSG_AUTOHIDE_TOGGLED));
         fAutoHideCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
         fAutoHideCheckbox->SetValue(autoHideEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoHideCheckbox);
 
-        // =========================================================================
-        // NEW INTERFACE INJECTION: SYSTEM TRAY HIDE/SHOW TOGGLE SUB-OPTION
-        // Placed 25 vertical pixels directly under the auto-hide slider layout row
-        // =========================================================================
-        BRect trayCheckboxRect(25.0f, 140.0f, frame.Width() - 25.0f, 160.0f);
+        // Row 2: Placed tightly under Row 1
+        BRect trayCheckboxRect(25.0f, 125.0f, frame.Width() - 25.0f, 140.0f);
         fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", "Show System Tray in Dock", 
             new BMessage(MSG_SYSTEMTRAY_TOGGLED));
         fSystemTrayCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
         fSystemTrayCheckbox->SetValue(showSystemTray ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSystemTrayCheckbox);
+
+        // Row 3: Placed tightly under Row 2
+        BRect autoRaiseRect(25.0f, 145.0f, frame.Width() - 25.0f, 160.0f);
+        fAutoRaiseCheckbox = new BCheckBox(autoRaiseRect, "auto_raise_cb", "Enable Dock Auto-raise", 
+            new BMessage(MSG_AUTORAISE_TOGGLED));
+        fAutoRaiseCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
+        fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fAutoRaiseCheckbox);
     }
+
+
 
     virtual void Draw(BRect updateRect) {
         float canvasWidth = Bounds().Width();
@@ -923,11 +934,11 @@ public:
         
         BString headerStr("hdesktop settings");
         float titleWidth = StringWidth(headerStr.String());
-        DrawString(headerStr.String(), BPoint((canvasWidth - titleWidth) / 2.0f, 30.0f));
+        DrawString(headerStr.String(), BPoint((canvasWidth - titleWidth) / 2.0f, 25.0f));
 
         // 2. Draw Decorative Header Separator line
         SetHighColor(rgb_color{50, 52, 60, 255}); 
-        StrokeLine(BPoint(15.0f, 45.0f), BPoint(canvasWidth - 15.0f, 45.0f));
+        StrokeLine(BPoint(15.0f, 35.0f), BPoint(canvasWidth - 15.0f, 35.0f));
 
         // Get live mouse position for interactive buttons
         BPoint cursorPoint;
@@ -935,8 +946,9 @@ public:
         GetMouse(&cursorPoint, &transitButtons, false);
         SetDrawingMode(B_OP_ALPHA);
 
-        // 3. Define the Interactive "Shutdown App" Button Metrics
-        BRect shutdownBtnRect(25.0f, 65.0f, canvasWidth - 25.0f, 100.0f);
+        // 3. Define the Interactive "Shutdown App" Button Metrics (COMPRESSED)
+        // Shrunk vertical footprint from 35px down to 24px (Y: 50 to 74)
+        BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
         
         if (shutdownBtnRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{220, 60, 60, 45});
@@ -953,11 +965,12 @@ public:
         SetFontSize(12.0f);
         BString shutdownText("Shutdown App");
         float shutdownTextW = StringWidth(shutdownText.String());
-        DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 87.0f));
+        DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
 
-        // 4. Standard Window Control "Close" button tracking metrics at footer
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, Bounds().Height() - 45.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, Bounds().Height() - 15.0f);
+        // 4. Standard Window Control "Close" button tracking metrics at footer (RAISED)
+        // Shifted upward into the clear view window zone (Y: 175 to 200)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 175.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 200.0f);
         
         if (closeBtnRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{100, 120, 160, 45});
@@ -972,8 +985,9 @@ public:
         
         BString btnText("close");
         float btnTextW = StringWidth(btnText.String());
-        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, Bounds().Height() - 25.0f));
+        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 192.0f));
     }
+
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
         Invalidate(); 
@@ -982,9 +996,12 @@ public:
     virtual void MouseDown(BPoint point) {
         float canvasWidth = Bounds().Width();
         
-        BRect shutdownBtnRect(25.0f, 65.0f, canvasWidth - 25.0f, 100.0f);
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, Bounds().Height() - 45.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, Bounds().Height() - 15.0f);
+        //  Coordinates match the new compressed 24px tall button (Y: 50 to 74)
+        BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
+
+        //  Coordinates match the newly raised close button position (Y: 175 to 200)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 175.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 200.0f);
         
         if (shutdownBtnRect.Contains(point)) {
             if (be_app) {
@@ -1000,11 +1017,13 @@ public:
             return;
         }
     }
+
     
     virtual void AttachedToWindow() {
         BView::AttachedToWindow();
         fAutoHideCheckbox->SetTarget(this);
-        fSystemTrayCheckbox->SetTarget(this); // Route message packets to this looper thread
+        fSystemTrayCheckbox->SetTarget(this);
+        fAutoRaiseCheckbox->SetTarget(this);
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -1014,12 +1033,16 @@ public:
                 SaveConfiguration();
                 break;
             }
-            // =========================================================================
-            // NEW INTERACTION INTERCEPTOR EVENT TRACKER
-            // =========================================================================
+
             case MSG_SYSTEMTRAY_TOGGLED: {
                 showSystemTray = (fSystemTrayCheckbox->Value() == B_CONTROL_ON);
-                SaveConfiguration(); // Instantly write preference parameters back to disk storage
+                SaveConfiguration(); 
+                break;
+            }
+            
+            case MSG_AUTORAISE_TOGGLED: {
+                dockAlwaysOnTop = (fAutoRaiseCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
                 break;
             }
             default:
@@ -2673,9 +2696,9 @@ public:
 
 				
 			
-		            // -----------------------------------------------------------
+		        // -----------------------------------------------------------
 					
-		            // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
+		        // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
 	            #ifndef AS_MINIMIZE_TEAM
 	            #define AS_MINIMIZE_TEAM 5
 	            #endif
@@ -4493,6 +4516,9 @@ void LoadConfiguration() {
             if (settings.FindBool("sys_tray", &savedValue) == B_OK) {
                 showSystemTray = savedValue;
             }
+            if (settings.FindBool("auto_raise", &savedValue) == B_OK) {
+                dockAlwaysOnTop = savedValue;
+            }
             
             // 2. Recover the favorites string index array
             const char* favPath = nullptr;
@@ -4517,8 +4543,9 @@ void SaveConfiguration() {
         BMessage settings;
         
         // 1. Pack existing settings
-        settings.AddBool("auto_hide", autoHideEnabled);
-        settings.AddBool("sys_tray", showSystemTray);
+        settings.AddBool("auto_hide",  autoHideEnabled);
+        settings.AddBool("sys_tray",   showSystemTray);
+        settings.AddBool("auto_raise", dockAlwaysOnTop);
         
         // 2. Pack all live favorites keys sequentially into the same field name
         std::set<std::string>::iterator it;
@@ -4886,7 +4913,7 @@ int main(int argc, char* argv[]) {
     int localMouseY = 0;
     uint32 nativeButtons = 0;
     bool cursorIsInsideDock = false;
-	
+	//bool dockAlwaysOnTop = true; 
     while (appExecuting) {
         if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
             do {
@@ -4938,30 +4965,29 @@ int main(int argc, char* argv[]) {
                         appExecuting = false;
                     }
                 }
-		            else if (incomingEventPackage.type == SDL_MOUSEMOTION || 
-				         incomingEventPackage.type == SDL_MOUSEBUTTONDOWN ||
-				         incomingEventPackage.type == SDL_MOUSEBUTTONUP) {
-				    
-				    int mouseX, mouseY;
-				    Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
-				
-				    // =========================================================================
-				    // BLOCK ENGINE CLICKS/HOVERS IF THE DOCK IS HIDDEN
-				    // =========================================================================
-				    // If hidden, only pass mouse input if the pointer is within the active sensor strip bounds.
-				    if (dockState == STATE_HIDDEN && !cursorIsInsideDock) {
-				        // Drop the event! Do not feed it to desktopEngine.
-				        needsRender = true;
-				        continue;
-				    }
-				    // =========================================================================
-				
-				    int hiddenScreenOffset = screenHeight - 140; 
-				    int adjustedMouseY = mouseY + hiddenScreenOffset;
-				
-				    desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
-				
-				    if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
+                else if (incomingEventPackage.type == SDL_MOUSEMOTION || 
+                         incomingEventPackage.type == SDL_MOUSEBUTTONDOWN ||
+                         incomingEventPackage.type == SDL_MOUSEBUTTONUP) {
+                    
+                    int mouseX, mouseY;
+                    Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
+                
+                    if (dockState == STATE_HIDDEN && !cursorIsInsideDock) {
+                        needsRender = true;
+                        continue;
+                    }
+                
+                    int hiddenScreenOffset = screenHeight - 140; 
+                    int adjustedMouseY = mouseY + hiddenScreenOffset;
+                
+                    desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
+                
+                    // ---> DYNAMIC HOVER LAYERING SYSTEM REMOVED FROM HERE <---
+
+                    if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
+                        // ... rest of your original click actions ...
+
+
 				        if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
 				            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
 				            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
@@ -5051,8 +5077,45 @@ int main(int argc, char* argv[]) {
                                   localMouseY >= 0 && localMouseY < dockPanelH);
         }
 
+        // =========================================================================
+        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM (FIXED)
+        // =========================================================================
+        static bool lastHoverState = false; // Tracks state shifts across frames
+        
+        if (dockAlwaysOnTop && (cursorIsInsideDock != lastHoverState)) {
+            lastHoverState = cursorIsInsideDock; // Update edge filter state
+            
+            if (be_app && be_app->Lock()) {
+                int32 windowCount = be_app->CountWindows();
+                for (int32 i = 0; i < windowCount; i++) {
+                    BWindow* win = be_app->WindowAt(i);
+                    if (win != nullptr && win->Lock()) {
+                        win->SetFeel(B_NORMAL_WINDOW_FEEL);
+                        uint32 flags = win->Flags() | B_AVOID_FOCUS;
+
+                        if (cursorIsInsideDock) {
+                            // Pop forward safely when entering the bounds
+                            win->Activate(true);
+                            flags &= ~B_AVOID_FRONT;
+                        } else {
+                            // Sink behind other windows instantly when leaving in ANY direction
+                            win->SendBehind(nullptr);
+                            flags |= B_AVOID_FRONT;
+                        }
+                        win->SetFlags(flags);
+                        win->Unlock();
+                        break;
+                    }
+                }
+                be_app->Unlock();
+            }
+            needsRender = true;
+        }
+        // =========================================================================
+
         if (autoHideEnabled) {
             if (cursorIsInsideDock) {
+
                 if (!hidingSettled) {
                     targetY = 0.0f; 
                     if (dockState == STATE_HIDDEN || dockState == STATE_HIDING) {
