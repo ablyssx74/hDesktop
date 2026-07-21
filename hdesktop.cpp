@@ -2757,23 +2757,31 @@ public:
 	            #define AS_BRING_TEAM_TO_FRONT 6
 	            #endif
 	
+                // =========================================================================
+                // SINGLE-CLICK LATCH GUARD: Blocks holding down the mouse button from re-triggering
+                // =========================================================================
+                static std::map<std::pair<team_id, int32>, bool> isButtonLatchedMap;
+                std::pair<team_id, int32> actionKey(activeTaskWin.teamId, static_cast<int32>(w));
+
+                if (isButtonLatchedMap[actionKey]) {
+                    return; 
+                }
+                
+                isButtonLatchedMap[actionKey] = true;
+                // =========================================================================
+
 	            if (activeTaskWin.isMinimized == false) {
 	                std::cout << "[APP_SERVER ROUTING] ---> Action: MINIMIZE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
-	                // Establish direct connection straight to the central window management loop
 	                BPrivate::AppServerLink link;
 	                link.StartMessage(AS_MINIMIZE_TEAM);
 	                link.Attach<team_id>(activeTaskWin.teamId);
 	                link.Flush();
 	                
-	                // Safely drop window workspace focus via native roster management
 	                be_roster->ActivateApp(-1);
 	                activeTaskWin.isMinimized = true; 
 	            } 
 	            else {
-	                // =========================================================================
-	                // TARGETED SINK: INTERCEPT COLD-START TRACKER RESTORATIONS
-	                // =========================================================================
 	                if (isTracker && button == SDL_BUTTON_LEFT) {
 	                    int32 fileFolderCount = 0;
 	                    int32 tokenCount = 0;
@@ -2783,28 +2791,21 @@ public:
 	                        for (int32 i = 0; i < tokenCount; ++i) {
 	                            client_window_info* wInfo = get_window_info(tokens[i]);
 	                            if (wInfo != nullptr) {
-	                                // FIX: Count all windows matching standard user filesystem frames.
-	                                // This includes minimized folders (look == 1), while excluding the 
-	                                // desktop background layer and hidden system modules.
-                                    // FIX: Check string contents instead of array address to clear compiler warnings
+                                    // FIX: Use index [0] to check if the first character is a null terminator
                                     if (wInfo->name[0] != '\0' && 
                                         strcmp(wInfo->name, "Tracker status") != 0 &&
                                         strcmp(wInfo->name, "Desktop") != 0 && 
                                         !BString(wInfo->name).EndsWith("/Desktop")) {
-                                        
                                         fileFolderCount++;
                                     }
-
 	                                free(wInfo);
 	                            }
 	                        }
 	                        free(tokens);
 	                    }
 
-	                    // If no real folder tracks are alive anywhere, open /boot/home
 	                    if (fileFolderCount == 0) {
 	                        std::cout << "[hDesktop Action] Tracker has 0 open folder paths. Launching /boot/home." << std::endl;
-	                        
 	                        BEntry entry("/boot/home");
 	                        entry_ref ref;
 	                        if (entry.GetRef(&ref) == B_OK) {
@@ -2814,14 +2815,13 @@ public:
 	                        }
 	                        
 	                        std::cout << "========================================\n" << std::endl;
+                            isButtonLatchedMap[actionKey] = false; 
 	                        return; 
 	                    }
 	                }
-	                // =========================================================================
 
 	                std::cout << "[APP_SERVER ROUTING] ---> Action: RESTORE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
-	                // First, pull the windows into active workspace focus pools natively
 	                app_info targetAppInfo;
 	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
 	                    be_roster->ActivateApp(targetAppInfo.team);
@@ -2829,7 +2829,6 @@ public:
 	                    be_roster->ActivateApp(activeTaskWin.teamId);
 	                }
 	                
-	                // Open low-level connection to bring every window surface frame to foreground
 	                BPrivate::AppServerLink link;
 	                link.StartMessage(AS_BRING_TEAM_TO_FRONT);
 	                link.Attach<team_id>(activeTaskWin.teamId);
@@ -2839,7 +2838,10 @@ public:
 	            }
 	            
 	            std::cout << "========================================\n" << std::endl;
+                
+                isButtonLatchedMap[actionKey] = false;
 	            return; 
+
 	        }
 	        
 	        currentX += size + padding;
@@ -5072,7 +5074,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.20"; 
+    const char* localVersion = "v1.0.21"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
