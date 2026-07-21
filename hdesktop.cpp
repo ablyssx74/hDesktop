@@ -4882,7 +4882,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.17"; 
+    const char* localVersion = "v1.0.18"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -4992,7 +4992,7 @@ int main(int argc, char* argv[]) {
 				            desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
 				            
 				            // Defensive click-down drop to ensure Apps stays on top
-				            /*
+				            
 				            if (be_app && be_app->Lock()) {                            	
 				                int32 windowCount = be_app->CountWindows();
 				                if (windowCount > 0) {
@@ -5005,7 +5005,7 @@ int main(int argc, char* argv[]) {
 				                be_app->Unlock();
 				                
 				            }
-				            */
+				            
 				        }
 				        
 				    }
