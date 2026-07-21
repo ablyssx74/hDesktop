@@ -55,7 +55,7 @@
 #include <View.h>
 #include <Window.h>
 #include <NavMenu.h> 
-
+#include <WindowInfo.h>
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -2610,24 +2610,75 @@ public:
 	            // =========================================================================
 	            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
 	            // =========================================================================
-	            // FIX: Explicitly exclude SDL_BUTTON_RIGHT (3) to prevent accidental closes!
-	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT && !isTracker) {
-	                std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
+	            // FIX: Removed !isTracker condition to let the middle click target Tracker
+	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
 	                
-	                BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
-	                if (targetAppMessenger.IsValid()) {
-	                    // Standard graceful exit request handled natively by the app loop thread
-	                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
-	                } else {
-	                    std::cout << "   [Fallback] Messenger invalid. Issuing kernel kill_team to free thread structures." << std::endl;
-	                    // Native Haiku OS kernel primitive to cleanly reclaim memory allocations from non-responsive teams
-	                    kill_team(activeTaskWin.teamId);
+	                if (isTracker) {
+	                    std::cout << "[SYSTEM ACTION] ---> Closing all Tracker folder windows gracefully via Scripting..." << std::endl;
+	                    
+	                    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+	                    if (trackerMessenger.IsValid()) {
+	                        // Query Tracker for the total count of windows currently active
+	                        BMessage countRequest(B_COUNT_PROPERTIES);
+	                        countRequest.AddSpecifier("Window");
+	                        
+	                        BMessage reply;
+	                        if (trackerMessenger.SendMessage(&countRequest, &reply) == B_OK) {
+	                            int32 totalWindows = 0;
+	                            if (reply.FindInt32("result", &totalWindows) == B_OK) {
+	                                
+	                                // Loop backwards through window indices to safely quit them without index shifts
+	                                for (int32 wIdx = totalWindows - 1; wIdx >= 0; --wIdx) {
+	                                    
+	                                    // Request the title of the window first so we can protect the Desktop
+	                                    BMessage titleRequest(B_GET_PROPERTY);
+	                                    titleRequest.AddSpecifier("Title");
+	                                    titleRequest.AddSpecifier("Window", wIdx);
+	                                    
+	                                    BMessage titleReply;
+	                                    BString winTitle = "";
+	                                    if (trackerMessenger.SendMessage(&titleRequest, &titleReply) == B_OK) {
+	                                        const char* nameStr;
+	                                        if (titleReply.FindString("result", &nameStr) == B_OK) {
+	                                            winTitle = nameStr;
+	                                        }
+	                                    }
+	                                    
+	                                    // CRITICAL SAFETY GUARD: Skip system windows and the desktop backdrop layer
+	                                    if (winTitle == "Desktop" || 
+	                                        winTitle == "Tracker status" || 
+	                                        winTitle.EndsWith("/Desktop") || 
+	                                        winTitle.Length() == 0) {
+	                                        continue; 
+	                                    }
+	                                    
+	                                    // Target the specific window index with a Quit request
+	                                    BMessage quitWindowMessage(B_QUIT_REQUESTED);
+	                                    quitWindowMessage.AddSpecifier("Window", wIdx);
+	                                    trackerMessenger.SendMessage(&quitWindowMessage);
+	                                }
+	                            }
+	                        }
+	                    }
+	                } 
+	                else {
+	                    // GENERAL APPLICATIONS: Standard clean closure sequence
+	                    std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
+	                    
+	                    BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
+	                    if (targetAppMessenger.IsValid()) {
+	                        targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+	                    } else {
+	                        std::cout << "   [Fallback] Messenger invalid. Issuing kernel kill_team to free thread structures." << std::endl;
+	                        kill_team(activeTaskWin.teamId);
+	                    }
 	                }
 	                
 	                fShowMainMenu = false;
 	                std::cout << "========================================\n" << std::endl;
 	                return; 
 	            }
+
 	
 	
 	            if (fShowMainMenu) {
@@ -2720,6 +2771,54 @@ public:
 	                activeTaskWin.isMinimized = true; 
 	            } 
 	            else {
+	                // =========================================================================
+	                // TARGETED SINK: INTERCEPT COLD-START TRACKER RESTORATIONS
+	                // =========================================================================
+	                if (isTracker && button == SDL_BUTTON_LEFT) {
+	                    int32 fileFolderCount = 0;
+	                    int32 tokenCount = 0;
+	                    int32* tokens = get_token_list(activeTaskWin.teamId, &tokenCount);
+	                    
+	                    if (tokens != nullptr) {
+	                        for (int32 i = 0; i < tokenCount; ++i) {
+	                            client_window_info* wInfo = get_window_info(tokens[i]);
+	                            if (wInfo != nullptr) {
+	                                // FIX: Count all windows matching standard user filesystem frames.
+	                                // This includes minimized folders (look == 1), while excluding the 
+	                                // desktop background layer and hidden system modules.
+                                    // FIX: Check string contents instead of array address to clear compiler warnings
+                                    if (wInfo->name[0] != '\0' && 
+                                        strcmp(wInfo->name, "Tracker status") != 0 &&
+                                        strcmp(wInfo->name, "Desktop") != 0 && 
+                                        !BString(wInfo->name).EndsWith("/Desktop")) {
+                                        
+                                        fileFolderCount++;
+                                    }
+
+	                                free(wInfo);
+	                            }
+	                        }
+	                        free(tokens);
+	                    }
+
+	                    // If no real folder tracks are alive anywhere, open /boot/home
+	                    if (fileFolderCount == 0) {
+	                        std::cout << "[hDesktop Action] Tracker has 0 open folder paths. Launching /boot/home." << std::endl;
+	                        
+	                        BEntry entry("/boot/home");
+	                        entry_ref ref;
+	                        if (entry.GetRef(&ref) == B_OK) {
+	                            BMessage message(B_REFS_RECEIVED);
+	                            message.AddRef("refs", &ref);
+	                            be_roster->Launch("application/x-vnd.Be-TRAK", &message);
+	                        }
+	                        
+	                        std::cout << "========================================\n" << std::endl;
+	                        return; 
+	                    }
+	                }
+	                // =========================================================================
+
 	                std::cout << "[APP_SERVER ROUTING] ---> Action: RESTORE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
 	                // First, pull the windows into active workspace focus pools natively
@@ -2746,10 +2845,7 @@ public:
 	        currentX += size + padding;
 	        evaluationSlotIdx++;
 	    }
-	    
 
-		
-		
 
 	    // =========================================================================
 	    // STEP C: EVALUATE SYSTEM TRAY COMPONENTS ( TRASH BIN -> TRAY -> CLOCK -> VOLUME -> CPU)
@@ -3593,7 +3689,7 @@ public:
 		}
 
 		
-		// =========================================================================
+			// =========================================================================
 		// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
 		// =========================================================================
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
@@ -3618,23 +3714,56 @@ public:
                             break;
                         }
                     }
-                
+                } 
                 
                 // Check system-wide foreground focus
                 app_info activeAppInfo;
                 bool isCurrentlyForeground = false;
+                bool isTrackerDesktopClick = false; // Guard Variable
+
                 if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
                     if (activeAppInfo.team == activeTaskWin.teamId) {
                         isCurrentlyForeground = true;
+
+                        // FIX: Detect if the Tracker foreground focus is just a Desktop click
+                        if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
+                            int32 windowCount = 0;
+                            
+                            // Query the private app_server hook for token tracking lists
+                            int32 tokenCount = 0;
+                            int32* tokens = get_token_list(activeTaskWin.teamId, &tokenCount);
+                            if (tokens != nullptr) {
+                                // Filter out tokens that don't belong to real graphical user windows
+                                for (int32 i = 0; i < tokenCount; ++i) {
+                                    client_window_info* wInfo = get_window_info(tokens[i]);
+                                    if (wInfo != nullptr) {
+                                        // Real open folder panels stack on Layer 3 or above.
+                                        if (wInfo->layer >= 3) {
+                                            windowCount++;
+                                        }
+                                        free(wInfo);
+                                    }
+                                }
+                                free(tokens);
+                            }
+                            
+                            // If no windows exist on layer 3 or above, it is definitively the desktop backdrop.
+                            if (windowCount == 0) {
+                                isCurrentlyForeground = false;
+                                isTrackerDesktopClick = true; // Trigger our guard flag
+                            }
+                        }
                     }
+                }
+
+                // TARGETED GUARD: Force thread visibility to false on a desktop click
+                if (isTrackerDesktopClick) {
+                    generalAppIsVisible = false;
                 }
 
                 // =========================================================================
                 // MULTI-INSTANCE INSTANCE FIX: CREATE COMPOSITE STRUCTURAL KEYS FOR INDEPENDENT STREAKS
                 // =========================================================================
-                // If you named your internal sub-window variable windowIndex, id, or instanceId, 
-                // match it here (assuming 'windowIndex' based on the tracking pipeline).
-      
 				std::pair<team_id, int32> instanceKey(activeTaskWin.teamId, static_cast<int32>(w));
 
                 static std::map<std::pair<team_id, int32>, int32> invisibleStreak;
@@ -3642,25 +3771,27 @@ public:
                 // =========================================================================
                 
                 // ASYMMETRICAL BALANCING:
-                const int32 THRESHOLD_MINIMIZE = 15; 
+                const int32 THRESHOLD_MINIMIZE = 1; 
                 const int32 THRESHOLD_MAXIMIZE = 33; 
 
                 bool nextState = activeTaskWin.isMinimized;
 
                 // FIX: Establish a temporal guard to allow newly woken app threads to stabilize 
-                // before letting thread profiling override the click event state.
                 static std::map<std::pair<team_id, int32>, uint32> lastStateChangeTicks;
                 uint32 currentTicks = SDL_GetTicks();
                 
                 // Track if a manual state shift just occurred
                 static std::map<std::pair<team_id, int32>, bool> lastKnownState;
-                if (lastKnownState[instanceKey] != activeTaskWin.isMinimized) {
+                
+                // CRITICAL BYPASS FIX: Do not track ticks if it's an automated desktop click correction
+                if (!isTrackerDesktopClick && (lastKnownState[instanceKey] != activeTaskWin.isMinimized)) {
                     lastStateChangeTicks[instanceKey] = currentTicks;
                     lastKnownState[instanceKey] = activeTaskWin.isMinimized;
                 }
 
                 // Grace period: Lock the state to what the click handler set for 500ms
-                bool inGracePeriod = (currentTicks - lastStateChangeTicks[instanceKey] < 500);
+                // CRITICAL BYPASS FIX: Explicitly ignore the grace period on a desktop click
+                bool inGracePeriod = (!isTrackerDesktopClick && (currentTicks - lastStateChangeTicks[instanceKey] < 500));
 
                 if (isCurrentlyForeground) {
                     invisibleStreak[instanceKey] = 0;
@@ -3684,19 +3815,21 @@ public:
                         invisibleStreak[instanceKey] = 0;
                         
                         // Icon will only un-dim if the app threads stay awake continuously 
-                        // for 33 frames, filtering out temporary spikes completely.
                         if (visibleStreak[instanceKey] >= THRESHOLD_MAXIMIZE) {
                             nextState = false;
                         }
                     }
                 }
 
-                // Smoothly toggle the state for non-Tracker applications if outside grace period
-                if (!inGracePeriod) {
+                // Smoothly toggle the state if outside grace period OR if forcing a desktop click update
+                if (!inGracePeriod || isTrackerDesktopClick) {
                     activeTaskWin.isMinimized = nextState;          
                 }
-        
-            }             
+            
+
+
+            
+         
                 
 		    // A. Draw active task window application vector icon thumbnail
 		    if (activeTaskWin.icon.id != 0) {
@@ -4939,7 +5072,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.19"; 
+    const char* localVersion = "v1.0.20"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -5046,6 +5179,7 @@ int main(int argc, char* argv[]) {
                             incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
 
                             desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
+                            /*
  				            if (be_app && be_app->Lock()) {                            	
 				                int32 windowCount = be_app->CountWindows();
 				                if (windowCount > 0) {
@@ -5058,7 +5192,7 @@ int main(int argc, char* argv[]) {
 				                be_app->Unlock();
 				                
 				            }
-				            
+				            */
 				        }
 				        
 				    }
@@ -5163,28 +5297,14 @@ int main(int argc, char* argv[]) {
                             flags |= B_AVOID_FOCUS;
                             
                             // 3. STRICT SYSTEM TARGET CHECKERS
-                            bool activeAppIsTracker = false;
-                            app_info activeAppInfo;
-                            
-                            // Query the roster right at the moment of exit boundary trip
-                            if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-                                if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
-                                    activeAppIsTracker = true;
-                                }
-                            }
+                            app_info activeAppInfo;                           
 
-                            if (activeAppIsTracker) {
-                                // STRICT FOR TRACKER: Execute your original working code path perfectly.
-                                // This forces the focus back down to Tracker windows and preserves minimize/restore.
-                                win->SendBehind(nullptr);
-                            } else {
-                                // FIX FOR ALL OTHER APPS: Force the OS to instantly restore the full active 
-                                // highlighted window border look to the application currently beneath the mouse!
-                                if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+
+                            if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
                                     be_roster->ActivateApp(activeAppInfo.team);
                                 }
                             }
-                        }
+                       
                         
                         win->SetFlags(flags);
                         win->Unlock();
