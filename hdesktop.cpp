@@ -3263,14 +3263,26 @@ public:
             // Start reading layouts from a relative left offset margin
             float progressiveX = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             
-            // 1. Process standard app launchers & active window indicators
+            // 1. Process standard app launchers & active window indicators (2D SMOOTH FIX)
             for (size_t i = 0; i < totalIconsCount; ++i) {
                 float approxCenterX = progressiveX + (baseSize / 2.0f);
+                
+                // Calculate the visual center point of the icon on the Y axis
+                float approxCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                
+                // Compute independent delta vectors
                 float distanceX = std::abs(fMouseX - approxCenterX);
+                float distanceY = std::abs(fMouseY - approxCenterY);
+                
+                // Calculate true 2D hypotenuse distance from the mouse to the center of the icon
+                float distance2D = std::sqrt(distanceX * distanceX + distanceY * distanceY);
                 
                 float scale = 1.0f;
-                if (fMouseY >= (fHeight - 140.0f) && distanceX < 160.0f) {
-                    float ratio = distanceX / 160.0f;
+                // FIX: Base magnification on the total 2D distance sphere (180.0f radius provides excellent glide feel)
+                if (fCursorIsInsideHitbox && distance2D < 180.0f) {
+                    float ratio = distance2D / 180.0f;
+                    
+                    // Smooth Gaussian bell-curve falloff transitions perfectly in all directions
                     scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
                 }
 
@@ -3280,7 +3292,9 @@ public:
                 
                 if (finalSize > maxDockHeight) maxDockHeight = finalSize;
                 progressiveX += finalSize + padding;
-            } 
+            }
+
+
             
             if (totalIconsCount > 0) progressiveX -= padding; 
 
@@ -3291,15 +3305,27 @@ public:
 
             
             // =========================================================================
-            // PROCESS HAIKU TRASH CAN COMPONENT METRICS
+            // PROCESS HAIKU TRASH CAN COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
             progressiveX += clockSectionPadding;
             float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
+            
+            // Calculate the spatial center point of the Trash Can icon on the Y axis
+            float approxTrashCenterY = fHeight - 10.0f - (baseTrashSize / 2.0f);
+            
+            // Compute separate directional delta vectors
             float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+            float distanceTrashY = std::abs(fMouseY - approxTrashCenterY);
+            
+            // Calculate true 2D distance using the hypotenuse formula
+            float distanceTrash2D = std::sqrt(distanceTrashX * distanceTrashX + distanceTrashY * distanceTrashY);
             
             float trashScale = 1.0f;
-            if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
-                float ratio = distanceTrashX / 160.0f;
+            // FIX: Rely purely on the 2D radial distance sphere (matching your 180.0f radius baseline)
+            if (fCursorIsInsideHitbox && distanceTrash2D < 180.0f) {
+                float ratio = distanceTrash2D / 180.0f;
+                
+                // Smooth Gaussian bell-curve falloff transitions cleanly in all 360 degrees
                 trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
             
@@ -3308,12 +3334,12 @@ public:
             dynamicScales.push_back(trashScale);
             if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
             progressiveX += finalTrashSize;
+
  			
-	        // =========================================================================
-	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (NEW DYNAMIC CODE)
+	   	        // =========================================================================
+	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (2D SMOOTH FIX)
 	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
 	        // =========================================================================
-	        
 	        if (showSystemTray) {
             	// Run our throttled texture sync check
             	SyncDynamicSystrayTextures();
@@ -3328,11 +3354,23 @@ public:
 	
 	        progressiveX += traySectionPadding;
 	        float approxTrayCenterX = progressiveX + (baselineTrayWidth / 2.0f);
+	        
+	        // Calculate the standard spatial center point on the Y axis for the tray row
+	        float approxTrayCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+	        
+	        // Compute independent delta vectors
 	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
+	        float distanceTrayY = std::abs(fMouseY - approxTrayCenterY);
+	        
+	        // Calculate true 2D distance using the hypotenuse formula
+	        float distanceTray2D = std::sqrt(distanceTrayX * distanceTrayX + distanceTrayY * distanceTrayY);
 	        
 	        float trayScale = 1.0f;
-	        if (fMouseY >= (fHeight - 140.0f) && distanceTrayX < 160.0f) {
-	            float ratio = distanceTrayX / 160.0f;
+	        // FIX: Base magnification entirely on the 2D radial distance sphere
+	        if (fCursorIsInsideHitbox && distanceTray2D < 180.0f) {
+	            float ratio = distanceTray2D / 180.0f;
+	            
+	            // Smooth Gaussian bell-curve falloff transitions cleanly in all directions
 	            trayScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
 	        
@@ -3342,23 +3380,28 @@ public:
 	        // =========================================================================
 
  			
-            // =========================================================================
-            // PROCESS SYSTEM CLOCK COMPONENT METRICS
+                   // =========================================================================
+            // PROCESS SYSTEM CLOCK COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
             if (fClockTexture.id != 0) {
-
-
                 progressiveX += clockSectionPadding;
                 
                 float highDpiCompensateFactor = 0.42f;
                 float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;
                 
                 float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
+                
+                // Calculate spatial center point on the Y axis for the text string element
+                float approxClockCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                
                 float distanceClockX = std::abs(fMouseX - approxClockCenterX);
+                float distanceClockY = std::abs(fMouseY - approxClockCenterY);
+                float distanceClock2D = std::sqrt(distanceClockX * distanceClockX + distanceClockY * distanceClockY);
                 
                 float clockScale = 1.0f;
-                if (fMouseY >= (fHeight - 140.0f) && distanceClockX < 160.0f) {
-                    float ratio = distanceClockX / 160.0f;
+                // FIX: Base magnification entirely on the unified 180.0f radial distance circle
+                if (fCursorIsInsideHitbox && distanceClock2D < 180.0f) {
+                    float ratio = distanceClock2D / 180.0f;
                     clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
                 }
                 
@@ -3371,15 +3414,21 @@ public:
             }
 
             // =========================================================================
-            // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS
+            // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
             progressiveX += clockSectionPadding;
             float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
+            
+            // Calculate spatial center point on the Y axis for the slider asset
+            float approxVolCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            
             float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+            float distanceVolY = std::abs(fMouseY - approxVolCenterY);
+            float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
             
             float volScale = 1.0f;
-            if (fMouseY >= (fHeight - 140.0f) && distanceVolX < 160.0f) {
-                float ratio = distanceVolX / 160.0f;
+            if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
+                float ratio = distanceVol2D / 180.0f;
                 volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
             dynamicWidths.push_back(baseVolumeWidth * volScale);
@@ -3388,15 +3437,21 @@ public:
 
 
             // =========================================================================
-            // PROCESS GRAPHICAL CPU MONITOR METRICS
+            // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
             progressiveX += clockSectionPadding; 
             float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
+            
+            // Calculate spatial center point on the Y axis for the processor chart cells
+            float approxCpuCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            
             float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+            float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
+            float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
             
             float cpuScale = 1.0f;
-            if (fMouseY >= (fHeight - 140.0f) && distanceCpuX < 160.0f) {
-                float ratio = distanceCpuX / 160.0f;
+            if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
+                float ratio = distanceCpu2D / 180.0f;
                 cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
             
@@ -3409,6 +3464,7 @@ public:
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
         }
+
 
         // -------------------------------------------------------------------------
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
@@ -3586,7 +3642,7 @@ public:
                 // =========================================================================
                 
                 // ASYMMETRICAL BALANCING:
-                const int32 THRESHOLD_MINIMIZE = 1; 
+                const int32 THRESHOLD_MINIMIZE = 15; 
                 const int32 THRESHOLD_MAXIMIZE = 33; 
 
                 bool nextState = activeTaskWin.isMinimized;
@@ -4440,6 +4496,7 @@ private:
 public:
     float fLastCalculatedWidth = 0.0f;	
     bool fCpuMenuIsActive; 
+    bool fCursorIsInsideHitbox = false;
 };
 
 
@@ -4882,7 +4939,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.18"; 
+    const char* localVersion = "v1.0.19"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -4980,20 +5037,16 @@ int main(int argc, char* argv[]) {
                     int hiddenScreenOffset = screenHeight - 140; 
                     int adjustedMouseY = mouseY + hiddenScreenOffset;
                 
+                    // Feed smooth radial zoom parameters
                     desktopEngine.HandleMouseInput(mouseX, adjustedMouseY, buttons);
                 
-                    // ---> DYNAMIC HOVER LAYERING SYSTEM REMOVED FROM HERE <---
-
                     if (incomingEventPackage.type == SDL_MOUSEBUTTONDOWN) {
-				        if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
-				            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
-				            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
-				            
-				            desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
-				            
-				            // Defensive click-down drop to ensure Apps stays on top
-				            
-				            if (be_app && be_app->Lock()) {                            	
+                        if (incomingEventPackage.button.button == SDL_BUTTON_LEFT || 
+                            incomingEventPackage.button.button == SDL_BUTTON_RIGHT ||
+                            incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
+
+                            desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
+ 				            if (be_app && be_app->Lock()) {                            	
 				                int32 windowCount = be_app->CountWindows();
 				                if (windowCount > 0) {
 				                    BWindow* win = be_app->WindowAt(0);
@@ -5013,6 +5066,7 @@ int main(int argc, char* argv[]) {
 				    needsRender = true; 
 				}
 
+
                 else if (incomingEventPackage.type == SDL_MOUSEWHEEL) {
                     desktopEngine.HandleMouseWheel(incomingEventPackage.wheel.y);
                     needsRender = true; 
@@ -5022,6 +5076,7 @@ int main(int argc, char* argv[]) {
 
         // =========================================================================
         // NATIVE HAIKU BOUNDARY & INTERNAL SLIDE TRIGGER LOGIC (STAGE 3 - FIXED)
+        // =========================================================================
         if (be_app && be_app->Lock()) {
             int32 windowCount = be_app->CountWindows();
             if (windowCount > 0) {
@@ -5052,35 +5107,40 @@ int main(int argc, char* argv[]) {
         }
 
         // =========================================================================
-        // NATIVE HAIKU BOUNDARY & LOCAL OFFSET CONSTRAINTS
+        // NATIVE HAIKU BOUNDARY & LOCAL OFFSET CONSTRAINTS (STAGE 11 - PADDED HITBOX)
         // =========================================================================
+        // 1. Fetch your active animated width
+        float currentDynamicWidth = desktopEngine.fLastCalculatedWidth;
+        if (currentDynamicWidth <= 0.0f) currentDynamicWidth = 600.0f; 
 
-        // FIX: Directly reading your public field variable member token cleanly!
-        float dockWidth = desktopEngine.fLastCalculatedWidth;
-        if (dockWidth <= 0.0f) dockWidth = 600.0f; // Safe fallback for the initial boot pass
+        // 2. DEFINE PHANTOM PADDING BUFFERS (Adjust these to tune the friction feel!)
+        int horizontalPadding = 300; // Extra width padding to prevent horizontal snapping
+        int verticalTopPadding = 2; // Extra overhead clearance padding for diagonal exits
 
-        // Calculate the local left and right edge positions of the centered dock shelf
-        int dockLeftX  = (dockPanelW / 2) - (static_cast<int>(dockWidth) / 2);
-        int dockRightX = (dockPanelW / 2) + (static_cast<int>(dockWidth) / 2);
+        // Calculate padded left and right limits
+        int paddedLeftX  = (dockPanelW / 2) - (static_cast<int>(currentDynamicWidth) / 2) - horizontalPadding;
+        int paddedRightX = (dockPanelW / 2) + (static_cast<int>(currentDynamicWidth) / 2) + horizontalPadding;
 
-        // Dynamically re-evaluate cursorIsInsideDock using the precise shelf limits
+        // 3. EVALUATE HVER COMPLIANCE USING PADDED VALUES
         if (dockState == STATE_HIDDEN) {
-            // Unhide ONLY if the mouse touches the active width segment of the thin sensor strip
-            cursorIsInsideDock = (localMouseX >= dockLeftX && localMouseX <= dockRightX &&
+            cursorIsInsideDock = (localMouseX >= paddedLeftX && localMouseX <= paddedRightX &&
                                   localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
         } else {
-            // Keep visible only if the mouse remains inside the active width footprint of the dock shelf
-            cursorIsInsideDock = (localMouseX >= dockLeftX && localMouseX <= dockRightX &&
-                                  localMouseY >= 0 && localMouseY < dockPanelH);
+            // Include verticalTopPadding to extend the tracking area above the dock shelf
+            cursorIsInsideDock = (localMouseX >= paddedLeftX && localMouseX <= paddedRightX &&
+                                  localMouseY >= -verticalTopPadding && localMouseY < dockPanelH);
         }
 
+        // Pass this padded layout verification flag directly into your engine instance
+        desktopEngine.fCursorIsInsideHitbox = cursorIsInsideDock;
+
         // =========================================================================
-        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM (TRACKER COMPATIBLE)
+        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM (STRICT TRACKER DISCRIMINATOR)
         // =========================================================================
-        static bool lastHoverState = false; // Tracks state shifts across frames
+        static bool lastHoverState = false; 
         
         if (dockAlwaysOnTop && (cursorIsInsideDock != lastHoverState)) {
-            lastHoverState = cursorIsInsideDock; // Update edge filter state
+            lastHoverState = cursorIsInsideDock; 
             
             if (be_app && be_app->Lock()) {
                 int32 windowCount = be_app->CountWindows();
@@ -5102,9 +5162,28 @@ int main(int argc, char* argv[]) {
                             flags |= B_AVOID_FRONT;
                             flags |= B_AVOID_FOCUS;
                             
-                            // 3. Drop exactly once. This gives focus back to Tracker
-                            // without trapping the window behind the wallpaper loop.
-                            win->SendBehind(nullptr);
+                            // 3. STRICT SYSTEM TARGET CHECKERS
+                            bool activeAppIsTracker = false;
+                            app_info activeAppInfo;
+                            
+                            // Query the roster right at the moment of exit boundary trip
+                            if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+                                if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
+                                    activeAppIsTracker = true;
+                                }
+                            }
+
+                            if (activeAppIsTracker) {
+                                // STRICT FOR TRACKER: Execute your original working code path perfectly.
+                                // This forces the focus back down to Tracker windows and preserves minimize/restore.
+                                win->SendBehind(nullptr);
+                            } else {
+                                // FIX FOR ALL OTHER APPS: Force the OS to instantly restore the full active 
+                                // highlighted window border look to the application currently beneath the mouse!
+                                if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+                                    be_roster->ActivateApp(activeAppInfo.team);
+                                }
+                            }
                         }
                         
                         win->SetFlags(flags);
@@ -5116,6 +5195,7 @@ int main(int argc, char* argv[]) {
             }
             needsRender = true;
         }
+
         // =========================================================================
 
 
@@ -5227,4 +5307,3 @@ int main(int argc, char* argv[]) {
     SDL_Quit();
     return 0;
 }
-
