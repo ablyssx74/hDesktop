@@ -2746,10 +2746,9 @@ public:
 				}
 
 				
-			
-		        // -----------------------------------------------------------
+
 					
-		        // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
+		    // GENERAL APPLICATION BEHAVIOR (NON-TRACKER APPS)
 	            #ifndef AS_MINIMIZE_TEAM
 	            #define AS_MINIMIZE_TEAM 5
 	            #endif
@@ -2770,6 +2769,7 @@ public:
                 isButtonLatchedMap[actionKey] = true;
                 // =========================================================================
 
+                // READ TRUTH FROM RENDERFRAME WORKSPACE BITMASK
 	            if (activeTaskWin.isMinimized == false) {
 	                std::cout << "[APP_SERVER ROUTING] ---> Action: MINIMIZE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
@@ -2779,7 +2779,8 @@ public:
 	                link.Flush();
 	                
 	                be_roster->ActivateApp(-1);
-	                activeTaskWin.isMinimized = true; 
+	                // FIX 1: Removed activeTaskWin.isMinimized = true; 
+                    // Let RenderFrame handle state evaluation on the next frame pass.
 	            } 
 	            else {
 	                if (isTracker && button == SDL_BUTTON_LEFT) {
@@ -2791,7 +2792,6 @@ public:
 	                        for (int32 i = 0; i < tokenCount; ++i) {
 	                            client_window_info* wInfo = get_window_info(tokens[i]);
 	                            if (wInfo != nullptr) {
-                                    // FIX: Use index [0] to check if the first character is a null terminator
                                     if (wInfo->name[0] != '\0' && 
                                         strcmp(wInfo->name, "Tracker status") != 0 &&
                                         strcmp(wInfo->name, "Desktop") != 0 && 
@@ -2829,12 +2829,37 @@ public:
 	                    be_roster->ActivateApp(activeTaskWin.teamId);
 	                }
 	                
+                    // FIX 2: Group Restore Force Pipeline.
+                    // This explicitly flushes window tokens belonging to group-minimized layers 
+                    // (like Pe or WebPositive) back onto the active workspace array.
 	                BPrivate::AppServerLink link;
 	                link.StartMessage(AS_BRING_TEAM_TO_FRONT);
 	                link.Attach<team_id>(activeTaskWin.teamId);
 	                link.Flush();
 	                
-	                activeTaskWin.isMinimized = false; 
+                    // Force focus routing loop to active window tokens to trigger layout updates
+                    int32 systemCount = 0;
+                    int32 currentWorkspace = current_workspace();
+                    int32* systemTokens = nullptr;
+                    if (BPrivate::get_window_order(currentWorkspace, &systemTokens, &systemCount) == B_OK && systemTokens != nullptr) {
+                        for (int32 i = 0; i < systemCount; ++i) {
+                            client_window_info* cInfo = get_window_info(systemTokens[i]);
+                            if (cInfo != nullptr) {
+                                if (cInfo->team == activeTaskWin.teamId && cInfo->feel == B_NORMAL_WINDOW_FEEL) {
+                                    // Inject sub-message to force individual window wakeups
+                                    BPrivate::AppServerLink winLink;
+                                    winLink.StartMessage(AS_BRING_TEAM_TO_FRONT);
+                                    winLink.Attach<int32>(systemTokens[i]);
+                                    winLink.Flush();
+                                }
+                                free(cInfo);
+                            }
+                        }
+                        free(systemTokens);
+                    }
+
+	                // FIX 1: Removed activeTaskWin.isMinimized = false;
+                    // Let RenderFrame handle state evaluation on the next frame pass.
 	            }
 	            
 	            std::cout << "========================================\n" << std::endl;
@@ -2846,6 +2871,7 @@ public:
 	        
 	        currentX += size + padding;
 	        evaluationSlotIdx++;
+
 	    }
 
 
@@ -3434,7 +3460,7 @@ public:
             progressiveX += finalTrashSize;
 
  			
-	   	        // =========================================================================
+	   	    // =========================================================================
 	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (2D SMOOTH FIX)
 	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
 	        // =========================================================================
@@ -3478,7 +3504,7 @@ public:
 	        // =========================================================================
 
  			
-                   // =========================================================================
+            // =========================================================================
             // PROCESS SYSTEM CLOCK COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
             if (fClockTexture.id != 0) {
@@ -3691,184 +3717,249 @@ public:
 		}
 
 		
-			// =========================================================================
-		// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
-		// =========================================================================
-		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-		    auto& activeTaskWin = fTaskbarWindows[w];		
-		    float size = dynamicWidths[renderingSlotIdx];
-		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-		
+	// =========================================================================
+	// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
+	// =========================================================================
+	
+	// PERFORMANCE ANCHOR: Fetch the active workspace and system window tokens ONCE 
+	// before drawing. This reduces CPU utilization to virtually zero during redrawing.
+	int32 currentWorkspace = current_workspace();
+	int32* windowTokens = nullptr;
+	int32 totalWindows = 0;
+	BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
 
-                 // GENERAL APPLICATIONS: Keep the fast thread execution checks 
-                bool generalAppIsVisible = false;
-                thread_info info;
-                int32 cookie = 0;
-                while (get_next_thread_info(activeTaskWin.teamId, &cookie, &info) == B_OK) {
-                    BString threadName(info.name);
-                    
-                    if (info.state == B_THREAD_RUNNING || info.state == B_THREAD_READY) {
-                        if (threadName.IFindFirst("window") >= 0 || 
-                            threadName.IFindFirst("loop") >= 0 || 
-                            threadName.IFindFirst("render") >= 0 || 
-                            threadName.Compare(activeTaskWin.title.c_str()) == 0) {
-                            generalAppIsVisible = true;
-                            break;
-                        }
-                    }
-                } 
-                
-                // Check system-wide foreground focus
-                app_info activeAppInfo;
-                bool isCurrentlyForeground = false;
-                bool isTrackerDesktopClick = false; // Guard Variable
+	for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+	    auto& activeTaskWin = fTaskbarWindows[w];		
+	    float size = dynamicWidths[renderingSlotIdx];
+	    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	
+	    bool isTracker = (activeTaskWin.title == "Tracker");
 
-                if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-                    if (activeAppInfo.team == activeTaskWin.teamId) {
-                        isCurrentlyForeground = true;
+	    // ---------------------------------------------------------------------
+	    // PATH A: TRACKER EXCLUSIVE STATE CHECK (Your 100% Original Code Block)
+	    // ---------------------------------------------------------------------
+	    if (isTracker) {
+	        bool generalAppIsVisible = false;
+	        thread_info info;
+	        int32 cookie = 0;
+	        while (get_next_thread_info(activeTaskWin.teamId, &cookie, &info) == B_OK) {
+	            BString threadName(info.name);
+	            
+	            if (info.state == B_THREAD_RUNNING || info.state == B_THREAD_READY) {
+	                if (threadName.IFindFirst("window") >= 0 || 
+	                    threadName.IFindFirst("loop") >= 0 || 
+	                    threadName.IFindFirst("render") >= 0 || 
+	                    threadName.Compare(activeTaskWin.title.c_str()) == 0) {
+	                    generalAppIsVisible = true;
+	                    break;
+	                }
+	            }
+	        } 
+	        
+	        // Check system-wide foreground focus
+	        app_info activeAppInfo;
+	        bool isCurrentlyForeground = false;
+	        bool isTrackerDesktopClick = false; // Guard Variable
 
-                        // FIX: Detect if the Tracker foreground focus is just a Desktop click
-                        if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
-                            int32 windowCount = 0;
-                            
-                            // Query the private app_server hook for token tracking lists
-                            int32 tokenCount = 0;
-                            int32* tokens = get_token_list(activeTaskWin.teamId, &tokenCount);
-                            if (tokens != nullptr) {
-                                // Filter out tokens that don't belong to real graphical user windows
-                                for (int32 i = 0; i < tokenCount; ++i) {
-                                    client_window_info* wInfo = get_window_info(tokens[i]);
-                                    if (wInfo != nullptr) {
-                                        // Real open folder panels stack on Layer 3 or above.
-                                        if (wInfo->layer >= 3) {
-                                            windowCount++;
-                                        }
-                                        free(wInfo);
-                                    }
-                                }
-                                free(tokens);
-                            }
-                            
-                            // If no windows exist on layer 3 or above, it is definitively the desktop backdrop.
-                            if (windowCount == 0) {
-                                isCurrentlyForeground = false;
-                                isTrackerDesktopClick = true; // Trigger our guard flag
-                            }
-                        }
-                    }
-                }
+	        if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+	            if (activeAppInfo.team == activeTaskWin.teamId) {
+	                isCurrentlyForeground = true;
 
-                // TARGETED GUARD: Force thread visibility to false on a desktop click
-                if (isTrackerDesktopClick) {
-                    generalAppIsVisible = false;
-                }
+	                // FIX: Detect if the Tracker foreground focus is just a Desktop click
+	                if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
+	                    int32 windowCount = 0;
+	                    
+	                    // Query the private app_server hook for token tracking lists
+	                    int32 tokenCount = 0;
+	                    int32* tokens = get_token_list(activeTaskWin.teamId, &tokenCount);
+	                    if (tokens != nullptr) {
+	                        // Filter out tokens that don't belong to real graphical user windows
+	                        for (int32 i = 0; i < tokenCount; ++i) {
+	                            client_window_info* wInfo = get_window_info(tokens[i]);
+	                            if (wInfo != nullptr) {
+	                                // Real open folder panels stack on Layer 3 or above.
+	                                if (wInfo->layer >= 3) {
+	                                    windowCount++;
+	                                }
+	                                free(wInfo);
+	                            }
+	                        }
+	                        free(tokens);
+	                    }
+	                    
+	                    // If no windows exist on layer 3 or above, it is definitively the desktop backdrop.
+	                    if (windowCount == 0) {
+	                        isCurrentlyForeground = false;
+	                        isTrackerDesktopClick = true; // Trigger our guard flag
+	                    }
+	                }
+	            }
+	        }
 
-                // =========================================================================
-                // MULTI-INSTANCE INSTANCE FIX: CREATE COMPOSITE STRUCTURAL KEYS FOR INDEPENDENT STREAKS
-                // =========================================================================
-				std::pair<team_id, int32> instanceKey(activeTaskWin.teamId, static_cast<int32>(w));
+	        // TARGETED GUARD: Force thread visibility to false on a desktop click
+	        if (isTrackerDesktopClick) {
+	            generalAppIsVisible = false;
+	        }
 
-                static std::map<std::pair<team_id, int32>, int32> invisibleStreak;
-                static std::map<std::pair<team_id, int32>, int32> visibleStreak;
-                // =========================================================================
-                
-                // ASYMMETRICAL BALANCING:
-                const int32 THRESHOLD_MINIMIZE = 1; 
-                const int32 THRESHOLD_MAXIMIZE = 33; 
+	        // MULTI-INSTANCE INSTANCE FIX: CREATE COMPOSITE STRUCTURAL KEYS FOR INDEPENDENT STREAKS
+	        std::pair<team_id, int32> instanceKey(activeTaskWin.teamId, static_cast<int32>(w));
 
-                bool nextState = activeTaskWin.isMinimized;
+	        static std::map<std::pair<team_id, int32>, int32> invisibleStreak;
+	        static std::map<std::pair<team_id, int32>, int32> visibleStreak;
+	        
+	        // ASYMMETRICAL BALANCING:
+	        const int32 THRESHOLD_MINIMIZE = 1; 
+	        const int32 THRESHOLD_MAXIMIZE = 33; 
 
-                // FIX: Establish a temporal guard to allow newly woken app threads to stabilize 
-                static std::map<std::pair<team_id, int32>, uint32> lastStateChangeTicks;
-                uint32 currentTicks = SDL_GetTicks();
-                
-                // Track if a manual state shift just occurred
-                static std::map<std::pair<team_id, int32>, bool> lastKnownState;
-                
-                // CRITICAL BYPASS FIX: Do not track ticks if it's an automated desktop click correction
-                if (!isTrackerDesktopClick && (lastKnownState[instanceKey] != activeTaskWin.isMinimized)) {
-                    lastStateChangeTicks[instanceKey] = currentTicks;
-                    lastKnownState[instanceKey] = activeTaskWin.isMinimized;
-                }
+	        bool nextState = activeTaskWin.isMinimized;
 
-                // Grace period: Lock the state to what the click handler set for 500ms
-                // CRITICAL BYPASS FIX: Explicitly ignore the grace period on a desktop click
-                bool inGracePeriod = (!isTrackerDesktopClick && (currentTicks - lastStateChangeTicks[instanceKey] < 500));
+	        // FIX: Establish a temporal guard to allow newly woken app threads to stabilize 
+	        static std::map<std::pair<team_id, int32>, uint32> lastStateChangeTicks;
+	        uint32 currentTicks = SDL_GetTicks();
+	        
+	        // Track if a manual state shift just occurred
+	        static std::map<std::pair<team_id, int32>, bool> lastKnownState;
+	        
+	        // CRITICAL BYPASS FIX: Do not track ticks if it's an automated desktop click correction
+	        if (!isTrackerDesktopClick && (lastKnownState[instanceKey] != activeTaskWin.isMinimized)) {
+	            lastStateChangeTicks[instanceKey] = currentTicks;
+	            lastKnownState[instanceKey] = activeTaskWin.isMinimized;
+	        }
 
-                if (isCurrentlyForeground) {
-                    invisibleStreak[instanceKey] = 0;
-                    visibleStreak[instanceKey] = 0;
-                    nextState = false;
-                } else if (!inGracePeriod) { // Only evaluate streaks if outside the grace period
-                    if (!generalAppIsVisible) {
-                        invisibleStreak[instanceKey]++;
-                        visibleStreak[instanceKey] = 0;
-                        
-                        bool quickBackgroundCheck = false;
-                        if (activeAppInfo.team == activeTaskWin.teamId) {
-                            quickBackgroundCheck = (activeAppInfo.flags & B_BACKGROUND_APP);
-                        }
+	        // Grace period: Lock the state to what the click handler set for 500ms
+	        // CRITICAL BYPASS FIX: Explicitly ignore the grace period on a desktop click
+	        bool inGracePeriod = (!isTrackerDesktopClick && (currentTicks - lastStateChangeTicks[instanceKey] < 500));
 
-                        if (quickBackgroundCheck || invisibleStreak[instanceKey] >= THRESHOLD_MINIMIZE) {
-                            nextState = true;
-                        }
-                    } else {
-                        visibleStreak[instanceKey]++;
-                        invisibleStreak[instanceKey] = 0;
-                        
-                        // Icon will only un-dim if the app threads stay awake continuously 
-                        if (visibleStreak[instanceKey] >= THRESHOLD_MAXIMIZE) {
-                            nextState = false;
-                        }
-                    }
-                }
+	        if (isCurrentlyForeground) {
+	            invisibleStreak[instanceKey] = 0;
+	            visibleStreak[instanceKey] = 0;
+	            nextState = false;
+	        } else if (!inGracePeriod) { // Only evaluate streaks if outside the grace period
+	            if (!generalAppIsVisible) {
+	                invisibleStreak[instanceKey]++;
+	                visibleStreak[instanceKey] = 0;
+	                
+	                bool quickBackgroundCheck = false;
+	                if (activeAppInfo.team == activeTaskWin.teamId) {
+	                    quickBackgroundCheck = (activeAppInfo.flags & B_BACKGROUND_APP);
+	                }
 
-                // Smoothly toggle the state if outside grace period OR if forcing a desktop click update
-                if (!inGracePeriod || isTrackerDesktopClick) {
-                    activeTaskWin.isMinimized = nextState;          
-                }
-            
+	                if (quickBackgroundCheck || invisibleStreak[instanceKey] >= THRESHOLD_MINIMIZE) {
+	                    nextState = true;
+	                }
+	            } else {
+	                visibleStreak[instanceKey]++;
+	                invisibleStreak[instanceKey] = 0;
+	                
+	                // Icon will only un-dim if the app threads stay awake continuously 
+	                if (visibleStreak[instanceKey] >= THRESHOLD_MAXIMIZE) {
+	                    nextState = false;
+	                }
+	            }
+	        }
+
+	        // Smoothly toggle the state if outside grace period OR if forcing a desktop click update
+	        if (!inGracePeriod || isTrackerDesktopClick) {
+	            activeTaskWin.isMinimized = nextState;          
+	        }
+	    }
+	    // ---------------------------------------------------------------------
+	    // PATH B: STANDARD APPLICATIONS (New Workspace Mask Method)
+	    // ---------------------------------------------------------------------
+	    else {
+	        int32 normalVisibleWindows = 0;
+	        int32 totalTeamWindows = 0;
+
+	        if (windowTokens != nullptr && totalWindows > 0) {
+	            for (int32 i = 0; i < totalWindows; ++i) {
+	                client_window_info* info = get_window_info(windowTokens[i]);
+	                if (info == nullptr) continue;
+
+	                if (info->team == activeTaskWin.teamId) {
+	                    if (info->feel == B_NORMAL_WINDOW_FEEL) {
+	                        totalTeamWindows++;
+	                        if (!info->is_mini && info->layer > 0) {
+	                            if (info->workspaces & (1 << currentWorkspace)) {
+	                                normalVisibleWindows++;
+	                            }
+	                        }
+	                    }
+	                }
+	                free(info);
+	            }
+	        }
+
+	        bool appIsGenuinelyMinimized = (totalTeamWindows > 0) ? (normalVisibleWindows == 0) : false;
+
+	        // Check standard app foreground focus
+	        app_info activeAppInfo;
+	        bool isCurrentlyForeground = false;
+	        if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+	            if (activeAppInfo.team == activeTaskWin.teamId) {
+	                isCurrentlyForeground = true;
+	            }
+	        }
+
+	        if (isCurrentlyForeground) {
+	            activeTaskWin.isMinimized = false;
+	        } else {
+	            activeTaskWin.isMinimized = appIsGenuinelyMinimized;
+	        }
+	    }
+	    
+	    // =========================================================================
+	    // STEP 4: DRAW WINDOW ICON THUMBNAIL CORES AND ACTIVE INDICATORS
+	    // =========================================================================
+	
+	    // A. Draw active task window application vector icon thumbnail
+	    if (activeTaskWin.icon.id != 0) {
+	        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
+	        if (activeTaskWin.isMinimized == true) {
+	            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
+	        } else {
+	            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Bright full opacity active focus
+	        }
+	
+	        glBegin(GL_QUADS);
+	            glTexCoord2f(0.0f, 0.0f); glVertex2f(iconBounds.left,  iconBounds.top);
+	            glTexCoord2f(1.0f, 0.0f); glVertex2f(iconBounds.right, iconBounds.top);
+	            glTexCoord2f(1.0f, 1.0f); glVertex2f(iconBounds.right, iconBounds.bottom);
+	            glTexCoord2f(0.0f, 1.0f); glVertex2f(iconBounds.left,  iconBounds.bottom);
+	        glEnd();
+	        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
+	    }
+	
+	    // B. Draw an active native glowing mini ledger stripe indicator line below active windows
+	    glDisable(GL_TEXTURE_2D);
+	    if (activeTaskWin.isMinimized == false && !isTracker) {
+	        // Bright glowing electric blue highlight segment line for focused open panels
+	        glColor4f(0.2f, 0.6f, 1.0f, 0.9f); 
+	        glLineWidth(3.0f);
+	        glBegin(GL_LINES);
+	            glVertex2f(iconBounds.left + 4.0f, dockPlate.bottom - 4.0f);
+	            glVertex2f(iconBounds.right - 4.0f, dockPlate.bottom - 4.0f);
+	        glEnd();
+	    }
+	
+	    currentX += size + padding;
+	    renderingSlotIdx++;
+	} // This terminates the main fTaskbarWindows iteration loop safely
+
+	// 4. RESOURCE CLEANUP PAIRING
+	// Safely free the central workspace window token allocation array outside the loop
+	if (windowTokens != nullptr) {
+	    free(windowTokens);
+	}
+
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
+
+	// Left Clock Divider Line
 
 
-            
-         
-                
-		    // A. Draw active task window application vector icon thumbnail
-		    if (activeTaskWin.icon.id != 0) {
-		        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
-		        if (activeTaskWin.isMinimized == true) {
-		            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
-		        } else {
-		            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Bright full opacity active focus
-		        }
-		
-		        glBegin(GL_QUADS);
-		            glTexCoord2f(0.0f, 0.0f); glVertex2f(iconBounds.left,  iconBounds.top);
-		            glTexCoord2f(1.0f, 0.0f); glVertex2f(iconBounds.right, iconBounds.top);
-		            glTexCoord2f(1.0f, 1.0f); glVertex2f(iconBounds.right, iconBounds.bottom);
-		            glTexCoord2f(0.0f, 1.0f); glVertex2f(iconBounds.left,  iconBounds.bottom);
-		        glEnd();
-		        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-		    }
-		
-		    // B. Draw an active native glowing mini ledger stripe indicator line below active windows
-		    glDisable(GL_TEXTURE_2D);
-		    if (activeTaskWin.isMinimized == false && activeTaskWin.title != "Tracker") {
-		        // Bright glowing electric blue highlight segment line for focused open panels
-		        glColor4f(0.2f, 0.6f, 1.0f, 0.9f); 
-		        glLineWidth(3.0f);
-		        glBegin(GL_LINES);
-		            glVertex2f(iconBounds.left + 4.0f, dockPlate.bottom - 4.0f);
-		            glVertex2f(iconBounds.right - 4.0f, dockPlate.bottom - 4.0f);
-		        glEnd();
-		    }
-		
-				    currentX += size + padding;
-		    renderingSlotIdx++;
-		}
-		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
 
-       // Left Clock Divider Line
+
+
+
 	       float lineLeftSnappedX = std::floor(currentX + 0.5f);
 	       glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
 	       glBegin(GL_LINES);
@@ -5181,20 +5272,43 @@ int main(int argc, char* argv[]) {
                             incomingEventPackage.button.button == SDL_BUTTON_MIDDLE) {
 
                             desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
-                            
- 				            if (be_app && be_app->Lock()) {                            	
-				                int32 windowCount = be_app->CountWindows();
-				                if (windowCount > 0) {
-				                    BWindow* win = be_app->WindowAt(0);
-				                    if (win != nullptr && win->Lock()) {
-				                        win->SendBehind(nullptr);
-				                        win->Unlock();
-				                    }
-				                }
-				                be_app->Unlock();
-				                
-				            }
-				            
+
+							/*
+
+							// =========================================================================
+							// EDGE-TRIGGERED WINDOW DEPTH MITIGATION SYSTEM
+							// =========================================================================
+							static bool lastLayerStateWasBehind = false;
+							
+							// Fix: Use the inverse of your cursor track flag
+							if (!cursorIsInsideDock && !lastLayerStateWasBehind) {
+							    lastLayerStateWasBehind = true;
+							
+							    if (be_app && be_app->Lock()) {
+							        int32 windowCount = be_app->CountWindows();
+							        
+							        for (int32 i = 0; i < windowCount; i++) {
+							            BWindow* win = be_app->WindowAt(i);
+							            
+							            if (win != nullptr && win->LockWithTimeout(20000) == B_OK) {
+							                win->SendBehind(nullptr);
+							                
+							                uint32 flags = win->Flags();
+							                flags |= (B_AVOID_FRONT | B_AVOID_FOCUS);
+							                win->SetFlags(flags);
+							
+							                win->Unlock();
+							            }
+							        }
+							        be_app->Unlock();
+							    }
+							} 
+							else if (cursorIsInsideDock) {
+							    // Reset the trigger state when the cursor comes back inside
+							    lastLayerStateWasBehind = false;
+							}
+							*/
+
 				        }
 				        
 				    }
@@ -5278,6 +5392,16 @@ int main(int argc, char* argv[]) {
         if (dockAlwaysOnTop && (cursorIsInsideDock != lastHoverState)) {
             lastHoverState = cursorIsInsideDock; 
             
+          bool activeAppIsTracker = false;
+           app_info activeAppInfo;
+           
+           // Query the roster right at the moment of exit boundary trip
+           if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+               if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
+                   activeAppIsTracker = true;
+               }
+           }
+            if (!activeAppIsTracker) {
             if (be_app && be_app->Lock()) {
                 int32 windowCount = be_app->CountWindows();
                 for (int32 i = 0; i < windowCount; i++) {
@@ -5297,7 +5421,7 @@ int main(int argc, char* argv[]) {
                             win->SetFeel(B_NORMAL_WINDOW_FEEL);
                             flags |= B_AVOID_FRONT;
                             flags |= B_AVOID_FOCUS;
-                            
+                            win->SendBehind(nullptr);
                             // 3. STRICT SYSTEM TARGET CHECKERS
                             app_info activeAppInfo;                           
 
@@ -5315,9 +5439,10 @@ int main(int argc, char* argv[]) {
                 }
                 be_app->Unlock();
             }
+            }
             needsRender = true;
         }
-
+		
         // =========================================================================
 
 
