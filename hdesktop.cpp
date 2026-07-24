@@ -45,6 +45,7 @@
 #include <SDL2/SDL_opengl.h>
 #include <SDL2/SDL_syswm.h>
 #include <set>
+#include <Shape.h>
 #include <stdio.h>
 #include <StorageKit.h>
 #include <String.h>
@@ -65,14 +66,26 @@ std::set<std::string> gFavoritePaths;
 bool autoHideEnabled; 
 bool showSystemTray; 
 bool dockAlwaysOnTop;
+bool fShowTitleOverlays;
 void SaveConfiguration(); 
+
 
 enum {
 	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
     MSG_AUTOHIDE_TOGGLED   = 'ahtg',
     MSG_SYSTEMTRAY_TOGGLED = 'sttg',
+    MSG_TEXTOVERLAYS_TOGGLED = 'totg',
+    MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
     MSG_AUTORAISE_TOGGLED  = 'srdt' 
 };
+
+struct LeafMenuArgs {
+    HaikuGlDesktopEngine* engine;
+    int32 winX;
+    int32 winY;
+    int32 mouseX;
+};
+
 
 struct TrayItem {
     std::string name;
@@ -140,7 +153,8 @@ struct TaskbarItem {
     bool* openStateFlag;     
     bool* minimizeStateFlag; 
     team_id teamId;       
-    int32 windowIndex;       
+    int32 windowIndex;    
+    float textAlpha = 0.0f;   
 };
 
 struct DesktopIconItem {
@@ -893,39 +907,51 @@ private:
     BCheckBox* fAutoHideCheckbox;
 	BCheckBox* fSystemTrayCheckbox;
 	BCheckBox* fAutoRaiseCheckbox;
+	BCheckBox* fTextOverlaysCheckbox;
+
 public:
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255});
 
         // Row 1: Dropped down slightly to account for the tighter shutdown button
         BRect checkboxRect(25.0f, 105.0f, frame.Width() - 25.0f, 120.0f);
-        fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide Dock", 
+        fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide", 
             new BMessage(MSG_AUTOHIDE_TOGGLED));
-        fAutoHideCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
+        fAutoHideCheckbox->SetHighColor(rgb_color{240, 240, 240, 255}); // Match high fidelity styling colors
         fAutoHideCheckbox->SetValue(autoHideEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoHideCheckbox);
 
         // Row 2: Placed tightly under Row 1
         BRect trayCheckboxRect(25.0f, 125.0f, frame.Width() - 25.0f, 140.0f);
-        fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", "Show System Tray in Dock", 
+        fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", "Enable System Tray", 
             new BMessage(MSG_SYSTEMTRAY_TOGGLED));
-        fSystemTrayCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
+        fSystemTrayCheckbox->SetHighColor(rgb_color{240, 240, 240, 255});
         fSystemTrayCheckbox->SetValue(showSystemTray ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSystemTrayCheckbox);
 
         // Row 3: Placed tightly under Row 2
         BRect autoRaiseRect(25.0f, 145.0f, frame.Width() - 25.0f, 160.0f);
-        fAutoRaiseCheckbox = new BCheckBox(autoRaiseRect, "auto_raise_cb", "Enable Dock Auto-raise", 
+        fAutoRaiseCheckbox = new BCheckBox(autoRaiseRect, "auto_raise_cb", "Enable Auto-Raise", 
             new BMessage(MSG_AUTORAISE_TOGGLED));
-        fAutoRaiseCheckbox->SetHighColor(rgb_color{220, 225, 235, 255});
+        fAutoRaiseCheckbox->SetHighColor(rgb_color{240, 240, 240, 255});
         fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoRaiseCheckbox);
+
+        // NEW Row 4: Placed tightly under Row 3 (Offset 20 pixels lower vertically to preserve alignment spacing)
+        BRect textOverlaysRect(25.0f, 165.0f, frame.Width() - 25.0f, 180.0f);
+        fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", "Enable Application Title Overlays", 
+            new BMessage(MSG_TEXTOVERLAYS_TOGGLED));
+        fTextOverlaysCheckbox->SetHighColor(rgb_color{220, 225, 235, 255}); // Match your custom text color profile exactly
+        fTextOverlaysCheckbox->SetValue(fShowTitleOverlays ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fTextOverlaysCheckbox);
     }
+
 
 
 
     virtual void Draw(BRect updateRect) {
         float canvasWidth = Bounds().Width();
+
 
         // 1. Render Window Header Context Title
         SetFont(be_bold_font);
@@ -947,7 +973,6 @@ public:
         SetDrawingMode(B_OP_ALPHA);
 
         // 3. Define the Interactive "Shutdown App" Button Metrics (COMPRESSED)
-        // Shrunk vertical footprint from 35px down to 24px (Y: 50 to 74)
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
         
         if (shutdownBtnRect.Contains(cursorPoint)) {
@@ -967,10 +992,19 @@ public:
         float shutdownTextW = StringWidth(shutdownText.String());
         DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
 
-        // 4. Standard Window Control "Close" button tracking metrics at footer (RAISED)
-        // Shifted upward into the clear view window zone (Y: 175 to 200)
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 175.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 200.0f);
+        // 4. BALANCED BACKING CONTAINER:
+        // Draws a dedicated background tray to house all 4 checkboxes beautifully.
+        // Left: 20px | Top: 95px | Right: canvasWidth - 20px | Bottom: 200px
+        SetHighColor(rgb_color{30, 31, 37, 255}); // Sleek unified slate backing panel
+        BRect checkboxTrayRect(20.0f, 95.0f, canvasWidth - 20.0f, 200.0f);
+        FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
+        SetHighColor(rgb_color{48, 50, 58, 255});
+        StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
+
+        // 5. Standard Window Control "Close" button tracking metrics at footer (SHIFTED DOWN)
+        // Shifted downward into the expanded view zone to leave 15px clear padding space (Y: 215 to 240)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 215.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 240.0f);
         
         if (closeBtnRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{100, 120, 160, 45});
@@ -985,8 +1019,9 @@ public:
         
         BString btnText("close");
         float btnTextW = StringWidth(btnText.String());
-        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 192.0f));
+        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 232.0f));
     }
+
 
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
@@ -996,12 +1031,12 @@ public:
     virtual void MouseDown(BPoint point) {
         float canvasWidth = Bounds().Width();
         
-        //  Coordinates match the new compressed 24px tall button (Y: 50 to 74)
+        // Coordinates match the compressed 24px tall button (Y: 50 to 74)
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
 
-        //  Coordinates match the newly raised close button position (Y: 175 to 200)
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 175.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 200.0f);
+        // FIX: Coordinates match the newly lowered close button position (Y: 215 to 240)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 215.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 240.0f);
         
         if (shutdownBtnRect.Contains(point)) {
             if (be_app) {
@@ -1018,12 +1053,14 @@ public:
         }
     }
 
+
     
     virtual void AttachedToWindow() {
         BView::AttachedToWindow();
         fAutoHideCheckbox->SetTarget(this);
         fSystemTrayCheckbox->SetTarget(this);
         fAutoRaiseCheckbox->SetTarget(this);
+        fTextOverlaysCheckbox->SetTarget(this);
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -1043,13 +1080,24 @@ public:
             case MSG_AUTORAISE_TOGGLED: {
                 dockAlwaysOnTop = (fAutoRaiseCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
+                Invalidate();
                 break;
             }
+
+            case MSG_TEXTOVERLAYS_TOGGLED: {
+                fShowTitleOverlays = (fTextOverlaysCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+            
             default:
                 BView::MessageReceived(message);
                 break;
         }
     }
+
+
 };
 
 
@@ -1060,7 +1108,7 @@ public:
 class HaikuConfigWindow : public BWindow {
 public:
     HaikuConfigWindow(BRect centralAnchor)
-        : BWindow(BRect(0, 0, 420, 220), "hdesktop Configuration",
+        : BWindow(BRect(0, 0, 560, 340), "hdesktop Configuration",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
                   B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
         
@@ -2566,19 +2614,113 @@ public:
 	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
 	            
             if (i == 0) {
-                if (gActiveDrawerInstance != nullptr) {                    
-                    if (gActiveDrawerInstance->Lock()) {
-                        gActiveDrawerInstance->Quit(); 
+                // =========================================================================
+                // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
+                // =========================================================================
+                if (button == SDL_BUTTON_RIGHT) {
+                    std::cout << "[Leaf Icon] Right-click detected. Spawning Async Settings Worker..." << std::endl;
+                    
+                    if (fLeafMenuIsActive) return;
+                    fLeafMenuIsActive = true;
+
+                    LeafMenuArgs* args = new LeafMenuArgs();
+                    args->engine = this;
+                    args->winX = 0; args->winY = 0;
+                    
+                    if (be_app && be_app->Lock()) {
+                        BWindow* mainNativeWin = be_app->WindowAt(0);
+                        if (mainNativeWin != nullptr) {
+                            args->winX = static_cast<int32>(mainNativeWin->Frame().left);
+                            args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+                        }
+                        be_app->Unlock();
                     }
-                } 
-                else {                   
-                    gActiveDrawerInstance = new HaikuAppDrawerWindow(fHeight);
-                    gActiveDrawerInstance->Show();
+                    args->mouseX = static_cast<int32>(x);
+
+                    // Inline background thread function context
+                    int32 (*inlineLeafThreadFunc)(void*) = [](void* data) -> int32 {
+                        LeafMenuArgs* threadArgs = static_cast<LeafMenuArgs*>(data);
+                        if (!threadArgs || !threadArgs->engine) {
+                            if (threadArgs) delete threadArgs;
+                            return B_ERROR;
+                        }
+
+                        BPopUpMenu* leafMenu = new BPopUpMenu("LeafPopup", false, false);
+                        leafMenu->SetRadioMode(false);
+                        leafMenu->AddItem(new BMenuItem("Preferences…", new BMessage('lCFG')));
+                        
+                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 15.0f;
+                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+                        
+                        float anchoredMenuY = static_cast<float>(threadArgs->winY) - 5.0f; 
+                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+
+                        BMenuItem* chosenAction = leafMenu->Go(screenClickPoint, false, false);
+                        
+                        threadArgs->engine->fLastLeafMenuCloseTime = SDL_GetTicks();
+                        threadArgs->engine->fLeafMenuIsActive = false; 
+
+                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
+                            if (chosenAction->Message()->what == 'lCFG') {
+                                std::cout << "[Async Thread] Target detected. Spawning Centered Config Window..." << std::endl;
+                                
+                                // 1. Set the exact layout frame dimensions matching your padded ConfigView (460x240)
+                                float winWidth = 460.0f;
+                                float winHeight = 260.0f;
+
+                                // 2. Query the native Haiku screen subsystem to get active display frame bounds
+                                BScreen screen(B_MAIN_SCREEN_ID);
+                                BRect screenFrame = screen.Frame();
+                                
+                                // 3. Compute absolute horizontal and vertical center point anchors
+                                float centerX = screenFrame.left + (screenFrame.Width() - winWidth) / 2.0f;
+                                float centerY = screenFrame.top + (screenFrame.Height() - winHeight) / 2.0f;
+
+                                // Establish the perfectly centered bounding box rect coordinates
+                                BRect centeredBounds(centerX, centerY, centerX + winWidth, centerY + winHeight);
+                                
+                                // Instantiate standard BWindow base shell with our centered boundaries
+                                BWindow* settingsWindow = new BWindow(centeredBounds, "hdesktop settings", 
+                                    B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_NOT_RESIZABLE);
+                                
+                                settingsWindow->AddChild(new ConfigView(settingsWindow->Bounds()));
+                                settingsWindow->Show();
+
+                            }
+                        }
+
+                        delete leafMenu;
+                        delete threadArgs; 
+                        return B_OK;
+                    };
+
+                    thread_id menuThread = spawn_thread(inlineLeafThreadFunc, "async_leaf_menu", B_NORMAL_PRIORITY, args);
+                    if (menuThread >= B_OK) {
+                        resume_thread(menuThread);
+                    } else {
+                        fLeafMenuIsActive = false;
+                        delete args;
+                    }
                 }
-                
-                fShowMainMenu = false; 
+                // =========================================================================
+                // LEAF ICON LEFT-CLICK: TOGGLE NATIVE MAIN DRAWER (ORIGINAL PIPELINE)
+                // =========================================================================
+                else {
+                    if (gActiveDrawerInstance != nullptr) {                    
+                        if (gActiveDrawerInstance->Lock()) {
+                            gActiveDrawerInstance->Quit(); 
+                        }
+                    } 
+                    else {                   
+                        gActiveDrawerInstance = new HaikuAppDrawerWindow(fHeight);
+                        gActiveDrawerInstance->Show();
+                    }
+                    
+                    fShowMainMenu = false; 
+                }
             } 
             return;
+
         }
 
 	        currentX += size + padding;
@@ -2679,17 +2821,19 @@ public:
 	                return; 
 	            }
 
-	
-	
-	            if (fShowMainMenu) {
-	                BWindow* nativeWin = be_app->WindowAt(0);
-	                if (nativeWin != nullptr && nativeWin->Lock()) {
-	                    nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
-	                    nativeWin->ResizeBy(0, -220.0f);
-	                    nativeWin->MoveBy(0, 220.0f);
-	                    nativeWin->Unlock();
-	                }
-	            }
+
+                 if (fShowMainMenu) {
+                        BWindow* nativeWin = be_app->WindowAt(0);
+                        if (nativeWin != nullptr && nativeWin->Lock()) {
+                            nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
+                            nativeWin->ResizeBy(0, -220.0f);
+                            nativeWin->MoveBy(0, 220.0f);
+                            nativeWin->Unlock();
+                        }
+                    }
+                
+
+
 	            fShowMainMenu = false;
 
 	
@@ -3206,10 +3350,6 @@ public:
 
 
 
-
-
-
-
 	void SetHaikuMixerVolume(float targetVolumeFraction) {
 	    BMediaRoster* roster = BMediaRoster::Roster();
 	    if (!roster) return;
@@ -3283,6 +3423,103 @@ public:
 	    }
 	    glEnd();
 	}
+
+
+
+
+	class OpenGlShapeIterator : public BShapeIterator {
+	public:
+	    // We add an explicit horizontal aspect scaling parameter (e.g. 1.25f)
+	    OpenGlShapeIterator(float xOffset, float baselineY, float aspectX) 
+	        : fX(xOffset), fBaselineY(baselineY), fAspectX(aspectX) {}
+	
+	    virtual status_t IterateMoveTo(BPoint* point) {
+	        glEnd();
+	        glBegin(GL_LINE_STRIP);
+	        // RESTORED DIRECT MATCH: Reverted back to your working right-side up vertical plane layout.
+	        // We stretch the x coordinate with our proportional structural spacing multiplier.
+	        glVertex2f(fX + (point->x * fAspectX), fBaselineY + point->y);
+	        return B_OK;
+	    }
+	
+	    virtual status_t IterateLineTo(int32 count, BPoint* points) {
+	        for (int32 i = 0; i < count; i++) {
+	            glVertex2f(fX + (points[i].x * fAspectX), fBaselineY + points[i].y);
+	        }
+	        return B_OK;
+	    }
+	
+	    virtual status_t IterateBezierTo(int32 count, BPoint* points) {
+	        for (int32 i = 0; i < count; i += 3) {
+	            BPoint p0 = (i == 0) ? BPoint(0,0) : points[i-1];
+	            BPoint p1 = points[i];
+	            BPoint p2 = points[i+1];
+	            BPoint p3 = points[i+2];
+	            
+	            // High fidelity 8-step subdivision tracks maintain curve smoothness
+	            for (float t = 0.125f; t <= 1.0f; t += 0.125f) {
+	                float u = 1.0f - t;
+	                float x = u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x;
+	                float y = u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y;
+	                
+	                glVertex2f(fX + (x * fAspectX), fBaselineY + y);
+	            }
+	        }
+	        return B_OK;
+	    }
+	
+	    virtual status_t IterateClose() {
+	        glEnd();
+	        glBegin(GL_LINE_STRIP);
+	        return B_OK;
+	    }
+	
+	private:
+	    float fX, fBaselineY, fAspectX;
+	};
+	
+	void DrawNativeSystemText(const char* text, float centerX, float baselineY) {
+	    if (text == nullptr || text[0] == '\0') return;
+	
+	    int textWidth = 0;
+	    int textHeight = 0;
+	    
+	    // Generate the bold, rounded-capsule texture matrix
+	    HaikuTexture textTex = RenderWhiteTextToTexture(text, &textWidth, &textHeight, 11.0f);
+	    if (textTex.id == 0) return;
+	
+	    // Direct mapping alignment bounding coordinates relative to icon centerline
+	    float left = centerX - (textWidth / 2.0f);
+	    float right = centerX + (textWidth / 2.0f);
+	    float top = baselineY - textHeight;
+	    float bottom = baselineY;
+	
+	    // State attribute protection sandbox
+	    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT);
+	    
+	    glEnable(GL_TEXTURE_2D);
+	    glBindTexture(GL_TEXTURE_2D, textTex.id);
+	
+	    glEnable(GL_BLEND);
+	    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	    
+	    // Keep internal color states tracking cleanly as absolute white
+	    glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+	
+	    // Render the complete composite capsule quad asset onto the application layer
+	    glBegin(GL_QUADS);
+	        glTexCoord2f(0.0f, 0.0f); glVertex2f(left,  top);
+	        glTexCoord2f(1.0f, 0.0f); glVertex2f(right, top);
+	        glTexCoord2f(1.0f, 1.0f); glVertex2f(right, bottom);
+	        glTexCoord2f(0.0f, 1.0f); glVertex2f(left,  bottom);
+	    glEnd();
+	
+	    glPopAttrib();
+	    glDeleteTextures(1, &textTex.id); // Eliminate dynamic memory leaks instantly
+	}
+
+
+
 
 
 
@@ -3717,196 +3954,90 @@ public:
 		}
 
 		
-	// =========================================================================
-	// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
-	// =========================================================================
+		// =========================================================================
+		// STEP 3: RENDER THE LIVE RUNNING APPLICATION WINDOW CONTEXT TAIL LOG MODULES
+		// =========================================================================
+		
+		// PERFORMANCE ANCHOR: Fetch the active workspace and system window tokens ONCE 
+		// before drawing. This reduces CPU utilization to virtually zero during redrawing.
+		int32 currentWorkspace = current_workspace();
+		int32* windowTokens = nullptr;
+		int32 totalWindows = 0;
+		BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
 	
-	// PERFORMANCE ANCHOR: Fetch the active workspace and system window tokens ONCE 
-	// before drawing. This reduces CPU utilization to virtually zero during redrawing.
-	int32 currentWorkspace = current_workspace();
-	int32* windowTokens = nullptr;
-	int32 totalWindows = 0;
-	BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
-
-	for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-	    auto& activeTaskWin = fTaskbarWindows[w];		
-	    float size = dynamicWidths[renderingSlotIdx];
-	    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
+		    auto& activeTaskWin = fTaskbarWindows[w];		
+		    float size = dynamicWidths[renderingSlotIdx];
+		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+		
+		    bool isTracker = (activeTaskWin.title == "Tracker");
+		    int32 normalVisibleWindows = 0;
+		    int32 totalTeamWindows = 0;
 	
-	    bool isTracker = (activeTaskWin.title == "Tracker");
-
-	    // ---------------------------------------------------------------------
-	    // PATH A: TRACKER EXCLUSIVE STATE CHECK (Your 100% Original Code Block)
-	    // ---------------------------------------------------------------------
-	    if (isTracker) {
-	        bool generalAppIsVisible = false;
-	        thread_info info;
-	        int32 cookie = 0;
-	        while (get_next_thread_info(activeTaskWin.teamId, &cookie, &info) == B_OK) {
-	            BString threadName(info.name);
-	            
-	            if (info.state == B_THREAD_RUNNING || info.state == B_THREAD_READY) {
-	                if (threadName.IFindFirst("window") >= 0 || 
-	                    threadName.IFindFirst("loop") >= 0 || 
-	                    threadName.IFindFirst("render") >= 0 || 
-	                    threadName.Compare(activeTaskWin.title.c_str()) == 0) {
-	                    generalAppIsVisible = true;
-	                    break;
-	                }
-	            }
-	        } 
-	        
-	        // Check system-wide foreground focus
-	        app_info activeAppInfo;
-	        bool isCurrentlyForeground = false;
-	        bool isTrackerDesktopClick = false; // Guard Variable
-
-	        if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-	            if (activeAppInfo.team == activeTaskWin.teamId) {
-	                isCurrentlyForeground = true;
-
-	                // FIX: Detect if the Tracker foreground focus is just a Desktop click
-	                if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
-	                    int32 windowCount = 0;
-	                    
-	                    // Query the private app_server hook for token tracking lists
-	                    int32 tokenCount = 0;
-	                    int32* tokens = get_token_list(activeTaskWin.teamId, &tokenCount);
-	                    if (tokens != nullptr) {
-	                        // Filter out tokens that don't belong to real graphical user windows
-	                        for (int32 i = 0; i < tokenCount; ++i) {
-	                            client_window_info* wInfo = get_window_info(tokens[i]);
-	                            if (wInfo != nullptr) {
-	                                // Real open folder panels stack on Layer 3 or above.
-	                                if (wInfo->layer >= 3) {
-	                                    windowCount++;
-	                                }
-	                                free(wInfo);
-	                            }
-	                        }
-	                        free(tokens);
-	                    }
-	                    
-	                    // If no windows exist on layer 3 or above, it is definitively the desktop backdrop.
-	                    if (windowCount == 0) {
-	                        isCurrentlyForeground = false;
-	                        isTrackerDesktopClick = true; // Trigger our guard flag
-	                    }
-	                }
-	            }
-	        }
-
-	        // TARGETED GUARD: Force thread visibility to false on a desktop click
-	        if (isTrackerDesktopClick) {
-	            generalAppIsVisible = false;
-	        }
-
-	        // MULTI-INSTANCE INSTANCE FIX: CREATE COMPOSITE STRUCTURAL KEYS FOR INDEPENDENT STREAKS
-	        std::pair<team_id, int32> instanceKey(activeTaskWin.teamId, static_cast<int32>(w));
-
-	        static std::map<std::pair<team_id, int32>, int32> invisibleStreak;
-	        static std::map<std::pair<team_id, int32>, int32> visibleStreak;
-	        
-	        // ASYMMETRICAL BALANCING:
-	        const int32 THRESHOLD_MINIMIZE = 1; 
-	        const int32 THRESHOLD_MAXIMIZE = 33; 
-
-	        bool nextState = activeTaskWin.isMinimized;
-
-	        // FIX: Establish a temporal guard to allow newly woken app threads to stabilize 
-	        static std::map<std::pair<team_id, int32>, uint32> lastStateChangeTicks;
-	        uint32 currentTicks = SDL_GetTicks();
-	        
-	        // Track if a manual state shift just occurred
-	        static std::map<std::pair<team_id, int32>, bool> lastKnownState;
-	        
-	        // CRITICAL BYPASS FIX: Do not track ticks if it's an automated desktop click correction
-	        if (!isTrackerDesktopClick && (lastKnownState[instanceKey] != activeTaskWin.isMinimized)) {
-	            lastStateChangeTicks[instanceKey] = currentTicks;
-	            lastKnownState[instanceKey] = activeTaskWin.isMinimized;
-	        }
-
-	        // Grace period: Lock the state to what the click handler set for 500ms
-	        // CRITICAL BYPASS FIX: Explicitly ignore the grace period on a desktop click
-	        bool inGracePeriod = (!isTrackerDesktopClick && (currentTicks - lastStateChangeTicks[instanceKey] < 500));
-
-	        if (isCurrentlyForeground) {
-	            invisibleStreak[instanceKey] = 0;
-	            visibleStreak[instanceKey] = 0;
-	            nextState = false;
-	        } else if (!inGracePeriod) { // Only evaluate streaks if outside the grace period
-	            if (!generalAppIsVisible) {
-	                invisibleStreak[instanceKey]++;
-	                visibleStreak[instanceKey] = 0;
-	                
-	                bool quickBackgroundCheck = false;
-	                if (activeAppInfo.team == activeTaskWin.teamId) {
-	                    quickBackgroundCheck = (activeAppInfo.flags & B_BACKGROUND_APP);
-	                }
-
-	                if (quickBackgroundCheck || invisibleStreak[instanceKey] >= THRESHOLD_MINIMIZE) {
-	                    nextState = true;
-	                }
-	            } else {
-	                visibleStreak[instanceKey]++;
-	                invisibleStreak[instanceKey] = 0;
-	                
-	                // Icon will only un-dim if the app threads stay awake continuously 
-	                if (visibleStreak[instanceKey] >= THRESHOLD_MAXIMIZE) {
-	                    nextState = false;
-	                }
-	            }
-	        }
-
-	        // Smoothly toggle the state if outside grace period OR if forcing a desktop click update
-	        if (!inGracePeriod || isTrackerDesktopClick) {
-	            activeTaskWin.isMinimized = nextState;          
-	        }
-	    }
-	    // ---------------------------------------------------------------------
-	    // PATH B: STANDARD APPLICATIONS (New Workspace Mask Method)
-	    // ---------------------------------------------------------------------
-	    else {
-	        int32 normalVisibleWindows = 0;
-	        int32 totalTeamWindows = 0;
-
-	        if (windowTokens != nullptr && totalWindows > 0) {
-	            for (int32 i = 0; i < totalWindows; ++i) {
-	                client_window_info* info = get_window_info(windowTokens[i]);
-	                if (info == nullptr) continue;
-
-	                if (info->team == activeTaskWin.teamId) {
-	                    if (info->feel == B_NORMAL_WINDOW_FEEL) {
-	                        totalTeamWindows++;
-	                        if (!info->is_mini && info->layer > 0) {
-	                            if (info->workspaces & (1 << currentWorkspace)) {
-	                                normalVisibleWindows++;
-	                            }
-	                        }
-	                    }
-	                }
-	                free(info);
-	            }
-	        }
-
-	        bool appIsGenuinelyMinimized = (totalTeamWindows > 0) ? (normalVisibleWindows == 0) : false;
-
-	        // Check standard app foreground focus
-	        app_info activeAppInfo;
-	        bool isCurrentlyForeground = false;
-	        if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-	            if (activeAppInfo.team == activeTaskWin.teamId) {
-	                isCurrentlyForeground = true;
-	            }
-	        }
-
-	        if (isCurrentlyForeground) {
-	            activeTaskWin.isMinimized = false;
-	        } else {
-	            activeTaskWin.isMinimized = appIsGenuinelyMinimized;
-	        }
-	    }
-	    
+		    // 1. UNIVERSAL STATE CHECKING PIPELINE (Replaces thread counters and streaks)
+		    if (windowTokens != nullptr && totalWindows > 0) {
+		        for (int32 i = 0; i < totalWindows; ++i) {
+		            client_window_info* info = get_window_info(windowTokens[i]);
+		            if (info == nullptr) continue;
+	
+		            if (info->team == activeTaskWin.teamId) {
+		                if (isTracker) {
+		                    // TRACKER RULE: Target only active folder panels (layer 3+) 
+		                    // Discards desktop backdrop (1024) and right-click popups (1025)
+		                    if (info->feel == B_NORMAL_WINDOW_FEEL && info->layer >= 3) {
+		                        totalTeamWindows++;
+		                        if (!info->is_mini && (info->workspaces & (1 << currentWorkspace))) {
+		                            normalVisibleWindows++;
+		                        }
+		                    }
+		                } else {
+		                    // STANDARD APPLICATIONS RULE: Filter by standard user-facing window behaviors
+		                    if (info->feel == B_NORMAL_WINDOW_FEEL) {
+		                        totalTeamWindows++;
+		                        if (!info->is_mini && info->layer > 0) {
+		                            if (info->workspaces & (1 << currentWorkspace)) {
+		                                normalVisibleWindows++;
+		                            }
+		                        }
+		                    }
+		                }
+		            }
+		            free(info);
+		        }
+		    }
+	
+		    // Deduce if the application's graphical canvas is completely folded down
+		    bool appIsGenuinelyMinimized = false;
+		    if (isTracker) {
+		        appIsGenuinelyMinimized = (normalVisibleWindows == 0);
+		    } else if (totalTeamWindows > 0) {
+		        appIsGenuinelyMinimized = (normalVisibleWindows == 0);
+		    }
+	
+		    // 2. NATIVE FOREGROUND FOCUS CHECKING
+		    app_info activeAppInfo;
+		    bool isCurrentlyForeground = false;
+	
+		    if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+		        if (activeAppInfo.team == activeTaskWin.teamId) {
+		            isCurrentlyForeground = true;
+		            
+		            // If Tracker is currently focused but has no active folder windows open,
+		            // it is definitively a desktop background click. Treat it as minimized.
+		            if (isTracker && normalVisibleWindows == 0) {
+		                isCurrentlyForeground = false;
+		                appIsGenuinelyMinimized = true;
+		            }
+		        }
+		    }
+	
+		    // 3. ZERO-LAG ASSIGNMENT 
+		    if (isCurrentlyForeground) {
+		        activeTaskWin.isMinimized = false;
+		    } else {
+		        activeTaskWin.isMinimized = appIsGenuinelyMinimized;
+		    }
+		    
 	    // =========================================================================
 	    // STEP 4: DRAW WINDOW ICON THUMBNAIL CORES AND ACTIVE INDICATORS
 	    // =========================================================================
@@ -3928,11 +4059,30 @@ public:
 	        glEnd();
 	        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
 	    }
+
+
+	    // HOVER TITLE SYSTEM TEXT OVERLAY
+	    const float BASE_ICON_SIZE_THRESHOLD = 48.0f; 
+	    if (size > BASE_ICON_SIZE_THRESHOLD) {
+	        
+	        // SYSTEM TOGGLE GUARD:
+	        // Only allocate textures and render strings if the overlay flag is active.
+	        if (fShowTitleOverlays) {
+	            // Position the text capsule precisely 12 pixels above the dynamic top boundary edge of the icon
+	            float titleYPosition = iconBounds.top - 12.0f;
+	            
+	            // Find the absolute horizontal centerline of the currently zoomed element
+	            float iconHorizontalCenter = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
+	            
+	            // Renders crisp bold anti-aliased system text boxes using your built-in rendering code
+	            DrawNativeSystemText(activeTaskWin.title.c_str(), iconHorizontalCenter, titleYPosition);
+	        }
+	    }
+
 	
 	    // B. Draw an active native glowing mini ledger stripe indicator line below active windows
 	    glDisable(GL_TEXTURE_2D);
 	    if (activeTaskWin.isMinimized == false && !isTracker) {
-	        // Bright glowing electric blue highlight segment line for focused open panels
 	        glColor4f(0.2f, 0.6f, 1.0f, 0.9f); 
 	        glLineWidth(3.0f);
 	        glBegin(GL_LINES);
@@ -3940,25 +4090,20 @@ public:
 	            glVertex2f(iconBounds.right - 4.0f, dockPlate.bottom - 4.0f);
 	        glEnd();
 	    }
+
+		
+		    currentX += size + padding;
+		    renderingSlotIdx++;
+		}
 	
-	    currentX += size + padding;
-	    renderingSlotIdx++;
-	} // This terminates the main fTaskbarWindows iteration loop safely
-
-	// 4. RESOURCE CLEANUP PAIRING
-	// Safely free the central workspace window token allocation array outside the loop
-	if (windowTokens != nullptr) {
-	    free(windowTokens);
-	}
-
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
-
-	// Left Clock Divider Line
-
-
-
-
-
+		// 4. RESOURCE CLEANUP PAIRING
+		if (windowTokens != nullptr) {
+		    free(windowTokens);
+		}
+	
+		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
+	
+		// Left Clock Divider Line
 
 	       float lineLeftSnappedX = std::floor(currentX + 0.5f);
 	       glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
@@ -4517,6 +4662,88 @@ private:
             glVertex2f(cx + radius * std::cos(rad), cy + radius * std::sin(rad));
         }
     }
+    
+	HaikuTexture RenderWhiteTextToTexture(const char* labelText, int* outWidth, int* outHeight, float targetFontSize = -1.0f) {
+	    HaikuTexture textTex;
+	    
+	    // 1. Configure the font to use B_BOLD_FACE for high readability
+	    BFont localFont(be_plain_font);
+	    localFont.SetFace(B_BOLD_FACE);
+	    
+	    if (targetFontSize > 0.0f) {
+	        localFont.SetSize(targetFontSize);
+	    } else {
+	        localFont.SetSize(12.0f); 
+	    }
+	    
+	    // Add extra horizontal breathing padding specifically for bold text sizing
+	    float stringPixelWidth = localFont.StringWidth(labelText);
+	    font_height fontMetrics;
+	    localFont.GetHeight(&fontMetrics);
+	    float fontTotalHeight = fontMetrics.ascent + fontMetrics.descent + fontMetrics.leading;
+	
+	    // Expand the allocation dimensions to perfectly containerize our rounded capsule edges
+	    int bitmapW = (int)(stringPixelWidth + 16.0f); 
+	    int bitmapH = (int)(fontTotalHeight + 10.0f);
+	    
+	    if (bitmapW % 2 != 0) bitmapW++;
+	
+	    *outWidth = bitmapW;
+	    *outHeight = bitmapH;
+	
+	    BRect drawingBounds(0, 0, bitmapW - 1, bitmapH - 1);
+	    BBitmap* textBitmap = new BBitmap(drawingBounds, B_RGBA32, true);
+	    
+	    memset(textBitmap->Bits(), 0, textBitmap->BitsLength());
+	
+	    BView* drawTarget = new BView(drawingBounds, "text_raster_view", B_FOLLOW_NONE, B_WILL_DRAW);
+	    textBitmap->AddChild(drawTarget);
+	
+	    if (textBitmap->Lock()) {
+	        // Clear background pixels to absolute transparency
+	        drawTarget->SetLowColor(B_TRANSPARENT_COLOR); 
+	        drawTarget->FillRect(drawTarget->Bounds(), B_SOLID_LOW);
+	        
+	        // Configure native alpha compositing pass
+	        drawTarget->SetDrawingMode(B_OP_ALPHA);
+	        drawTarget->SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_COMPOSITE);
+	        
+	        // 2. Draw a native, perfect anti-aliased dark background capsule with rounded corners
+	        drawTarget->SetHighColor(15, 15, 15, 190); // 190 alpha sleek translucent dark bubble
+	        drawTarget->FillRoundRect(drawTarget->Bounds(), 5.0f, 5.0f); // 5.0f smooth corner radii
+	
+	        // 3. Render the solid white bold system text safely on top of the capsule
+	        drawTarget->SetHighColor(255, 255, 255, 255); 
+	        drawTarget->SetFont(&localFont);
+	        
+	        // Center the bold layout string context vertically and horizontally inside our bounding container
+	        float textX = 8.0f;
+	        float textY = fontMetrics.ascent + 5.0f;
+	        drawTarget->DrawString(labelText, BPoint(textX, textY));
+	        
+	        drawTarget->Sync(); 
+	        textBitmap->Unlock();
+	    }
+	
+	    glGenTextures(1, &textTex.id);
+	    glBindTexture(GL_TEXTURE_2D, textTex.id);
+	    
+	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	
+	    glTexImage2D(
+	        GL_TEXTURE_2D, 0, GL_RGBA8, bitmapW, bitmapH, 0, 
+	        GL_BGRA, GL_UNSIGNED_BYTE, textBitmap->Bits()
+	    );
+	
+	    delete textBitmap; 
+	    return textTex;
+	}
+
+   
+    
 
     HaikuTexture RenderTextToTexture(const char* labelText, int* outWidth, int* outHeight, float targetFontSize = -1.0f) {
         HaikuTexture textTex;
@@ -4723,6 +4950,8 @@ public:
     float fLastCalculatedWidth = 0.0f;	
     bool fCpuMenuIsActive; 
     bool fCursorIsInsideHitbox = false;
+    bool fLeafMenuIsActive = false;
+	uint32 fLastLeafMenuCloseTime = 0;
 };
 
 
@@ -4784,6 +5013,9 @@ void LoadConfiguration() {
     BPath path;
     gFavoritePaths.clear(); // Reset to prevent duplicate tracking anomalies
     
+    // Set a safe fallback default before parsing disk files
+    fShowTitleOverlays = true; 
+
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
         path.Append("hdesktop_settings");
         
@@ -4801,6 +5033,9 @@ void LoadConfiguration() {
             }
             if (settings.FindBool("auto_raise", &savedValue) == B_OK) {
                 dockAlwaysOnTop = savedValue;
+            }
+            if (settings.FindBool("text_overlays", &savedValue) == B_OK) {
+                fShowTitleOverlays = savedValue;
             }
             
             // 2. Recover the favorites string index array
@@ -4826,9 +5061,10 @@ void SaveConfiguration() {
         BMessage settings;
         
         // 1. Pack existing settings
-        settings.AddBool("auto_hide",  autoHideEnabled);
-        settings.AddBool("sys_tray",   showSystemTray);
-        settings.AddBool("auto_raise", dockAlwaysOnTop);
+        settings.AddBool("auto_hide",     autoHideEnabled);
+        settings.AddBool("sys_tray",      showSystemTray);
+        settings.AddBool("auto_raise",    dockAlwaysOnTop);
+        settings.AddBool("text_overlays", fShowTitleOverlays);
         
         // 2. Pack all live favorites keys sequentially into the same field name
         std::set<std::string>::iterator it;
@@ -4839,6 +5075,7 @@ void SaveConfiguration() {
         settings.Flatten(&file); 
     }
 }
+
 
 // =========================================================================
 // ASYNC CPU MENU RUNNER 
@@ -5165,7 +5402,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.23"; 
+    const char* localVersion = "v1.0.24"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
