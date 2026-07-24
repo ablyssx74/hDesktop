@@ -5165,7 +5165,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.22"; 
+    const char* localVersion = "v1.0.23"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
@@ -5273,41 +5273,6 @@ int main(int argc, char* argv[]) {
 
                             desktopEngine.HandleMouseClick(mouseX, adjustedMouseY, incomingEventPackage.button.button);
 
-							/*
-
-							// =========================================================================
-							// EDGE-TRIGGERED WINDOW DEPTH MITIGATION SYSTEM
-							// =========================================================================
-							static bool lastLayerStateWasBehind = false;
-							
-							// Fix: Use the inverse of your cursor track flag
-							if (!cursorIsInsideDock && !lastLayerStateWasBehind) {
-							    lastLayerStateWasBehind = true;
-							
-							    if (be_app && be_app->Lock()) {
-							        int32 windowCount = be_app->CountWindows();
-							        
-							        for (int32 i = 0; i < windowCount; i++) {
-							            BWindow* win = be_app->WindowAt(i);
-							            
-							            if (win != nullptr && win->LockWithTimeout(20000) == B_OK) {
-							                win->SendBehind(nullptr);
-							                
-							                uint32 flags = win->Flags();
-							                flags |= (B_AVOID_FRONT | B_AVOID_FOCUS);
-							                win->SetFlags(flags);
-							
-							                win->Unlock();
-							            }
-							        }
-							        be_app->Unlock();
-							    }
-							} 
-							else if (cursorIsInsideDock) {
-							    // Reset the trigger state when the cursor comes back inside
-							    lastLayerStateWasBehind = false;
-							}
-							*/
 
 				        }
 				        
@@ -5392,56 +5357,81 @@ int main(int argc, char* argv[]) {
         if (dockAlwaysOnTop && (cursorIsInsideDock != lastHoverState)) {
             lastHoverState = cursorIsInsideDock; 
             
-          bool activeAppIsTracker = false;
-           app_info activeAppInfo;
+            bool trackerSubmenuIsOpen = false;
+            app_info activeAppInfo;
            
-           // Query the roster right at the moment of exit boundary trip
-           if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-               if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
-                   activeAppIsTracker = true;
-               }
-           }
-            if (!activeAppIsTracker) {
-            if (be_app && be_app->Lock()) {
-                int32 windowCount = be_app->CountWindows();
-                for (int32 i = 0; i < windowCount; i++) {
-                    BWindow* win = be_app->WindowAt(i);
-                    if (win != nullptr && win->Lock()) {
-                        uint32 flags = win->Flags();
-
-                        if (cursorIsInsideDock) {
-                            // 1. Elevate instantly above all standard applications
-                            win->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
-                            flags &= ~B_AVOID_FRONT;
-                            flags &= ~B_AVOID_FOCUS;
-                            
-                            win->Activate(true);
-                        } else {
-                            // 2. Return to normal window layer
-                            win->SetFeel(B_NORMAL_WINDOW_FEEL);
-                            flags |= B_AVOID_FRONT;
-                            flags |= B_AVOID_FOCUS;
-                            win->SendBehind(nullptr);
-                            // 3. STRICT SYSTEM TARGET CHECKERS
-                            app_info activeAppInfo;                           
-
-
-                            if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-                                    be_roster->ActivateApp(activeAppInfo.team);
+            // Query the roster right at the moment of exit boundary trip
+            if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+                if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
+                    
+                    // Deep Scan: Check specifically for Tracker's unique right-click menu footprint
+                    int32 currentWorkspace = current_workspace();
+                    int32* tokens = nullptr;
+                    int32 totalTokens = 0;
+                    
+                    if (BPrivate::get_window_order(currentWorkspace, &tokens, &totalTokens) == B_OK && tokens != nullptr) {
+                        for (int32 i = 0; i < totalTokens; i++) {
+                            client_window_info* wInfo = get_window_info(tokens[i]);
+                            if (wInfo != nullptr) {
+                                if (wInfo->team == activeAppInfo.team) {
+                                    // Based on your debug logs, 1025 represents active context/pop-up submenus.
+                                    if (wInfo->feel == 1025) {
+                                        trackerSubmenuIsOpen = true;
+                                        free(wInfo);
+                                        break; 
+                                    }
                                 }
+                                free(wInfo);
                             }
-                       
-                        
-                        win->SetFlags(flags);
-                        win->Unlock();
-                        break;
+                        }
+                        free(tokens);
                     }
                 }
-                be_app->Unlock();
             }
+
+            // PERMISSION RULE: 
+            // We proceed with normal dock layering adaptations (allowing clipping) UNLESS
+            // a Tracker right-click submenu is actively open on the screen.
+            if (!trackerSubmenuIsOpen) {
+                if (be_app && be_app->Lock()) {
+                    int32 windowCount = be_app->CountWindows();
+                    for (int32 i = 0; i < windowCount; i++) {
+                        BWindow* win = be_app->WindowAt(i);
+                        if (win != nullptr && win->Lock()) {
+                            uint32 flags = win->Flags();
+
+                            if (cursorIsInsideDock) {
+                                // 1. Elevate instantly above all standard applications
+                                win->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
+                                flags &= ~B_AVOID_FRONT;
+                                flags &= ~B_AVOID_FOCUS;
+                                win->Activate(true);
+                            } else {
+                                // 2. Return to normal window layer (Allows standard windows/folders to clip it)
+                                win->SetFeel(B_NORMAL_WINDOW_FEEL);
+                                flags |= B_AVOID_FRONT;
+                                flags |= B_AVOID_FOCUS;
+                                win->SendBehind(nullptr);
+                                
+                                app_info currentActiveInfo;                           
+                                if (be_roster && be_roster->GetActiveAppInfo(&currentActiveInfo) == B_OK) {
+                                    be_roster->ActivateApp(currentActiveInfo.team);
+                                }
+                            }
+                           
+                            win->SetFlags(flags);
+                            win->Unlock();
+                            break;
+                        }
+                    }
+                    be_app->Unlock();
+                }
+            } else {
+                std::cout << "[Dock Override] Tracker submenu (1025) detected. Bypassing layering reset." << std::endl;
             }
             needsRender = true;
         }
+
 		
         // =========================================================================
 
