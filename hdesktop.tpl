@@ -13,7 +13,6 @@ copyrights {
 }
 provides {
 	$(GUI_TARGET) = $(VERSION)-1
-	libhdhomerun
 }
 requires {
 	haiku
