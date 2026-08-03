@@ -16,8 +16,8 @@ provides {
 }
 requires {
 	haiku
-	libsdl2
-	curl
+	libsdl2$(is32bit)
+	curl$(is32bit)
 }	
 urls {
 	"https://github.com/ablyssx74/hdesktop"

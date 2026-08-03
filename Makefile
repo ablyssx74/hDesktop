@@ -14,6 +14,7 @@ ifeq ($(UNAME_M), x86)
     CXX = g++-x86 
     ARCH = x86_gcc2
     INCLUDE = -L/boot/system/lib/x86 
+    is32bit = _x86
 else ifeq ($(UNAME_M), x86_64)
     CXX = g++
     ARCH = x86_64
@@ -69,7 +70,7 @@ release: all
 	@[ -n "$(PACKAGE_DIR)" ] || { echo "PACKAGE_DIR is undefined"; exit 1; }
 	rm -rf "./$(PACKAGE_DIR)"
 	mkdir -p $(PACKAGE_DIR)
-	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
+	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(is32bit)/$(is32bit)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
 	mkdir -p $(PACKAGE_DIR)/apps
 	mkdir -p $(PACKAGE_DIR)/bin
 	#mkdir -p $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/

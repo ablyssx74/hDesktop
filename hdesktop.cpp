@@ -2208,7 +2208,7 @@ public:
                             std::cout << "[Systray Menu] Offloading replicant query to background thread: " << item.name << std::endl;
                             fTrackerMenuIsActive = true; 
 
-                            int32 winX = 0, winY = 0;
+                            int winX = 0, winY = 0;
                             SDL_Window* activeWin = SDL_GetMouseFocus();
                             if (activeWin) {
                                 SDL_GetWindowPosition(activeWin, &winX, &winY);
@@ -2860,7 +2860,7 @@ public:
 				        std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
 				        fTrackerMenuIsActive = true; // Engage active state safety latch
 				    
-				        int32 winX = 0, winY = 0;
+				        int winX = 0, winY = 0;
 				        SDL_Window* activeWin = SDL_GetMouseFocus();
 				        if (activeWin) {
 				            SDL_GetWindowPosition(activeWin, &winX, &winY);
@@ -3073,7 +3073,7 @@ public:
 	            std::cout << "[Trash Menu] Offloading trash context menu to background thread..." << std::endl;
 	            fTrackerMenuIsActive = true; 
 	
-	            int32 winX = 0, winY = 0;
+	            int winX = 0, winY = 0;
 	            SDL_Window* activeWin = SDL_GetMouseFocus();
 	            if (activeWin) {
 	                SDL_GetWindowPosition(activeWin, &winX, &winY);
@@ -3233,7 +3233,7 @@ public:
 	                                    }
 	                                }
 	
-	                                int32 winX = 0, winY = 0;
+	                                int winX = 0, winY = 0;
 	                                SDL_Window* activeWin = SDL_GetMouseFocus();
 	                                if (activeWin) SDL_GetWindowPosition(activeWin, &winX, &winY);
 	                                BPoint screenClickPoint(static_cast<float>(winX + x), static_cast<float>(winY + y));
@@ -3315,7 +3315,7 @@ public:
 	    
 	    if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
 	        // Fetch absolute screen coordinate offsets via the active window context
-	        int32 winX = 0, winY = 0;
+	        int winX = 0, winY = 0;
 	        SDL_Window* activeWin = SDL_GetMouseFocus();
 	        if (activeWin) {
 	            SDL_GetWindowPosition(activeWin, &winX, &winY);
