@@ -1,5 +1,5 @@
 name			$(GUI_TARGET)
-version			$(VERSION)-1
+version			$(VERSION)-$(REVISION)
 architecture	$(ARCH)
 summary 		"hdesktop"
 description 	"hdesktop - SDL2 OpenGL Hyrbid Desktop Manager"
@@ -12,7 +12,7 @@ copyrights {
 	"$(YEAR) ablyss"
 }
 provides {
-	$(GUI_TARGET) = $(VERSION)-1
+	$(GUI_TARGET) = $(VERSION)-$(REVISION)
 }
 requires {
 	haiku

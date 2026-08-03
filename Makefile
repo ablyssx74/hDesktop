@@ -7,6 +7,7 @@ CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/d
 GUI_TARGET = hdesktop
 VERSION = 1.0.24
 PACKAGE_DIR := build/package
+REVISION = 2
 
 # Shared target architectures
 UNAME_M := $(shell uname -p)
@@ -15,11 +16,14 @@ ifeq ($(UNAME_M), x86)
     ARCH = x86_gcc2
     INCLUDE = -L/boot/system/lib/x86 
     is32bit = _x86
+    DEFINES += -DIS_HAIKU_32BIT
 else ifeq ($(UNAME_M), x86_64)
     CXX = g++
     ARCH = x86_64
     INCLUDE = -L/boot/system/lib
 endif
+
+DEFINES := $(DEFINES)
 
 # =========================================================================
 # FIXED SOURCE MAPPING PARAMETERS (Merged the new tray component target)
@@ -53,7 +57,7 @@ $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
 
 # General object file compilation hooks
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(DEFINES) $(CXXFLAGS) -c $< -o $@
 
 # Deep system cleaning target
 clean:
@@ -70,16 +74,14 @@ release: all
 	@[ -n "$(PACKAGE_DIR)" ] || { echo "PACKAGE_DIR is undefined"; exit 1; }
 	rm -rf "./$(PACKAGE_DIR)"
 	mkdir -p $(PACKAGE_DIR)
-	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(is32bit)/$(is32bit)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
+	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(REVISION)/$(REVISION)/g' -e 's/$$(is32bit)/$(is32bit)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
 	mkdir -p $(PACKAGE_DIR)/apps
 	mkdir -p $(PACKAGE_DIR)/bin
-	#mkdir -p $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
-	#cp background.png $(PACKAGE_DIR)/data/$(GUI_TARGET)/background/
 	ln -s /boot/system/apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s /boot/system/apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
-	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-1-$(ARCH).hpkg	
+	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-$(REVISION)-$(ARCH).hpkg	
 
 
 

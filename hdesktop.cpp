@@ -5405,7 +5405,11 @@ int main(int argc, char* argv[]) {
     const char* localVersion = "v1.0.24"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
+    	#ifndef IS_HAIKU_32BIT
         "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
+        #else
+        "(REMOTE_V=$(curl-x86 -sL \"%s\" | tr -d '\\r\\n'); "
+        #endif
         "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
         "notify --title \"Update Available\" --group \"hDesktop\" "
         "\"A newer version of hDesktop is available! ($REMOTE_V)\"; fi) &",
