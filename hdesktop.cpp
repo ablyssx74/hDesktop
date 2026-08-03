@@ -5402,7 +5402,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.24"; 
+    const char* localVersion = "v1.0.25"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
