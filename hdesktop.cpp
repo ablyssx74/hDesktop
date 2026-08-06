@@ -29,6 +29,7 @@
 #include <map>
 #include <MediaNode.h>
 #include <MediaRoster.h>
+#include <MessageRunner.h> 
 #include <MenuItem.h>
 #include <Message.h>
 #include <Node.h>
@@ -784,8 +785,6 @@ void SyncDynamicSystrayTextures() {
 
     // 3. Rebuild GL textures using verified 16x16 -> 32x32 upscale matrix mechanics
     if (structureChanged) {
-        std::cout << "[Systray Matrix] Layout change caught! Updating texture nodes..." << std::endl;
-
         // Free old GL texture allocations cleanly out of GPU VRAM
         for (auto& oldItem : fLiveTrayItems) {
             if (oldItem.textureId != 0) {
@@ -1157,9 +1156,18 @@ public:
     }
     
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
+        // If the mouse left this view container, double check if it left the window
+        if (transit == B_EXITED_VIEW && Window()) {
+            BPoint screenPoint = ConvertToScreen(point);
+            if (!Window()->Frame().Contains(screenPoint)) {
+                Window()->Quit();
+                return;
+            }
+        }
         // Force the app cell grid canvas to instantly refresh as your cursor glides across choices
         Invalidate(); 
     }
+
 
     static bool CompareDrawerItems(const DrawerItem* a, const DrawerItem* b) {
         BString nameA(a->name);
@@ -1175,7 +1183,6 @@ public:
 	            case B_ESCAPE:
 	            case B_SPACE:
 	            {
-	                std::cout << "[hdesktop] Close shortcut pressed. Dismissing app drawer container." << std::endl;
 	                if (Window()) {
 	                    Window()->Quit();
 	                }
@@ -1560,10 +1567,8 @@ public:
 		                std::set<std::string>::iterator it = gFavoritePaths.find(targetKey);
 		                if (it != gFavoritePaths.end()) {
 		                    gFavoritePaths.erase(it);
-		                    std::cout << "[hdesktop] Removed from Favorites: " << pathStr << std::endl;
 		                } else {
 		                    gFavoritePaths.insert(targetKey);
-		                    std::cout << "[hdesktop] Added to Favorites: " << pathStr << std::endl;
 		                }
 		
 		                // Write the message flattening block safely back down to disk
@@ -1617,41 +1622,61 @@ public:
 
         // 1. Process Exit Button Trigger Click
         if (exitIconRect.Contains(point)) {
-            // ... rest of your exit code
 
-            std::cout << "[Native Drawer] Exit Action Intercepted. Closing popup container." << std::endl;
             if (Window()) {
                 Window()->Quit(); 
             }
             return;
         }
 
-
-        // --- ADDED: INTERCEPT SHUTDOWN SYSTEM TRACKER ---
+		/*
+        // --- INTERCEPT SHUTDOWN SYSTEM TRACKER ---
         if (shutdownSysRect.Contains(point)) {
             std::cout << "[hdesktop] Invoking Native CLI System Power Down." << std::endl;
             
-            // Runs a standard safe background power down sequence.
-            // Replace "shutdown" with "shutdown -q" if you want to bypass alerts completely.
+            // Native Haiku System Message identifier for power-off sequence
+            BMessage msg(0x53485554); // 'SHUT'
+            be_roster->Broadcast(&msg);
+            return;
+        }
+
+        // --- INTERCEPT REBOOT SYSTEM TRACKER ---
+        if (rebootSysRect.Contains(point)) {
+            std::cout << "[hdesktop] Invoking Native CLI System Restart." << std::endl;
+            
+            // Native Haiku System Message identifier for reboot sequence
+            BMessage msg(0x52454254); // 'REBT'
+            be_roster->Broadcast(&msg);
+            return;
+        }
+		*/
+
+		
+        // --- ADDED: INTERCEPT SHUTDOWN SYSTEM TRACKER ---
+        if (shutdownSysRect.Contains(point)) {
+
             std::system("shutdown &");
+            if (Window()) {
+                Window()->Quit();
+            }
+
             return;
         }
 
         // --- ADDED: INTERCEPT REBOOT SYSTEM TRACKER ---
         if (rebootSysRect.Contains(point)) {
-            std::cout << "[hdesktop] Invoking Native CLI System Restart." << std::endl;
-            
-            // Runs a standard safe system reboot. 
-            // The "-r" flag explicitly tells Haiku OS to perform a machine reboot.
             std::system("shutdown -r &");
+            if (Window()) {
+                Window()->Quit();
+            }
+
             return;
         }
-
-
+		
+		
+		
         // 2. Process Configuration Button Trigger Click
-        if (configIconRect.Contains(point)) {
-            std::cout << "[Native Drawer] Config Menu Click Hook Executed." << std::endl;
-            
+        if (configIconRect.Contains(point)) {           
             if (gActiveConfigInstance == nullptr && Window()) {
                 // Instantiate the sub-panel, centering it smoothly within the app drawer's viewport bounds
                 gActiveConfigInstance = new HaikuConfigWindow(Window()->Frame());
@@ -1664,7 +1689,7 @@ public:
         }
 
 
-          // =========================================================================
+        // =========================================================================
         // 3. Process Standard Grid Icon Coordinates
         // =========================================================================
         float itemW = 100.0f;
@@ -1773,40 +1798,91 @@ public:
 // NATIVE BWINDOW BORDERLESS COMPONENT LAYOUT (DYNAMIC WIDTH MATRIX MANAGER)
 // =========================================================================
 class HaikuAppDrawerWindow : public BWindow {
+private:
+    BMessageRunner* fHoverTicker;
+    bool            fMouseHasEntered; // Safety check flag
+
 public:
     HaikuAppDrawerWindow(float screenH)
         : BWindow(BRect(0, 0, 100, 100), "App Dashboard Menu",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
-                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE),
+          fHoverTicker(nullptr),
+          fMouseHasEntered(false) { // Initially false so it won't instant-close
         
-        // DYNAMIC SCREEN WIDTH AUTODETECTION PIPELINE
         BScreen activeScreen(this);
         BRect screenFrame = activeScreen.Frame();
         
-        // Leave a uniform margin border frame surrounding the display dashboard block
         float horizontalMarginGap = 40.0f;
         float targetPanelWidth = screenFrame.Width() - (horizontalMarginGap * 2.0f);
-        float targetPanelHeight = screenH - 200.0f; // Leaves clean layout room for your dock plate strip below
+        float targetPanelHeight = screenH - 200.0f;
 
-        // Center placement across horizontal monitor properties and position upper coordinate
         MoveTo(horizontalMarginGap, 30.0f);
         ResizeTo(targetPanelWidth, targetPanelHeight);
 
         BRect bounds = Bounds();
-        // Shift scrollbar channel footprint off the outer border edge cleanly
         bounds.right -= B_V_SCROLL_BAR_WIDTH; 
 
         DrawerView* drawerView = new DrawerView(bounds);
         BScrollView* scrollView = new BScrollView("DashboardScroll", drawerView, 
-            B_FOLLOW_ALL, 0, false, true, B_NO_BORDER); // Continuous mouse wheel tracks seamlessly here
+            B_FOLLOW_ALL, 0, false, true, B_NO_BORDER);
             
         AddChild(scrollView);
+
+        // Run the position checker 10 times a second
+        BMessage tickMessage('tick');
+        fHoverTicker = new BMessageRunner(BMessenger(this), &tickMessage, 100000);
     }
     
     virtual ~HaikuAppDrawerWindow() {
+        delete fHoverTicker;
         gActiveDrawerInstance = nullptr;
     }
+
+    virtual void MessageReceived(BMessage* message) {
+        switch (message->what) {
+            case 'tick': {
+                if (IsHidden()) return;
+
+                BPoint screenMousePos;
+                uint32 buttons;
+                
+                if (ChildAt(0)) {
+                    ChildAt(0)->GetMouse(&screenMousePos, &buttons, false);
+                    ChildAt(0)->ConvertToScreen(&screenMousePos);
+
+                    bool isInsideFrame = Frame().Contains(screenMousePos);
+
+                    if (!fMouseHasEntered && isInsideFrame) {
+                        fMouseHasEntered = true;
+                    }
+
+                    if (!isInsideFrame) {
+                        BScreen screen(this);
+                        BRect screenFrame = screen.Frame();
+                        
+                        // Protects the dock area from triggering an auto-close
+                        if (screenMousePos.y >= (screenFrame.bottom - 100.0f)) {
+                            break; 
+                        }
+
+                        if (fMouseHasEntered) {
+                            PostMessage(B_QUIT_REQUESTED);
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+
+
 };
+
+
 
 
 
@@ -1933,8 +2009,6 @@ public:
 
 
 	void ReloadWallpaperBackground() {
-	    std::cout << "[Engine] Reloading wallpaper graphics assets..." << std::endl;
-	
 	    // Use the inner integer identifier field for the OpenGL cleanup
 	    if (fWallpaperTexture.id != 0) {
 	        glDeleteTextures(1, &fWallpaperTexture.id);
@@ -1942,8 +2016,6 @@ public:
 	    }
 	
 	    BString capturedWallpaper = GetActiveHaikuWallpaperPath();
-	    std::cout << "[Engine] Detected new wallpaper target: " << capturedWallpaper.String() << std::endl;
-	
 	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
 	}
 
@@ -1976,7 +2048,6 @@ public:
         if (fScrollOffset < 0.0f) fScrollOffset = 0.0f;
         if (fScrollOffset > fMaxScrollOffset) fScrollOffset = fMaxScrollOffset;
         
-        std::cout << "[Tracker window] Scrolled canvas position offset: " << fScrollOffset << std::endl;
     }
 
 
@@ -2194,18 +2265,15 @@ public:
                             
                             // Reused sequential toggle shield
                             if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
-                                std::cout << "[Systray Menu] Toggle Match: Dismissing menu canvas cleanly." << std::endl;
                                 fLastTrackerMenuCloseTime = 0; 
                                 return; 
                             }
 
                             // Reused active menu latch check
                             if (fTrackerMenuIsActive) {
-                                std::cout << "[Systray Menu] Active Close Match: Letting menu close naturally." << std::endl;
                                 return; 
                             }
 
-                            std::cout << "[Systray Menu] Offloading replicant query to background thread: " << item.name << std::endl;
                             fTrackerMenuIsActive = true; 
 
                             int winX = 0, winY = 0;
@@ -2265,7 +2333,6 @@ public:
                                         }
 
                                         if (!foundItems) {
-                                            std::cout << "    [Profile] Replicant uses private layout specs. Injecting native system actions..." << std::endl;
                                             if (threadArgs->itemName == "ProcessController" || threadArgs->itemName == "ProcessControllerView") {
                                                 localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
                                             } else if (threadArgs->itemName == "NetworkStatus") {
@@ -2325,7 +2392,6 @@ public:
 		                // CASE B: LEFT-CLICK -> RESILIENT PREFERENCE PANEL LAUNCHERS (NON-BLOCKING)
 		                // =========================================================================
 		                else if (button == SDL_BUTTON_LEFT) {
-		                    std::cout << "[Dock Input] Launching control panel for tray applet: " << item.name << std::endl;
 		                    if (item.name == "MediaReplicant") {
 		                        std::system("/boot/system/preferences/Media &");
 		                    } else if (item.name == "NetworkStatus") {
@@ -2617,9 +2683,7 @@ public:
                 // =========================================================================
                 // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
                 // =========================================================================
-                if (button == SDL_BUTTON_RIGHT) {
-                    std::cout << "[Leaf Icon] Right-click detected. Spawning Async Settings Worker..." << std::endl;
-                    
+                if (button == SDL_BUTTON_RIGHT) {                                  
                     if (fLeafMenuIsActive) return;
                     fLeafMenuIsActive = true;
 
@@ -2662,7 +2726,6 @@ public:
 
                         if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
                             if (chosenAction->Message()->what == 'lCFG') {
-                                std::cout << "[Async Thread] Target detected. Spawning Centered Config Window..." << std::endl;
                                 
                                 // 1. Set the exact layout frame dimensions matching your padded ConfigView (460x240)
                                 float winWidth = 460.0f;
@@ -2756,8 +2819,7 @@ public:
 	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
 	                
 	                if (isTracker) {
-	                    std::cout << "[SYSTEM ACTION] ---> Closing all Tracker folder windows gracefully via Scripting..." << std::endl;
-	                    
+                    
 	                    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 	                    if (trackerMessenger.IsValid()) {
 	                        // Query Tracker for the total count of windows currently active
@@ -2785,7 +2847,7 @@ public:
 	                                            winTitle = nameStr;
 	                                        }
 	                                    }
-	                                    
+	                                    /* @Delete
 	                                    // CRITICAL SAFETY GUARD: Skip system windows and the desktop backdrop layer
 	                                    if (winTitle == "Desktop" || 
 	                                        winTitle == "Tracker status" || 
@@ -2793,7 +2855,7 @@ public:
 	                                        winTitle.Length() == 0) {
 	                                        continue; 
 	                                    }
-	                                    
+	                                    */
 	                                    // Target the specific window index with a Quit request
 	                                    BMessage quitWindowMessage(B_QUIT_REQUESTED);
 	                                    quitWindowMessage.AddSpecifier("Window", wIdx);
@@ -2804,20 +2866,16 @@ public:
 	                    }
 	                } 
 	                else {
-	                    // GENERAL APPLICATIONS: Standard clean closure sequence
-	                    std::cout << "[SYSTEM ACTION] ---> Closing App cleanly via BMessenger. Team ID: " << activeTaskWin.teamId << std::endl;
-	                    
+	                    // GENERAL APPLICATIONS: Standard clean closure sequence	                    
 	                    BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
 	                    if (targetAppMessenger.IsValid()) {
 	                        targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
 	                    } else {
-	                        std::cout << "   [Fallback] Messenger invalid. Issuing kernel kill_team to free thread structures." << std::endl;
 	                        kill_team(activeTaskWin.teamId);
 	                    }
 	                }
 	                
 	                fShowMainMenu = false;
-	                std::cout << "========================================\n" << std::endl;
 	                return; 
 	            }
 
@@ -2846,18 +2904,15 @@ public:
 				        
 				        // SEQUENTIAL TOGGLE SHIELD: Check rapid click limits
 				        if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
-				            std::cout << "[Tracker Menu] Toggle Match: Dismissing menu canvas cleanly on second click." << std::endl;
 				            fLastTrackerMenuCloseTime = 0; 
 				            return; 
 				        }
 				    
 				        // ACTIVE MENU CLOSE CHECK: If the menu is currently visible and they click again, close it
 				        if (fTrackerMenuIsActive) {
-				            std::cout << "[Tracker Menu] Active Close Match: Intercepting click to let menu close naturally." << std::endl;
 				            return; 
 				        }
 				    
-				        std::cout << "[Tracker Menu] Offloading file navigator to background thread..." << std::endl;
 				        fTrackerMenuIsActive = true; // Engage active state safety latch
 				    
 				        int winX = 0, winY = 0;
@@ -2915,8 +2970,7 @@ public:
 
                 // READ TRUTH FROM RENDERFRAME WORKSPACE BITMASK
 	            if (activeTaskWin.isMinimized == false) {
-	                std::cout << "[APP_SERVER ROUTING] ---> Action: MINIMIZE TEAM VIA Opcodes Pipeline" << std::endl;
-	                
+                
 	                BPrivate::AppServerLink link;
 	                link.StartMessage(AS_MINIMIZE_TEAM);
 	                link.Attach<team_id>(activeTaskWin.teamId);
@@ -2936,12 +2990,19 @@ public:
 	                        for (int32 i = 0; i < tokenCount; ++i) {
 	                            client_window_info* wInfo = get_window_info(tokens[i]);
 	                            if (wInfo != nullptr) {
-                                    if (wInfo->name[0] != '\0' && 
-                                        strcmp(wInfo->name, "Tracker status") != 0 &&
-                                        strcmp(wInfo->name, "Desktop") != 0 && 
-                                        !BString(wInfo->name).EndsWith("/Desktop")) {
-                                        fileFolderCount++;
-                                    }
+	                                if (wInfo->name[0] != '\0' && strcmp(wInfo->name, "Tracker status") != 0) {
+	                                    // If the window name is "Desktop", check if it is a real folder window or the system background.
+	                                    // B_DESKTOP_WINDOW_FEEL has a constant value of 1024.
+	                                    if (strcmp(wInfo->name, "Desktop") == 0 || BString(wInfo->name).EndsWith("/Desktop")) {
+	                                        // If it is NOT the background layer (feel 1024), count it as an open folder window!
+	                                        if (wInfo->feel != 1024) {
+	                                            fileFolderCount++;
+	                                        }
+	                                    } else {
+	                                        // Count any other standard tracker directory windows
+	                                        fileFolderCount++;
+	                                    }
+	                                }
 	                                free(wInfo);
 	                            }
 	                        }
@@ -2949,7 +3010,6 @@ public:
 	                    }
 
 	                    if (fileFolderCount == 0) {
-	                        std::cout << "[hDesktop Action] Tracker has 0 open folder paths. Launching /boot/home." << std::endl;
 	                        BEntry entry("/boot/home");
 	                        entry_ref ref;
 	                        if (entry.GetRef(&ref) == B_OK) {
@@ -2958,13 +3018,11 @@ public:
 	                            be_roster->Launch("application/x-vnd.Be-TRAK", &message);
 	                        }
 	                        
-	                        std::cout << "========================================\n" << std::endl;
-                            isButtonLatchedMap[actionKey] = false; 
+	                        isButtonLatchedMap[actionKey] = false; 
 	                        return; 
 	                    }
 	                }
 
-	                std::cout << "[APP_SERVER ROUTING] ---> Action: RESTORE TEAM VIA Opcodes Pipeline" << std::endl;
 	                
 	                app_info targetAppInfo;
 	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
@@ -3006,7 +3064,6 @@ public:
                     // Let RenderFrame handle state evaluation on the next frame pass.
 	            }
 	            
-	            std::cout << "========================================\n" << std::endl;
                 
                 isButtonLatchedMap[actionKey] = false;
 	            return; 
@@ -3059,18 +3116,15 @@ public:
 	            
 	            // Reused sequential toggle shield
 	            if (currentClickTick - fLastTrackerMenuCloseTime < 150) {
-	                std::cout << "[Trash Menu] Toggle Match: Dismissing menu canvas cleanly." << std::endl;
 	                fLastTrackerMenuCloseTime = 0; 
 	                return; 
 	            }
 	
 	            // Reused active menu latch check
 	            if (fTrackerMenuIsActive) {
-	                std::cout << "[Trash Menu] Active Close Match: Letting menu close naturally." << std::endl;
 	                return; 
 	            }
 	
-	            std::cout << "[Trash Menu] Offloading trash context menu to background thread..." << std::endl;
 	            fTrackerMenuIsActive = true; 
 	
 	            int winX = 0, winY = 0;
@@ -3193,9 +3247,7 @@ public:
 	                    if (deskbarMessenger.IsValid()) {
 	                        
 	                        // CASE 1: RIGHT-CLICK -> PARSE AND PRESENT REAL CONTEXT DROPDOWNS
-	                        if (button == SDL_BUTTON_RIGHT) {
-	                            std::cout << "[Dock Input] Querying serialized menu archive tree for: " << fLiveTrayItems[t].name << std::endl;
-	
+	                        if (button == SDL_BUTTON_RIGHT) {	
 	                            BMessage menuRequest(B_GET_PROPERTY);
 	                            menuRequest.AddSpecifier("Menu");
 	                            menuRequest.AddSpecifier("Replicant", fLiveTrayItems[t].name.c_str());
@@ -3261,7 +3313,6 @@ public:
 	                        } 
 	                        // CASE 2: LEFT-CLICK -> PANEL SHORTCUT LAUNCHERS
 	                        else if (button == SDL_BUTTON_LEFT) {
-	                            std::cout << "[SYSTEM TRAY ACTION] ---> Launching panel for: " << fLiveTrayItems[t].name << std::endl;
 	                            if (fLiveTrayItems[t].name == "NetworkStatus") {
 	                                std::system("/boot/system/preferences/Network &");
 	                            } else if (fLiveTrayItems[t].name == "MediaReplicant") {
@@ -3323,12 +3374,10 @@ public:
 	
 	        // ACTIVE MENU CLOSE CHECK: Let the menu naturally collapse if they click again
 	        if (fCpuMenuIsActive) {
-	            std::cout << "[CPU Monitor] Active Intercept: Letting menu canvas close cleanly." << std::endl;
 	            return; 
 	        }
 	
 	        if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
-	            std::cout << "[CPU Monitor] Offloading ProcessController menus to async window looper..." << std::endl;
 	            fCpuMenuIsActive = true; // Engage active state safety shield latch
 	
 	            // Bundle coordinates to pass safely across the memory barrier
@@ -5014,7 +5063,7 @@ void LoadConfiguration() {
     gFavoritePaths.clear(); // Reset to prevent duplicate tracking anomalies
     
     // Set a safe fallback default before parsing disk files
-    fShowTitleOverlays = true; 
+    fShowTitleOverlays = false; 
 
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
         path.Append("hdesktop_settings");
@@ -5081,8 +5130,6 @@ void SaveConfiguration() {
 // ASYNC CPU MENU RUNNER 
 // =========================================================================
 void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
-    std::cout << "[CPU Graph] Initializing dynamic async system activity menu..." << std::endl;
-
     // 1. Create the base context menu shell container.
     BPopUpMenu* pcMenu = new BPopUpMenu("CPUGraphContext", false, false);
     pcMenu->SetRadioMode(false);
@@ -5221,12 +5268,8 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
                         int32 userChoice = confirmationBox->Go();
 
                         if (userChoice == 1) { 
-                            std::cout << "[CPU Graph] Forcing termination of application process: " 
-                                      << thName << " (Team ID " << targetTeam << ")" << std::endl;
                             kill_team(targetTeam); 
-                        } else {
-                            std::cout << "[CPU Graph] Force termination cancelled by user." << std::endl;
-                        }
+                        } 
                     }
                     break;
                 }
@@ -5256,31 +5299,25 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
 
                         int32 userChoice = confirmationBox->Go();
 
-                        if (userChoice == 1) { 
-                            std::cout << "[CPU Graph] Terminating application cleanly: " << appName << " (Team " << targetTeam << ")" << std::endl;
-                            
+                        if (userChoice == 1) {                             
                             BMessenger appTarget(nullptr, targetTeam);
                             if (appTarget.IsValid()) {
                                 appTarget.SendMessage(B_QUIT_REQUESTED);
                             } else {
                                 kill_team(targetTeam); 
                             }
-                        } else {
-                            std::cout << "[CPU Graph] Clean termination cancelled by user." << std::endl;
-                        }
+                        } 
                     }
                     break;
                 }
 
 
                 case 'pwrS': {
-                    std::cout << "[CPU Graph] Activating system Power Saving configuration profiles..." << std::endl;
-                    std::system("/boot/system/apps/PowerStatus --toggle &"); 
+                        std::system("/boot/system/apps/PowerStatus --toggle &"); 
                     break;
                 }
 
                 default:
-                    std::cout << "[CPU Graph] Unhandled menu flag: " << actionMsg->what << std::endl;
                     break;
             }
         }
@@ -5402,7 +5439,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.25"; 
+    const char* localVersion = "v1.0.26"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
@@ -5473,9 +5510,7 @@ int main(int argc, char* argv[]) {
                 // =========================================================================
                 // NATIVE WALLPAPER MONITOR INTERACTION PROTOCOL
                 // =========================================================================
-                else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED) {
-                    std::cout << "[Node Monitor] Wallpaper update detected! Refreshing dock canvas asset." << std::endl;
-                    
+                else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED) {                   
                     desktopEngine.ReloadWallpaperBackground(); 
                     desktopEngine.SyncDockWithRunningDeskbarApps(); 
 
@@ -5667,9 +5702,7 @@ int main(int argc, char* argv[]) {
                     }
                     be_app->Unlock();
                 }
-            } else {
-                std::cout << "[Dock Override] Tracker submenu (1025) detected. Bypassing layering reset." << std::endl;
-            }
+            } 
             needsRender = true;
         }
 
@@ -5777,8 +5810,6 @@ int main(int argc, char* argv[]) {
         }
 
     }
-
-    std::cout << "[System Terminal] Closing hDesktop context cleanly." << std::endl;
 
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
