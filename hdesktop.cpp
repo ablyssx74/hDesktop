@@ -2847,7 +2847,7 @@ public:
 	                                            winTitle = nameStr;
 	                                        }
 	                                    }
-	                                    /* @Delete
+	                                   
 	                                    // CRITICAL SAFETY GUARD: Skip system windows and the desktop backdrop layer
 	                                    if (winTitle == "Desktop" || 
 	                                        winTitle == "Tracker status" || 
@@ -2855,7 +2855,7 @@ public:
 	                                        winTitle.Length() == 0) {
 	                                        continue; 
 	                                    }
-	                                    */
+	                                    
 	                                    // Target the specific window index with a Quit request
 	                                    BMessage quitWindowMessage(B_QUIT_REQUESTED);
 	                                    quitWindowMessage.AddSpecifier("Window", wIdx);
