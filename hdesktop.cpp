@@ -2092,10 +2092,13 @@ public:
 	
 	            std::string appSignature(info.signature);
 	            
-	            // --- MODIFIED EXCLUSIVE DUPLICATE FILTER FOR ICEWEASEL ONLY ---
+	            // --- Duplicate Filter For Firefox and Other Clones ---
 	            // =================================================================
 	            bool isDuplicate = false;
-	            if (appSignature == "application/x-vnd.iceweasel") {
+	            if (appSignature == "application/x-vnd.iceweasel"   	|| 
+	            	appSignature == "application/x-vnd.Mozilla-Firefox" || 
+	            	appSignature == "application/x-vnd.waterfox" 		|| 
+	            	appSignature == "application/x-vnd.floorp-browser") {
 	                for (const auto& sig : processedSignatures) {
 	                    if (sig == appSignature) {
 	                        isDuplicate = true; 
@@ -2103,7 +2106,7 @@ public:
 	                    }
 	                }
 	            }
-	            if (isDuplicate) continue; // Skip subsequent Iceweasel teams, allow all other apps
+	            if (isDuplicate) continue; // Skip subsequent Iceweasel/Firefox teams, allow all other apps
 	
 	            BEntry entry(&info.ref);
 	            if (entry.InitCheck() != B_OK) continue;
@@ -5442,7 +5445,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.27"; 
+    const char* localVersion = "v1.0.28"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
