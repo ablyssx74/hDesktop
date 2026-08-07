@@ -2816,25 +2816,24 @@ public:
 	            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
 	            // =========================================================================
 	            // FIX: Removed !isTracker condition to let the middle click target Tracker
-	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
+	            	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
 	                
-	                if (isTracker) {
-                    
+	             	                if (isTracker) {
 	                    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 	                    if (trackerMessenger.IsValid()) {
-	                        // Query Tracker for the total count of windows currently active
 	                        BMessage countRequest(B_COUNT_PROPERTIES);
 	                        countRequest.AddSpecifier("Window");
 	                        
 	                        BMessage reply;
 	                        if (trackerMessenger.SendMessage(&countRequest, &reply) == B_OK) {
 	                            int32 totalWindows = 0;
-	                            if (reply.FindInt32("result", &totalWindows) == B_OK) {
+	                            if (reply.FindInt32("result", &totalWindows) == B_OK) {	                                
 	                                
-	                                // Loop backwards through window indices to safely quit them without index shifts
-	                                for (int32 wIdx = totalWindows - 1; wIdx >= 0; --wIdx) {
+	     	                        // Loop backwards through windows, but STOP before Index 0 
+	                                // Index 0 is Tracker's critical internal framework window; quitting it kills the server!
+	                                for (int32 wIdx = totalWindows - 1; wIdx > 0; --wIdx) {
 	                                    
-	                                    // Request the title of the window first so we can protect the Desktop
+	                                    // Request the title of the window first so we can evaluate it
 	                                    BMessage titleRequest(B_GET_PROPERTY);
 	                                    titleRequest.AddSpecifier("Title");
 	                                    titleRequest.AddSpecifier("Window", wIdx);
@@ -2842,21 +2841,23 @@ public:
 	                                    BMessage titleReply;
 	                                    BString winTitle = "";
 	                                    if (trackerMessenger.SendMessage(&titleRequest, &titleReply) == B_OK) {
-	                                        const char* nameStr;
-	                                        if (titleReply.FindString("result", &nameStr) == B_OK) {
+	                                        const char* nameStr = nullptr;
+	                                        if (titleReply.FindString("result", &nameStr) == B_OK && nameStr != nullptr) {
 	                                            winTitle = nameStr;
 	                                        }
 	                                    }
 	                                   
-	                                    // CRITICAL SAFETY GUARD: Skip system windows and the desktop backdrop layer
-	                                    if (winTitle == "Desktop" || 
-	                                        winTitle == "Tracker status" || 
-	                                        winTitle.EndsWith("/Desktop") || 
-	                                        winTitle.Length() == 0) {
+	                                    // CRITICAL SAFETY FILTER A: Drop out instantly on blank names or status panels
+	                                    if (winTitle.Length() == 0 || winTitle == "Tracker status") {
 	                                        continue; 
 	                                    }
+
+	                                    // CRITICAL SAFETY FILTER B: Protect the system background backdrop layer
+	                                    if (winTitle == "Desktop") {
+	                                        continue; // Protect Tracker backdrop from crashing
+	                                    }
 	                                    
-	                                    // Target the specific window index with a Quit request
+	                                    // Safe to target user windows at indices > 0 with a Quit request
 	                                    BMessage quitWindowMessage(B_QUIT_REQUESTED);
 	                                    quitWindowMessage.AddSpecifier("Window", wIdx);
 	                                    trackerMessenger.SendMessage(&quitWindowMessage);
@@ -2864,7 +2865,8 @@ public:
 	                            }
 	                        }
 	                    }
-	                } 
+	                }
+
 	                else {
 	                    // GENERAL APPLICATIONS: Standard clean closure sequence	                    
 	                    BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
@@ -2878,6 +2880,7 @@ public:
 	                fShowMainMenu = false;
 	                return; 
 	            }
+
 
 
                  if (fShowMainMenu) {
@@ -4128,7 +4131,7 @@ public:
 	        }
 	    }
 
-	
+		/*
 	    // B. Draw an active native glowing mini ledger stripe indicator line below active windows
 	    glDisable(GL_TEXTURE_2D);
 	    if (activeTaskWin.isMinimized == false && !isTracker) {
@@ -4139,7 +4142,7 @@ public:
 	            glVertex2f(iconBounds.right - 4.0f, dockPlate.bottom - 4.0f);
 	        glEnd();
 	    }
-
+		*/
 		
 		    currentX += size + padding;
 		    renderingSlotIdx++;
@@ -5439,7 +5442,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.26"; 
+    const char* localVersion = "v1.0.27"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
