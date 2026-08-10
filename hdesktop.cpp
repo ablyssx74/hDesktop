@@ -78,6 +78,7 @@ void SaveConfiguration();
 float fBaseIconSize = 48.0f;
 const char* const kSettingsIconSizeKey = "base_icon_size";
 const uint32 MSG_ICON_SIZE_CHANGED = 'isic';
+float maxDockHeight = 160.0f; 
 
 
 enum {
@@ -128,6 +129,7 @@ struct LeafMenuArgs {
     int32 winX;
     int32 winY;
     int32 mouseX;
+    float currentDockH;
 };
 
 
@@ -156,6 +158,7 @@ struct CpuMenuArgs {
     int32 winY;
     int32 mouseX;
     int32 mouseY;
+    float currentDockH;
 };
 
 struct HaikuRect {
@@ -1315,7 +1318,7 @@ public:
                 BAlert* aboutAlert = new BAlert("About hdesktop",
                     "hdesktop SDL Dock\n"
                     "MIT License\n"
-                    "Version v1.0.29\n"
+                    "Version v1.0.30\n"
                     "(c) 2026 ablyss\n\n"
                     
                     "Enjoy!\n\n"
@@ -2414,6 +2417,7 @@ public:
 	    int32 winY;
 	    int32 mouseX;
 	    int32 mouseY; 
+	    float currentDockH;
 	};
 	
 	// 2. UPDATED BACKGROUND THREAD FUNCTION
@@ -2454,7 +2458,13 @@ public:
 	    float anchoredMenuX = static_cast<float>(args->winX + args->mouseX) - 45.0f;
 	    if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
 	    
-	    float anchoredMenuY = static_cast<float>(args->winY) - 5.0f;
+	    // SMART ADJUSTMENT: Calculate layout normalization metrics boundary limit tracker
+	    float maxExpectedHeight = 164.0f; 
+	    float structuralOffset = maxExpectedHeight - args->currentDockH;
+	    if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Safety clamp to prevent clipping
+	    
+	    // FIX: Push it lower down the screen boundary context as your dock container shrivels
+	    float anchoredMenuY = static_cast<float>(args->winY) + structuralOffset - 5.0f;
 	    BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 	
 	    // BLOCKING CALL (Inside background thread only): Freezes safely until user chooses or clicks away
@@ -2480,6 +2490,7 @@ public:
 	    delete args; 
 	    return B_OK;
 	}
+
 
    
 	void HandleMouseClick(int x, int y, int button) {
@@ -2885,8 +2896,8 @@ public:
 	        float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
 	        totalCalculatedWidth = progressiveX - leftEdge;
 	    }
-
-
+		
+		//@here
 	    // -------------------------------------------------------------------------
 	    // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
 	    // -------------------------------------------------------------------------
@@ -2934,45 +2945,48 @@ public:
 	    fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
 
-	// =========================================================================
-	// PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
-	// =========================================================================
-    // FIXED MATCH PASS: We mirror the exact width expansions from RenderFrame() 
-    // here to guarantee dockPlate.left positions the click hitboxes perfectly over the icons!
-    float leafSizeRatio = baseSize / 48.0f;
-    float clickCpuWidth = dynamicWidths[totalIconsCount + 4] * leafSizeRatio;
-    
-    // Compute the true visual width exactly matching your drawing canvas
-    float clickAdjustedWidth = totalCalculatedWidth + clickCpuWidth + (clockSectionPadding * leafSizeRatio);
-
-    // Re-verify definitive left alignment starting pixel address
-    float visualDockLeft = (fWidth / 2.0f) - (clickAdjustedWidth / 2.0f) - (outerPlatePadding / 2.0f);
-
-    float currentX = visualDockLeft + 20.0f; // Exact pixel-perfect rendering origin match!
-    size_t evaluationSlotIdx = 0;
+		// =========================================================================
+		// PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
+		// =========================================================================
+	    // FIXED MATCH PASS: Completely match your clean RenderFrame bounds.
+	    // This guarantees the invisible click grid locks onto the visual elements!
+	    float adjustedTotalWidth = totalCalculatedWidth;
 	
-	// STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
-	for (size_t i = 0; i < baselineLaunchersCount; ++i) {
-	    float size = dynamicWidths[evaluationSlotIdx];
-        
-        // Correctly calculate visual height baseline boundary metrics
-	    HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	    // Re-verify definitive left alignment starting pixel address exactly matching drawing canvas
+	    float visualDockLeft = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - (outerPlatePadding / 2.0f);
 	
-	    if (x >= realIconBounds.left && x <= realIconBounds.right &&
-	        y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-	            
-            if (i == 0) {
+	    float currentX = visualDockLeft + 20.0f; // Exact pixel-perfect rendering origin match!
+	    size_t evaluationSlotIdx = 0;
+		
+		// STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
+		for (size_t i = 0; i < baselineLaunchersCount; ++i) {
+		    float size = dynamicWidths[evaluationSlotIdx];
+	        
+	        // Correctly calculate visual height baseline boundary metrics
+		    HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+		
+		    if (x >= realIconBounds.left && x <= realIconBounds.right &&
+		        y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+		            
+	            if (i == 0) {
                 // =========================================================================
                 // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
                 // =========================================================================
+
                 if (button == SDL_BUTTON_RIGHT) {                                  
                     if (fLeafMenuIsActive) return;
                     fLeafMenuIsActive = true;
 
+                    // FIX 1: Declared exactly ONCE so initialization properties are preserved
                     LeafMenuArgs* args = new LeafMenuArgs();
                     args->engine = this;
-                    args->winX = 0; args->winY = 0;
+                    args->winX = 0; 
+                    args->winY = 0;
+                    args->mouseX = static_cast<int32>(x);
                     
+                    // Match the baseline dynamic scaling formula used by the window sizing logic
+                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f)); 
+
                     if (be_app && be_app->Lock()) {
                         BWindow* mainNativeWin = be_app->WindowAt(0);
                         if (mainNativeWin != nullptr) {
@@ -2981,7 +2995,6 @@ public:
                         }
                         be_app->Unlock();
                     }
-                    args->mouseX = static_cast<int32>(x);
 
                     // Inline background thread function context
                     int32 (*inlineLeafThreadFunc)(void*) = [](void* data) -> int32 {
@@ -2996,9 +3009,18 @@ public:
                         leafMenu->AddItem(new BMenuItem("Preferences…", new BMessage('lCFG')));
                         
                         float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 15.0f;
-                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f; 
+
+                        // FIX 2: Correct layout normalization metrics boundary limit tracker.
+                        // Assuming 164.0f is your standard maximum baseline footprint width layout,
+                        // this naturally pushes the layout down when currentDockH drops to ~116.0f.
+                        float maxExpectedHeight = 164.0f; 
+                        float structuralOffset = maxExpectedHeight - threadArgs->currentDockH;
+                        if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Safety clamp prevent clipping
                         
-                        float anchoredMenuY = static_cast<float>(threadArgs->winY) - 5.0f; 
+                        // Push it lower down screen boundary context as your dock container shrivels
+                        float anchoredMenuY = static_cast<float>(threadArgs->winY) + structuralOffset - 5.0f; 
+                        
                         BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 
                         BMenuItem* chosenAction = leafMenu->Go(screenClickPoint, false, false);
@@ -3173,7 +3195,6 @@ public:
 	            fShowMainMenu = false;
 
 	
-				
 				if (isTracker) {
 				    // --- FIX: ONLY RIGHT CLICK SPAWNS THE ASYNC POPUP MENU ---
 				    // =========================================================================
@@ -3193,17 +3214,24 @@ public:
 				    
 				        fTrackerMenuIsActive = true; // Engage active state safety latch
 				    
-				        int winX = 0, winY = 0;
-				        SDL_Window* activeWin = SDL_GetMouseFocus();
-				        if (activeWin) {
-				            SDL_GetWindowPosition(activeWin, &winX, &winY);
-				        }
-				    
 				        TrackerMenuArgs* args = new TrackerMenuArgs();
 				        args->engine = this; // Pass engine instance pointer safely
-				        args->winX = winX;
-				        args->winY = winY;
-				        args->mouseX = x; 
+				        args->winX = 0;
+				        args->winY = 0;
+				        args->mouseX = static_cast<int32>(x); 
+				        
+				        // SMART MATCH: Mirror the exact dynamic layout sizing math 
+				        args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f)); 
+
+				        // SMART NAVIGATION: Query native Haiku window coordinates like preferences popup
+				        if (be_app && be_app->Lock()) {
+				            BWindow* mainNativeWin = be_app->WindowAt(0);
+				            if (mainNativeWin != nullptr) {
+				                args->winX = static_cast<int32>(mainNativeWin->Frame().left);
+				                args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+				            }
+				            be_app->Unlock();
+				        }
 				    
 				        thread_id menuThread = spawn_thread(SpawnTrackerMenuThread, "async_tracker_menu", B_NORMAL_PRIORITY, args);
 				        if (menuThread >= B_OK) {
@@ -3216,11 +3244,8 @@ public:
 				        return; // Intercept right click so it doesn't fire window minimize/restore macros
 				    }
 				    // =========================================================================
-				    
-				    // Left-clicks (or other mouse inputs) fall completely through this block!
-				    // They will land right into your AppServerLink pipeline codes below,
-				    // minimizing or restoring your open desktop/folder panels naturally.
 				}
+
 
 				
 
@@ -3405,18 +3430,25 @@ public:
 	
 	            fTrackerMenuIsActive = true; 
 	
-	            int winX = 0, winY = 0;
-	            SDL_Window* activeWin = SDL_GetMouseFocus();
-	            if (activeWin) {
-	                SDL_GetWindowPosition(activeWin, &winX, &winY);
-	            }
-	
 	            TrackerMenuArgs* args = new TrackerMenuArgs();
 	            args->engine = this; 
-	            args->winX = winX;
-	            args->winY = winY;
-	            args->mouseX = x; 
-	            args->mouseY = y; 
+	            args->winX = 0;
+	            args->winY = 0;
+	            args->mouseX = static_cast<int32>(x); 
+	            args->mouseY = static_cast<int32>(y); 
+	            
+	            // SMART MATCH: Pass the live unified dynamic scaling height parameter down
+	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
+
+	            // SMART NAVIGATION: Lock native Haiku app frames rather than querying raw SDL views
+	            if (be_app && be_app->Lock()) {
+	                BWindow* mainNativeWin = be_app->WindowAt(0);
+	                if (mainNativeWin != nullptr) {
+	                    args->winX = static_cast<int32>(mainNativeWin->Frame().left);
+	                    args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+	                }
+	                be_app->Unlock();
+	            }
 	
 	            // SELF-CONTAINED INLINE THREAD POINTER
 	            int32 (*inlineThreadFunc)(void*) = [](void* data) -> int32 {
@@ -3443,7 +3475,13 @@ public:
 	                float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
 	                if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
 	                
-	                float anchoredMenuY = static_cast<float>(threadArgs->winY) - 5.0f; 
+	                // SMART POSITIONING: Normalize menu coordinates based on dynamic dock boundaries
+	                float maxExpectedHeight = 164.0f; 
+	                float structuralOffset = maxExpectedHeight - threadArgs->currentDockH;
+	                if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Clamp shield protection
+	                
+	                // Apply dynamic tracking pushing popup lower down when icons shrink
+	                float anchoredMenuY = static_cast<float>(threadArgs->winY) + structuralOffset - 5.0f; 
 	                BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 	
 	                // Open synchronously inside our background thread
@@ -3454,6 +3492,7 @@ public:
 	                threadArgs->engine->fTrackerMenuIsActive = false; 
 	
 	                // PROCESS SELECTIONS VIA TRACKER MESSENGER LOOP
+
 	                if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 	                    uint32 command = chosenAction->Message()->what;
 	                    
@@ -3643,13 +3682,6 @@ public:
 	    HaikuRect cpuBounds = { currentX, dockPlate.top, currentX + dynamicGraphWidth, dockPlate.bottom };
 	    
 	    if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
-	        // Fetch absolute screen coordinate offsets via the active window context
-	        int winX = 0, winY = 0;
-	        SDL_Window* activeWin = SDL_GetMouseFocus();
-	        if (activeWin) {
-	            SDL_GetWindowPosition(activeWin, &winX, &winY);
-	        }
-	
 	        // ACTIVE MENU CLOSE CHECK: Let the menu naturally collapse if they click again
 	        if (fCpuMenuIsActive) {
 	            return; 
@@ -3661,17 +3693,30 @@ public:
 	            // Bundle coordinates to pass safely across the memory barrier
 	            CpuMenuArgs* args = new CpuMenuArgs();
 	            args->engine = this;
-	            args->winX = winX;
-	            args->winY = winY;
-	            args->mouseX = x;
-	            args->mouseY = y;
+	            args->winX = 0;
+	            args->winY = 0;
+	            args->mouseX = static_cast<int32>(x);
+	            args->mouseY = static_cast<int32>(y);
+	            
+	            // SMART MATCH: Mirror the exact dynamic layout sizing math 
+	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
+
+	            // SMART NAVIGATION: Query native Haiku window coordinates like other smart popups
+	            if (be_app && be_app->Lock()) {
+	                BWindow* mainNativeWin = be_app->WindowAt(0);
+	                if (mainNativeWin != nullptr) {
+	                    args->winX = static_cast<int32>(mainNativeWin->Frame().left);
+	                    args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+	                }
+	                be_app->Unlock();
+	            }
 	
 	            // Spawns and detaches the menu runner immediately.
-	            // Your core SDL graphics framework thread can now render frames uninterrupted.
 	            new AsyncCpuMenuRunner(args);
 	        }
 	        return;
 	    }
+
 	} // HandleMouseClick end closing brace
 
 
@@ -3918,7 +3963,7 @@ public:
         // FIXED SIZING PIPELINE: Replaced the hardcoded '48.0f' float limits completely 
         // with your live fBaseIconSize configuration setting variable!
         float baseSize = fBaseIconSize;
-        float padding  = 12.0f;
+        float padding  = 16.0f;
         
         size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
@@ -3932,7 +3977,7 @@ public:
         // Configuration variables for the status widgets (Now scales dynamically relative to icon size changes!)
         float clockSectionPadding = 24.0f;
         float cpuGraphWidth       = 60.0f;
-        float separatorGapPadding = 16.0f;
+        float separatorGapPadding = 16.0f;        
         
         // FIXED SIZING: The trash bin launcher now scales uniformly alongside your application icons
         float baseTrashSize       = fBaseIconSize; 
@@ -4158,11 +4203,10 @@ public:
             totalCalculatedWidth = progressiveX - leftEdge;
         }
 
-
-        // -------------------------------------------------------------------------
+		// @here2
+        // -----------------------------	--------------------------------------------
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
         // -------------------------------------------------------------------------
-        // FIXED: Added local explicit type declarations for every tracking index
         size_t trashSlotIdx  = totalIconsCount;
         size_t traySlotIdx   = totalIconsCount + 1;
         size_t clockSlotIdx  = totalIconsCount + 2;
@@ -4171,57 +4215,39 @@ public:
         
         // Calculate our dynamic size ratio multiplier based on your slider baseline
         float layoutSizeRatio = baseSize / 48.0f;
-
-        // FIXED UNIQUE TYPE RESOLUTION: Named uniquely to bypass scope redeclaration errors completely!
-        float backplateCpuWidth = dynamicWidths[cpuSlotIdx] * layoutSizeRatio;
-
+		float leftPaddingbuffer   = 1.0f;
+        // --- RE-ADDED MISSING VARIABLE DECLARATIONS ---
         float dockMarginBottom = 15.0f;
         HaikuRect dockPlate;
-        float outerPlatePadding = 40.0f; 
+        // ----------------------------------------------		
+        // SMART SIZING: Side padding changes dynamically with the icon size scale factor!
+        float internalSidePadding = fBaseIconSize * layoutSizeRatio; 
         
-        // FIXED HORIZONTAL CLIPPING: Add an extra safety buffer to totalCalculatedWidth 
-        // using your scaled CPU graph footprint to push the right edge out past the graph box!
-        float adjustedTotalWidth = totalCalculatedWidth + backplateCpuWidth + (clockSectionPadding * layoutSizeRatio);
+        // SMART SCALED BUFFER: Calculates a safety buffer if layout drift occurs at high scales
+        float clippingCompensation = 0.0f;
+        if (layoutSizeRatio > 1.0f) {
+            clippingCompensation = (leftPaddingbuffer * (layoutSizeRatio - 60.0f));
+        }
 
-        dockPlate.left = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - (outerPlatePadding / 2.0f);
-        dockPlate.right = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + (outerPlatePadding / 2.0f);
+        // Apply our responsive width tracking variable
+        float adjustedTotalWidth = totalCalculatedWidth + clippingCompensation;
+
+        // Balance the dock backplate relative to the dynamically scaled row footprint
+        dockPlate.left   = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - internalSidePadding;
+        dockPlate.right  = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + internalSidePadding;
         dockPlate.bottom = fHeight - dockMarginBottom;
-        dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
+        
+        // DYNAMIC HEIGHT SCALE: Automatically adapts panel thickness to the icons
+        dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
 
         // Lock down definitive trash hitbox using converged data fields
         float renderingTrashSize = dynamicWidths[trashSlotIdx];
-        
-        // Re-anchor left coordinate tracker using our freshly expanded plate geometry baseline
-        float layoutTrackerX = dockPlate.left + 20.0f;
-        for (size_t idx = 0; idx < totalIconsCount; ++idx) {
-            layoutTrackerX += dynamicWidths[idx] + padding;
-        }
-        if (totalIconsCount > 0) layoutTrackerX -= padding;
-        if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
-        
-        // Add System Tray width first
-        layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
-        
-        // Add Clock width second
-        if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + (dynamicWidths[clockSlotIdx] * layoutSizeRatio);
-        
-        // Add Volume slider width third
-        layoutTrackerX += clockSectionPadding + (dynamicWidths[volumeSlotIdx] * layoutSizeRatio);
 
-        // =========================================================================
-        // FIXED ALIGNMENT: Account for the CPU section before setting the trash rect!
-        // =========================================================================
-        layoutTrackerX += clockSectionPadding + backplateCpuWidth;
-        
-        layoutTrackerX += clockSectionPadding;
-        fTrashRect.left = layoutTrackerX;
         fTrashRect.right = fTrashRect.left + renderingTrashSize;
         fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
         fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
-        // Render backplate container shelf
-
-        // 
+     
         // =========================================================================
         // BACKPLATE CONTAINER SHELF RENDERING (OPTION A: DYNAMIC SYNCD FADE)
         // =========================================================================
@@ -4582,7 +4608,7 @@ public:
 
 
 
-               // =========================================================================
+        // =========================================================================
         // 6. DRAW SYSTEM CLOCK STATUS TEXT (PROPORTIONAL SIZE SCALING)
         // =========================================================================
         if (fClockTexture.id != 0) {
@@ -5500,6 +5526,7 @@ void SaveConfiguration() {
         settings.AddBool("auto_raise",    dockAlwaysOnTop);
         settings.AddBool("text_overlays", fShowTitleOverlays);
         settings.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
+        settings.AddFloat(kSettingsAlphaKey, fDockAlpha);
         // 2. Pack all live favorites keys sequentially into the same field name
         std::set<std::string>::iterator it;
         for (it = gFavoritePaths.begin(); it != gFavoritePaths.end(); ++it) {
@@ -5655,7 +5682,13 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
     float anchoredMenuX = static_cast<float>(fArgs->winX + fArgs->mouseX) - 45.0f;
     if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
     
-    float anchoredMenuY = static_cast<float>(fArgs->winY) - 5.0f;
+    // SMART ADJUSTMENT: Calculate layout normalization metrics boundary limit tracker
+    float maxExpectedHeight = 164.0f; 
+    float structuralOffset = maxExpectedHeight - fArgs->currentDockH;
+    if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Clamp shield protection
+    
+    // FIX: Push it lower down the screen boundary context as your dock container shrivels
+    float anchoredMenuY = static_cast<float>(fArgs->winY) + structuralOffset - 5.0f;
     BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 
     // Notice we use Go(..., false, false) intentionally here!
@@ -5663,9 +5696,15 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
     // blocking synchronously here is completely safe and won't lock your main SDL loop.
     BMenuItem* chosenAction = pcMenu->Go(screenClickPoint, false, false);
 
+    // FIX: Release the safety shield flag instantly when the menu collapses or a selection finishes
+    if (fArgs && fArgs->engine) {
+        fArgs->engine->fCpuMenuIsActive = false;
+    }
+
     // =========================================================================
     // ROUTING AND SIGNAL HANDLING MATRIX (WITH MODAL CONFIRMATION ALERTS)
     // =========================================================================
+
     if (chosenAction != nullptr) {
         BMessage* actionMsg = chosenAction->Message();
         if (actionMsg != nullptr) {
@@ -5804,8 +5843,10 @@ int main(int argc, char* argv[]) {
     int screenWidth  = currentDisplayMode.w;
     int screenHeight = currentDisplayMode.h;
     
+    float calculatedBaseHeight = fBaseIconSize + 140.0f; 
+    
     int dockPanelW = screenWidth;
-    int dockPanelH = 200; 
+	int dockPanelH = static_cast<int>(std::ceil(calculatedBaseHeight));
     int sensorHeight = 4; 
 
     // Use yExpanded to position the actual SDL window frame at the bottom
@@ -5846,12 +5887,12 @@ int main(int argc, char* argv[]) {
     
 
     SDL_GL_SetSwapInterval(1);
-    glViewport(0, 0, screenWidth, 200);
+	glViewport(0, 0, screenWidth, dockPanelH);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     
     // --- WALLPAPER RE-STITCH ALIGNMENT MATH ---
-    float panelTopY    = static_cast<float>(screenHeight) - 200.0f;
+    float panelTopY = static_cast<float>(screenHeight) - static_cast<float>(dockPanelH);
     float panelBottomY = static_cast<float>(screenHeight);
     
     gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
@@ -5867,7 +5908,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.29"; 
+    const char* localVersion = "v1.0.30"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
@@ -5964,7 +6005,7 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
                 
-                    int hiddenScreenOffset = screenHeight - 200; 
+                    int hiddenScreenOffset = screenHeight - dockPanelH;
                     int adjustedMouseY = mouseY + hiddenScreenOffset;
                 
                     // Feed smooth radial zoom parameters
@@ -6192,7 +6233,7 @@ int main(int argc, char* argv[]) {
         static int lastSentY = -1;
         static uint32 lastSentButtons = 0;
 
-        int hiddenScreenOffset = screenHeight - 200;
+        int hiddenScreenOffset = screenHeight - dockPanelH;
         int adjustedMouseY = localMouseY + hiddenScreenOffset;
 
         if (!cursorIsInsideDock) {
