@@ -1318,7 +1318,7 @@ public:
                 BAlert* aboutAlert = new BAlert("About hdesktop",
                     "hdesktop SDL Dock\n"
                     "MIT License\n"
-                    "Version v1.0.30\n"
+                    "Version v1.0.31\n"
                     "(c) 2026 ablyss\n\n"
                     
                     "Enjoy!\n\n"
@@ -2711,7 +2711,7 @@ public:
         // FIXED SIZING PIPELINE: Replaced the hardcoded '48.0f' float limits completely 
         // with your live fBaseIconSize configuration setting variable!
         float baseSize = fBaseIconSize;
-        float padding  = 12.0f;
+        float padding  = 16.0f;
         
         size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
@@ -2740,81 +2740,96 @@ public:
         // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING
         // -------------------------------------------------------------------------
 
-	    float totalCalculatedWidth = 0.0f; 
-	    
-	    // Run 3 iterations to let the left-offset margin converge perfectly
-	    for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
-	        dynamicWidths.clear();
-	        dynamicScales.clear();
-	        maxDockHeight = baseSize;
-	        
-	        // Start reading layouts from a relative left offset margin
-	        float progressiveX = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
-	        
-	        // 1. Process standard app launchers & active window indicators
-	        for (size_t i = 0; i < totalIconsCount; ++i) {
-	            float approxCenterX = progressiveX + (baseSize / 2.0f);
-	            
-	            // CRITICAL SYNC: Calculate the visual center point on the Y axis 
-	            // exactly how your RenderFrame pipeline does it!
-	            float approxCenterY = fHeight - 10.0f - (baseSize / 2.0f);
-	            
-	            // Compute independent delta vectors from click points
-	            float distanceX = std::abs(x - approxCenterX);
-	            float distanceY = std::abs(y - approxCenterY);
-	            
-	            // FIXED TRACKING GAIN: Use true 2D hypotenuse distance to eliminate layout drift!
-	            float distance2D = std::sqrt(distanceX * distanceX + distanceY * distanceY);
-	            
-	            float scale = 1.0f;
-	            // Match the 180.0f Gaussian bubble metrics from your main engine drawing loop
-	            if (distance2D < 180.0f) { 
-	                float ratio = distance2D / 180.0f;
-	                // Smooth Gaussian bell-curve falloff transitions perfectly
-	                scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	            }
-	
-	            float finalSize = baseSize * scale;
-	            dynamicWidths.push_back(finalSize);
-	            dynamicScales.push_back(scale);
-	            
-	            if (finalSize > maxDockHeight) maxDockHeight = finalSize;
-	            progressiveX += finalSize + padding;
-	        }
-	        if (totalIconsCount > 0) progressiveX -= padding; 
-	
-	        // Account for the structural native app split divider
-	        if (activeWindowsCount > 0) {
-	            progressiveX += separatorGapPadding;
-	        }
-			
-			// =========================================================================
-			// PROCESS HAIKU TRASH CAN COMPONENT METRICS (2D MATCHED FIXED CHASSIS)
-			// =========================================================================
-	        progressiveX += clockSectionPadding;
-	        float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
-	        float approxTrashCenterY = fHeight - 10.0f - (baseSize / 2.0f);
-	        
-	        float distanceTrashX = std::abs(x - approxTrashCenterX);
-	        float distanceTrashY = std::abs(y - approxTrashCenterY);
-	        float distanceTrash2D = std::sqrt(distanceTrashX * distanceTrashX + distanceTrashY * distanceTrashY);
-	        
-	        float trashScale = 1.0f;
-	        if (distanceTrash2D < 180.0f) {
-	            float ratio = distanceTrash2D / 180.0f;
-	            trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	        }
-	        
-	        float finalTrashSize = baseTrashSize * trashScale;
-	        dynamicWidths.push_back(finalTrashSize);
-	        dynamicScales.push_back(trashScale);
-	        if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
-	        progressiveX += finalTrashSize;
+        float totalCalculatedWidth = 0.0f;        
+        for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
+            dynamicWidths.clear();
+            dynamicScales.clear();
+            maxDockHeight = baseSize;
+            
+            // Start reading layouts from a relative left offset margin
+            float progressiveX = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
+            
+            // 1. Process standard app launchers & active window indicators (2D SMOOTH FIX)
+            for (size_t i = 0; i < totalIconsCount; ++i) {
+                float approxCenterX = progressiveX + (baseSize / 2.0f);
+                
+                // Calculate the visual center point of the icon on the Y axis
+                float approxCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                
+                // Compute independent delta vectors
+                float distanceX = std::abs(fMouseX - approxCenterX);
+                float distanceY = std::abs(fMouseY - approxCenterY);
+                
+                // Calculate true 2D hypotenuse distance from the mouse to the center of the icon
+                float distance2D = std::sqrt(distanceX * distanceX + distanceY * distanceY);
+                
+                float scale = 1.0f;
+                // FIX: Base magnification on the total 2D distance sphere (180.0f radius provides excellent glide feel)
+                if (fCursorIsInsideHitbox && distance2D < 180.0f) {
+                    float ratio = distance2D / 180.0f;
+                    
+                    // Smooth Gaussian bell-curve falloff transitions perfectly in all directions
+                    scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
 
-	        // =========================================================================
-	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER 
-	        // =========================================================================
+                float finalSize = baseSize * scale;
+                dynamicWidths.push_back(finalSize);
+                dynamicScales.push_back(scale);
+                
+                if (finalSize > maxDockHeight) maxDockHeight = finalSize;
+                progressiveX += finalSize + padding;
+            }
 
+
+            
+            if (totalIconsCount > 0) progressiveX -= padding; 
+
+            // Account for the structural native app split divider
+            if (activeWindowsCount > 0) {
+                progressiveX += separatorGapPadding;
+            }
+
+            
+            // =========================================================================
+            // PROCESS HAIKU TRASH CAN COMPONENT METRICS (2D SMOOTH FIX)
+            // =========================================================================
+            progressiveX += clockSectionPadding;
+            float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
+            
+            // Calculate the spatial center point of the Trash Can icon on the Y axis
+            float approxTrashCenterY = fHeight - 10.0f - (baseTrashSize / 2.0f);
+            
+            // Compute separate directional delta vectors
+            float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+            float distanceTrashY = std::abs(fMouseY - approxTrashCenterY);
+            
+            // Calculate true 2D distance using the hypotenuse formula
+            float distanceTrash2D = std::sqrt(distanceTrashX * distanceTrashX + distanceTrashY * distanceTrashY);
+            
+            float trashScale = 1.0f;
+            // FIX: Rely purely on the 2D radial distance sphere (matching your 180.0f radius baseline)
+            if (fCursorIsInsideHitbox && distanceTrash2D < 180.0f) {
+                float ratio = distanceTrash2D / 180.0f;
+                
+                // Smooth Gaussian bell-curve falloff transitions cleanly in all 360 degrees
+                trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+            }
+            
+            float finalTrashSize = baseTrashSize * trashScale;
+            dynamicWidths.push_back(finalTrashSize);
+            dynamicScales.push_back(trashScale);
+            if (finalTrashSize > maxDockHeight) maxDockHeight = finalTrashSize;
+            progressiveX += finalTrashSize;
+
+ 			
+   	    // =========================================================================
+	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (2D SMOOTH FIX)
+	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
+	        // =========================================================================
+	        if (showSystemTray) {
+            	// Run our throttled texture sync check
+            	SyncDynamicSystrayTextures();
+			}
 	        float traySectionPadding = clockSectionPadding;
 	        size_t trayCount = fLiveTrayItems.size();
 	        
@@ -2825,11 +2840,23 @@ public:
 	
 	        progressiveX += traySectionPadding;
 	        float approxTrayCenterX = progressiveX + (baselineTrayWidth / 2.0f);
+	        
+	        // Calculate the standard spatial center point on the Y axis for the tray row
+	        float approxTrayCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+	        
+	        // Compute independent delta vectors
 	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
+	        float distanceTrayY = std::abs(fMouseY - approxTrayCenterY);
+	        
+	        // Calculate true 2D distance using the hypotenuse formula
+	        float distanceTray2D = std::sqrt(distanceTrayX * distanceTrayX + distanceTrayY * distanceTrayY);
 	        
 	        float trayScale = 1.0f;
-	        if (fMouseY >= (fHeight - 140.0f) && distanceTrayX < 160.0f) {
-	            float ratio = distanceTrayX / 160.0f;
+	        // FIX: Base magnification entirely on the 2D radial distance sphere
+	        if (fCursorIsInsideHitbox && distanceTray2D < 180.0f) {
+	            float ratio = distanceTray2D / 180.0f;
+	            
+	            // Smooth Gaussian bell-curve falloff transitions cleanly in all directions
 	            trayScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
 	        
@@ -2837,141 +2864,174 @@ public:
 	        dynamicScales.push_back(trayScale);
 	        progressiveX += (baselineTrayWidth * trayScale);
 	        // =========================================================================
-	        
-	
-	        // Process System Clock Component Metrics
-	        if (fClockTexture.id != 0) {
-	            progressiveX += clockSectionPadding;             
-	            float highDpiCompensateFactor = 0.42f;
-	            float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;              
-	            float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);                
-	            float distanceClockX = std::abs(fMouseX - approxClockCenterX);               
-	            float clockScale = 1.0f;
-	            
-	            if (fMouseY >= (fHeight - 140.0f) && distanceClockX < 160.0f) {
-	                float ratio = distanceClockX / 160.0f;
-	                clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	            }
-	            
-	            dynamicWidths.push_back(baselineClockLayoutWidth * clockScale);
-	            dynamicScales.push_back(clockScale);
-	            progressiveX += (baselineClockLayoutWidth * clockScale);
-	        } else {
-	            dynamicWidths.push_back(0.0f);
-	            dynamicScales.push_back(1.0f);
-	        }
-	
-	        // Process Dynamic Volume Slider Component Metrics
-	        progressiveX += clockSectionPadding;
-	        float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
-	        float distanceVolX = std::abs(fMouseX - approxVolCenterX);
-	        
-	        float volScale = 1.0f;
-	        if (fMouseY >= (fHeight - 140.0f) && distanceVolX < 160.0f) {
-	            float ratio = distanceVolX / 160.0f;
-	            volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	        }
-	        dynamicWidths.push_back(baseVolumeWidth * volScale);
-	        dynamicScales.push_back(volScale);
-	        progressiveX += (baseVolumeWidth * volScale);
-	
 
-	        // 5. Process Graphical CPU Monitor Metrics
-	        progressiveX += clockSectionPadding; 
-	        float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
-	        float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
-	        
-	        float cpuScale = 1.0f;
-	        if (fMouseY >= (fHeight - 140.0f) && distanceCpuX < 160.0f) {
-	            float ratio = distanceCpuX / 160.0f;
-	            cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
-	        }
-	        
-	        float finalCpuWidth = cpuGraphWidth * cpuScale;
-	        dynamicWidths.push_back(finalCpuWidth);
-	        dynamicScales.push_back(cpuScale);
-	        progressiveX += finalCpuWidth;
-	
-	        // Save converged dimensions to update anchor points on the next pass
-	        float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
-	        totalCalculatedWidth = progressiveX - leftEdge;
-	    }
+ 			
+            // =========================================================================
+            // PROCESS SYSTEM CLOCK COMPONENT METRICS (2D SMOOTH FIX)
+            // =========================================================================
+            if (fClockTexture.id != 0) {
+                progressiveX += clockSectionPadding;
+                
+                float highDpiCompensateFactor = 0.42f;
+                float baselineClockLayoutWidth = static_cast<float>(fClockWidth) * highDpiCompensateFactor;
+                
+                float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
+                
+                // Calculate spatial center point on the Y axis for the text string element
+                float approxClockCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                
+                float distanceClockX = std::abs(fMouseX - approxClockCenterX);
+                float distanceClockY = std::abs(fMouseY - approxClockCenterY);
+                float distanceClock2D = std::sqrt(distanceClockX * distanceClockX + distanceClockY * distanceClockY);
+                
+                float clockScale = 1.0f;
+                // FIX: Base magnification entirely on the unified 180.0f radial distance circle
+                if (fCursorIsInsideHitbox && distanceClock2D < 180.0f) {
+                    float ratio = distanceClock2D / 180.0f;
+                    clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+                
+                dynamicWidths.push_back(baselineClockLayoutWidth * clockScale);
+                dynamicScales.push_back(clockScale);
+                progressiveX += (baselineClockLayoutWidth * clockScale);
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
+            }
+
+            // =========================================================================
+            // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS (2D SMOOTH FIX)
+            // =========================================================================
+            progressiveX += clockSectionPadding;
+            float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
+            
+            // Calculate spatial center point on the Y axis for the slider asset
+            float approxVolCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            
+            float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+            float distanceVolY = std::abs(fMouseY - approxVolCenterY);
+            float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
+            
+            float volScale = 1.0f;
+            if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
+                float ratio = distanceVol2D / 180.0f;
+                volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+            }
+            dynamicWidths.push_back(baseVolumeWidth * volScale);
+            dynamicScales.push_back(volScale);
+            progressiveX += (baseVolumeWidth * volScale);
+
+
+            // =========================================================================
+            // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
+            // =========================================================================
+            progressiveX += clockSectionPadding; 
+            float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
+            
+            // Calculate spatial center point on the Y axis for the processor chart cells
+            float approxCpuCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            
+            float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+            float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
+            float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
+            
+            float cpuScale = 1.0f;
+            if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
+                float ratio = distanceCpu2D / 180.0f;
+                cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+            }
+            
+            float finalCpuWidth = cpuGraphWidth * cpuScale;
+            dynamicWidths.push_back(finalCpuWidth);
+            dynamicScales.push_back(cpuScale);
+            progressiveX += finalCpuWidth;
+
+            // Save converged dimensions to update anchor points on the next pass
+            float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
+            totalCalculatedWidth = progressiveX - leftEdge;
+        }
 		
 		//@here
 	    // -------------------------------------------------------------------------
 	    // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
 	    // -------------------------------------------------------------------------
 	    size_t trashSlotIdx   = totalIconsCount;
-	    size_t traySlotIdx  = totalIconsCount + 1;
-	    size_t clockSlotIdx  = totalIconsCount + 2;
-	    size_t volumeSlotIdx = totalIconsCount + 3;
-	    size_t cpuSlotIdx    = totalIconsCount + 4;
-	    
+    size_t traySlotIdx    = totalIconsCount + 1;
+    size_t clockSlotIdx   = totalIconsCount + 2;
+    size_t volumeSlotIdx  = totalIconsCount + 3;
+    size_t cpuSlotIdx     = totalIconsCount + 4;
+    
+    float dockMarginBottom = 15.0f;
+    HaikuRect dockPlate;
 
-	    float dockMarginBottom = 15.0f;
-	    HaikuRect dockPlate;
-	    float outerPlatePadding = 40.0f; 
-	    dockPlate.left = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f) - (outerPlatePadding / 2.0f);
-	    
-	    // FIXED MINOR TWEAK: Add exactly 50.0f pixels here to manually push the right corner out 
-	    // past the CPU graph box, ensuring it never clips when icons scale up!
-	    dockPlate.right = (fWidth / 2.0f) + (totalCalculatedWidth / 2.0f) + (outerPlatePadding / 2.0f) + 50.0f;
-	    
-	    dockPlate.bottom = fHeight - dockMarginBottom;
-	    dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
+    // =========================================================================
+    // 1:1 RENDER MATCHING: REPLICATE THE EXACT DYNAMIC GEOMETRY
+    // =========================================================================
+    float layoutSizeRatio = baseSize / 48.0f;
+    float leftPaddingbuffer = 1.0f;
+    float internalSidePadding = fBaseIconSize * layoutSizeRatio; 
+    
+    float clippingCompensation = 0.0f;
+    if (layoutSizeRatio > 1.0f) {
+        clippingCompensation = (leftPaddingbuffer * (layoutSizeRatio - 60.0f));
+    }
 
-	    // Lock down definitive trash hitbox using the converged stream variables
-	    float renderingTrashSize = dynamicWidths[trashSlotIdx];
-	    
-		float layoutTrackerX = dockPlate.left + 20.0f;
+    // Apply the identical responsive width tracking variable
+    float adjustedTotalWidth = totalCalculatedWidth + clippingCompensation;
 
-	    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
-	        layoutTrackerX += dynamicWidths[idx] + padding;
-	    }
-	    if (totalIconsCount > 0) layoutTrackerX -= padding;
-	    if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
-	    
-	    // SYNCHRONIZED: Account for the horizontal width footprint of the new System Tray slot!
-	    layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
-	    
-	    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
-	    
-	    // Accountability shift step past our volume metrics
-	    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];	    
-	    layoutTrackerX += clockSectionPadding;
-	    fTrashRect.left = layoutTrackerX;
-	    fTrashRect.right = fTrashRect.left + renderingTrashSize;
-	    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
-	    fTrashRect.bottom = dockPlate.bottom - 10.0f;
+    // Balance the dock plate exactly how it is drawn on screen
+    dockPlate.left   = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - internalSidePadding;
+    dockPlate.right  = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + internalSidePadding;
+    dockPlate.bottom = fHeight - dockMarginBottom;
+    dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
 
+    // Lock down definitive trash hitbox using converged data fields
+    float renderingTrashSize = dynamicWidths[trashSlotIdx];
+    
+    float layoutTrackerX = dockPlate.left + 20.0f;
 
-		// =========================================================================
-		// PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
-		// =========================================================================
-	    // FIXED MATCH PASS: Completely match your clean RenderFrame bounds.
-	    // This guarantees the invisible click grid locks onto the visual elements!
-	    float adjustedTotalWidth = totalCalculatedWidth;
-	
-	    // Re-verify definitive left alignment starting pixel address exactly matching drawing canvas
-	    float visualDockLeft = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - (outerPlatePadding / 2.0f);
-	
-	    float currentX = visualDockLeft + 20.0f; // Exact pixel-perfect rendering origin match!
-	    size_t evaluationSlotIdx = 0;
-		
-		// STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
-		for (size_t i = 0; i < baselineLaunchersCount; ++i) {
-		    float size = dynamicWidths[evaluationSlotIdx];
-	        
-	        // Correctly calculate visual height baseline boundary metrics
-		    HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-		
-		    if (x >= realIconBounds.left && x <= realIconBounds.right &&
-		        y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-		            
-	            if (i == 0) {
-                // =========================================================================
-                // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
-                // =========================================================================
+    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
+        layoutTrackerX += dynamicWidths[idx] + padding;
+    }
+    if (totalIconsCount > 0) layoutTrackerX -= padding;
+    if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
+    
+    // SYNCHRONIZED: Account for the horizontal width footprint of the System Tray slot
+    layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
+    
+    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
+    
+    // Accountability shift step past our volume metrics
+    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];       
+    layoutTrackerX += clockSectionPadding;
+    
+    fTrashRect.left = layoutTrackerX;
+    fTrashRect.right = fTrashRect.left + renderingTrashSize;
+    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
+    fTrashRect.bottom = dockPlate.bottom - 10.0f;
+
+    // =========================================================================
+    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
+    // =========================================================================
+    // The exact starting visual layout anchor coordinate used in pass 5 of rendering
+    float currentX = dockPlate.left + 20.0f; 
+    size_t evaluationSlotIdx = 0;
+    
+    // STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
+    for (size_t i = 0; i < baselineLaunchersCount; ++i) {
+        float size = dynamicWidths[evaluationSlotIdx];
+        
+        // Correctly calculate visual height baseline boundary metrics
+        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+    
+        if (x >= realIconBounds.left && x <= realIconBounds.right &&
+            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+                
+            if (i == 0) {
+            // =========================================================================
+            // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
+            // =========================================================================
+
 
                 if (button == SDL_BUTTON_RIGHT) {                                  
                     if (fLeafMenuIsActive) return;
@@ -5908,7 +5968,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.30"; 
+    const char* localVersion = "v1.0.31"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
