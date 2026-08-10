@@ -2,11 +2,13 @@
  * Copyright 2026, Kris Beazley hDesktop@epluribusunix.net
  * All rights reserved. Distributed under the terms of the MIT license.
  */ 
-
+ 
+#include <Alert.h>
 #include <algorithm>
 #include <AppKit.h>
 #include <AppServerLink.h> 
 #include <Bitmap.h>
+#include <Button.h>
 #include <CheckBox.h>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +34,7 @@
 #include <MessageRunner.h> 
 #include <MenuItem.h>
 #include <Message.h>
+#include <Messenger.h>
 #include <Node.h>
 #include <NodeInfo.h>
 #include <NodeMonitor.h>
@@ -39,6 +42,7 @@
 #include <ParameterWeb.h>
 #include <Path.h>
 #include <PopUpMenu.h>
+#include <Rect.h> 
 #include <Roster.h>
 #include <Screen.h>
 #include <ScrollView.h>
@@ -48,9 +52,11 @@
 #include <set>
 #include <Shape.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <StorageKit.h>
 #include <String.h>
 #include <string>
+#include <SupportDefs.h>
 #include <SupportKit.h> 
 #include <TranslationUtils.h>
 #include <vector>
@@ -69,6 +75,9 @@ bool showSystemTray;
 bool dockAlwaysOnTop;
 bool fShowTitleOverlays;
 void SaveConfiguration(); 
+float fBaseIconSize = 48.0f;
+const char* const kSettingsIconSizeKey = "base_icon_size";
+const uint32 MSG_ICON_SIZE_CHANGED = 'isic';
 
 
 enum {
@@ -79,6 +88,40 @@ enum {
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
     MSG_AUTORAISE_TOGGLED  = 'srdt' 
 };
+
+// 1. Unified configuration variable states
+extern bool autoHideEnabled;
+extern bool showSystemTray;
+extern bool dockAlwaysOnTop;
+extern bool fShowTitleOverlays;
+
+// NEW: Global tracker variable for backplate opacity (Defaults to 0.40f)
+float fDockAlpha = 0.40f; 
+
+// Unique constant key handles for file streaming mapping properties
+const char* const kSettingsAlphaKey = "dock_alpha";
+const uint32 MSG_ALPHA_SLIDER_CHANGED = 'alsc';
+
+
+
+struct TrackedWindowInfo {
+    BString title;
+    int32 windowIndex;
+    BRect hitBox;
+
+    // Explicit constructor to fix brace-enclosed initialization failures
+    TrackedWindowInfo(BString t, int32 idx, BRect box) 
+        : title(t), windowIndex(idx), hitBox(box) {}
+};
+
+
+// Add these inside your private/protected class declaration fields:
+bool fShouldDrawList = false;
+team_id fHoveredTeam = -1;
+std::vector<TrackedWindowInfo> fCurrentWindowsList;
+
+
+
 
 struct LeafMenuArgs {
     HaikuGlDesktopEngine* engine;
@@ -166,6 +209,134 @@ struct DesktopIconItem {
     HaikuRect textBounds;       // Layout boundaries for label text box below the icon
     bool isFolder;
 };
+
+
+
+
+
+void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& outList) {
+    outList.clear();
+
+    app_info info;
+    bool hasAppInfo = (be_roster->GetRunningAppInfo(team, &info) == B_OK);
+
+    // 1. CRITICAL GUARD: Keep only the Rakarrack guard to prevent hard system freezes via FLTK
+    if (hasAppInfo) {
+        if (strcmp(info.signature, "application/x-vnd.rakarrack-haiku") == 0 || 
+            BString(info.ref.name).ICompare("rakarrack") == 0) {
+            outList.push_back(TrackedWindowInfo("Rakarrack", 0, BRect()));
+            return;
+        }
+    }
+
+    bool isTrackerApp = (hasAppInfo && (strcmp(info.signature, "application/x-vnd.Benjamin-TRAK") == 0 || 
+                         strcmp(info.signature, "application/x-vnd.Be-TRAK") == 0));
+
+    // 2. Query raw App Server window order stack directly
+    int32 currentWorkspace = current_workspace(); 
+    int32* windowTokens = nullptr;
+    int32 totalWindows = 0;
+    
+    BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
+
+    BString combinedPaths = "";
+    int32 trackerValidCount = 0;
+
+    if (windowTokens != nullptr && totalWindows > 0) {
+        // Track the relative 0-indexed position of windows for each specific application team
+        int32 appSpecificScriptIndex = 0; 
+
+        for (int32 i = 0; i < totalWindows; ++i) {
+            client_window_info* wInfo = get_window_info(windowTokens[i]);
+            if (wInfo == nullptr) continue;
+
+            if (wInfo->team == team) {
+                BString subTitle(wInfo->name);
+                
+                if (subTitle.Length() > 0) {
+                    
+                    if (isTrackerApp) {
+                        // FIX A: Detect and ignore the system background wallpaper layer
+                        if ((subTitle == "Desktop" || subTitle.EndsWith("/Desktop")) && wInfo->feel == 1024) {
+                            free(wInfo);
+                            appSpecificScriptIndex++;
+                            continue; 
+                        }
+
+                        // FIX B: Detect and ignore the background progress file dialog window 
+                        if (subTitle == "Tracker status") {
+                            free(wInfo);
+                            appSpecificScriptIndex++;
+                            continue; // Bypasses the status panel safely!
+                        }
+
+                        // Gather genuine folders into a combined layout horizontal line
+                        if (trackerValidCount > 0) combinedPaths << " | ";
+                        combinedPaths << subTitle;
+                        trackerValidCount++;
+                    } else {
+                        // Standard apps: Keep your working multiline row entries completely untouched!
+                        outList.push_back(TrackedWindowInfo(subTitle, appSpecificScriptIndex, BRect()));
+                    }
+                }
+                // Always increment relative to the team's scriptable object bounds stack
+                appSpecificScriptIndex++;
+            }
+            free(wInfo);
+        }
+        free(windowTokens);
+    }
+
+    // 3. Format final string output context
+    if (isTrackerApp && trackerValidCount > 0) {
+        BString finalDisplayString;
+        finalDisplayString << "Tracker (" << combinedPaths << ")";
+        // Target index 0 handles basic grouping for multi-window paths
+        outList.push_back(TrackedWindowInfo(finalDisplayString, 0, BRect()));
+    }
+
+    // Ultimate fallback if no window fields whatsoever were populated by the loop pass
+    if (outList.empty()) {
+        BString fallbackName = (hasAppInfo && info.ref.name) ? info.ref.name : "Application";
+        if (hasAppInfo) {
+            if (strcmp(info.signature, "application/x-vnd.Be-TRAK") == 0) fallbackName = "Tracker";
+            else if (strcmp(info.signature, "application/x-vnd.beunited.pe") == 0) fallbackName = "Pe";
+        }
+        outList.push_back(TrackedWindowInfo(fallbackName, 0, BRect()));
+    }
+}
+
+
+
+
+void ActivateApplicationWindow(team_id team, int32 windowIndex) {
+    BMessenger appMessenger(NULL, team);
+    if (appMessenger.IsValid()) {
+        // Build the precise script message that worked beautifully earlier
+        BMessage activateMsg(B_SET_PROPERTY);
+        activateMsg.AddSpecifier("Active");
+        activateMsg.AddSpecifier("Window", windowIndex);
+        activateMsg.AddBool("data", true);
+
+        BMessage reply;
+        appMessenger.SendMessage(&activateMsg, &reply, 20000, 20000);
+
+        // --- NEW LINE: Unminimize the window if it's currently folded away ---
+        BMessage unminimizeMsg(B_SET_PROPERTY);
+        unminimizeMsg.AddSpecifier("Minimized");
+        unminimizeMsg.AddSpecifier("Window", windowIndex);
+        unminimizeMsg.AddBool("data", false); // Force Minimized to false
+        
+        BMessage unminimizeReply;
+        appMessenger.SendMessage(&unminimizeMsg, &unminimizeReply, 20000, 20000);
+    }
+    
+    // Globally lift the process context into the active foreground layer
+    be_roster->ActivateApp(team);
+}
+
+
+
 
 using BPrivate::BNavMenu;
 // =========================================================================
@@ -904,53 +1075,81 @@ void SyncDynamicSystrayTextures() {
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
-	BCheckBox* fSystemTrayCheckbox;
-	BCheckBox* fAutoRaiseCheckbox;
-	BCheckBox* fTextOverlaysCheckbox;
+    BCheckBox* fSystemTrayCheckbox;
+    BCheckBox* fAutoRaiseCheckbox;
+    BCheckBox* fTextOverlaysCheckbox;
+    BSlider*   fAlphaSlider; 
+    BSlider*   fIconSizeSlider; 
+    BButton*   fAboutButton; 
 
 public:
+
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255});
 
-        // Row 1: Dropped down slightly to account for the tighter shutdown button
-        BRect checkboxRect(25.0f, 105.0f, frame.Width() - 25.0f, 120.0f);
+        // 1. Define the "About hdesktop" Button Layout (Y: 82 to 106)
+        BRect aboutBtnRect(25.0f, 82.0f, frame.Width() - 25.0f, 106.0f);
+        fAboutButton = new BButton(aboutBtnRect, "about_btn", "About hdesktop", new BMessage('abou'));
+        AddChild(fAboutButton);
+
+        // 2. FIXED CLIPPING: Inward margins expanded from 25.0f to 35.0f to wrap inside the tray borders beautifully!
+        // Row 1: Shifted lower to match the expanded tray offset (Y: 135)
+        BRect checkboxRect(35.0f, 135.0f, frame.Width() - 35.0f, 150.0f);
         fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide", 
             new BMessage(MSG_AUTOHIDE_TOGGLED));
-        fAutoHideCheckbox->SetHighColor(rgb_color{240, 240, 240, 255}); // Match high fidelity styling colors
+        fAutoHideCheckbox->SetHighColor(rgb_color{240, 240, 240, 255}); 
         fAutoHideCheckbox->SetValue(autoHideEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoHideCheckbox);
 
-        // Row 2: Placed tightly under Row 1
-        BRect trayCheckboxRect(25.0f, 125.0f, frame.Width() - 25.0f, 140.0f);
+        // Row 2
+        BRect trayCheckboxRect(35.0f, 155.0f, frame.Width() - 35.0f, 170.0f);
         fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", "Enable System Tray", 
             new BMessage(MSG_SYSTEMTRAY_TOGGLED));
         fSystemTrayCheckbox->SetHighColor(rgb_color{240, 240, 240, 255});
         fSystemTrayCheckbox->SetValue(showSystemTray ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSystemTrayCheckbox);
 
-        // Row 3: Placed tightly under Row 2
-        BRect autoRaiseRect(25.0f, 145.0f, frame.Width() - 25.0f, 160.0f);
+        // Row 3
+        BRect autoRaiseRect(35.0f, 175.0f, frame.Width() - 35.0f, 190.0f);
         fAutoRaiseCheckbox = new BCheckBox(autoRaiseRect, "auto_raise_cb", "Enable Auto-Raise", 
             new BMessage(MSG_AUTORAISE_TOGGLED));
         fAutoRaiseCheckbox->SetHighColor(rgb_color{240, 240, 240, 255});
         fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoRaiseCheckbox);
 
-        // NEW Row 4: Placed tightly under Row 3 (Offset 20 pixels lower vertically to preserve alignment spacing)
-        BRect textOverlaysRect(25.0f, 165.0f, frame.Width() - 25.0f, 180.0f);
+        // Row 4
+        BRect textOverlaysRect(35.0f, 195.0f, frame.Width() - 35.0f, 210.0f);
         fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", "Enable Application Title Overlays", 
             new BMessage(MSG_TEXTOVERLAYS_TOGGLED));
-        fTextOverlaysCheckbox->SetHighColor(rgb_color{220, 225, 235, 255}); // Match your custom text color profile exactly
+        fTextOverlaysCheckbox->SetHighColor(rgb_color{220, 225, 235, 255}); 
         fTextOverlaysCheckbox->SetValue(fShowTitleOverlays ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysCheckbox);
+        
+        // Transparency Slider Row
+        BRect sliderRect(35.0f, 225.0f, frame.Width() - 35.0f, 265.0f);
+        fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
+            new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
+        fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
+        fAlphaSlider->SetLimitLabels("Transparent", "Opaque");
+        fAlphaSlider->SetValue(static_cast<int32>(fDockAlpha * 100.0f));
+        AddChild(fAlphaSlider);
+
+        // Icon Size Slider Row
+        BRect sizeSliderRect(35.0f, 285.0f, frame.Width() - 35.0f, 325.0f);
+        fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
+            new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
+        fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
+        fIconSizeSlider->SetLimitLabels("Small", "Large");
+        fIconSizeSlider->SetValue(static_cast<int32>(fBaseIconSize));
+        AddChild(fIconSizeSlider);
     }
+
 
 
 
 
     virtual void Draw(BRect updateRect) {
         float canvasWidth = Bounds().Width();
-
 
         // 1. Render Window Header Context Title
         SetFont(be_bold_font);
@@ -991,19 +1190,19 @@ public:
         float shutdownTextW = StringWidth(shutdownText.String());
         DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
 
-        // 4. BALANCED BACKING CONTAINER:
-        // Draws a dedicated background tray to house all 4 checkboxes beautifully.
-        // Left: 20px | Top: 95px | Right: canvasWidth - 20px | Bottom: 200px
-        SetHighColor(rgb_color{30, 31, 37, 255}); // Sleek unified slate backing panel
-        BRect checkboxTrayRect(20.0f, 95.0f, canvasWidth - 20.0f, 200.0f);
+        // 4. BALANCED BACKING CONTAINER (FULLY EXTENDED BOTTOM STRIDE)
+        // FIXED: Pushed bottom coordinate from 335.0f down to 355.0f so it 
+        // completely wraps the "Small" and "Large" text labels perfectly!
+        SetHighColor(rgb_color{30, 31, 37, 255}); 
+        BRect checkboxTrayRect(20.0f, 120.0f, canvasWidth - 20.0f, 355.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
 
-        // 5. Standard Window Control "Close" button tracking metrics at footer (SHIFTED DOWN)
-        // Shifted downward into the expanded view zone to leave 15px clear padding space (Y: 215 to 240)
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 215.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 240.0f);
+        // 5. Standard Window Control "Close" button tracking metrics at footer
+        // Shifted downward below the fully wrapped tray baseline (Y: 370 to 395)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 395.0f);
         
         if (closeBtnRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{100, 120, 160, 45});
@@ -1018,9 +1217,10 @@ public:
         
         BString btnText("close");
         float btnTextW = StringWidth(btnText.String());
-        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 232.0f));
-    }
+        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 387.0f));
 
+
+    }
 
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
@@ -1030,12 +1230,14 @@ public:
     virtual void MouseDown(BPoint point) {
         float canvasWidth = Bounds().Width();
         
-        // Coordinates match the compressed 24px tall button (Y: 50 to 74)
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
 
-        // FIX: Coordinates match the newly lowered close button position (Y: 215 to 240)
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 215.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 240.0f);
+        // MATCH LAYOUT CALIBRATION: Synchronized with your new button position (Y: 370 to 395)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 395.0f);
+
+
+
         
         if (shutdownBtnRect.Contains(point)) {
             if (be_app) {
@@ -1053,6 +1255,7 @@ public:
     }
 
 
+
     
     virtual void AttachedToWindow() {
         BView::AttachedToWindow();
@@ -1060,6 +1263,9 @@ public:
         fSystemTrayCheckbox->SetTarget(this);
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
+        fAlphaSlider->SetTarget(this); 
+        fIconSizeSlider->SetTarget(this); 
+        fAboutButton->SetTarget(this); 
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -1090,6 +1296,38 @@ public:
                 break;
             }
             
+             case MSG_ALPHA_SLIDER_CHANGED: {
+                fDockAlpha = fAlphaSlider->Value() / 100.0f;
+                SaveConfiguration();                
+                Invalidate();
+                break;
+            }
+            
+            
+            case MSG_ICON_SIZE_CHANGED: {
+                fBaseIconSize = static_cast<float>(fIconSizeSlider->Value());
+                SaveConfiguration();                
+                Invalidate();
+                break;
+            }
+            
+            case 'abou': {
+                BAlert* aboutAlert = new BAlert("About hdesktop",
+                    "hdesktop SDL Dock\n"
+                    "MIT License\n"
+                    "Version v1.0.29\n"
+                    "(c) 2026 ablyss\n\n"
+                    
+                    "Enjoy!\n\n"
+                    
+                    "",
+                    "Awesome!", nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+                aboutAlert->Go(); 
+                break;
+            }
+
+
+            
             default:
                 BView::MessageReceived(message);
                 break;
@@ -1106,19 +1344,22 @@ public:
 // =========================================================================
 class HaikuConfigWindow : public BWindow {
 public:
-    HaikuConfigWindow(BRect centralAnchor)
-        : BWindow(BRect(0, 0, 560, 340), "hdesktop Configuration",
-                  B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
-                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
-        
-        // Center the layout frame inside the screen space coordinates of the active app drawer
-        float targetX = centralAnchor.left + (centralAnchor.Width() - 420.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 220.0f) / 2.0f;
-        MoveTo(targetX, targetY);
+	HaikuConfigWindow(BRect centralAnchor)
+	    : BWindow(BRect(0, 0, 560, 450), "hdesktop Configuration",
+	              B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
+	              B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
+	    
+	    ResizeTo(560.0f, 450.0f);
+	    float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
+	    float targetY = centralAnchor.top + (centralAnchor.Height() - 450.0f) / 2.0f;
+	    MoveTo(targetX, targetY);
+	    
+	    ConfigView* configView = new ConfigView(Bounds());
+	    AddChild(configView);
+	}
 
-        ConfigView* configView = new ConfigView(Bounds());
-        AddChild(configView);
-    }
+
+
 
     virtual ~HaikuConfigWindow() {
         gActiveConfigInstance = nullptr; // Reset address register safely on destruction
@@ -2453,38 +2694,44 @@ public:
 	        }
 	    }
 	
-	    // =========================================================================
-	    // DOCK GEOMETRY & LAYER PRE-CALCULATIONS (EXACT MATCH FOR RENDERFRAME)
-	    // =========================================================================
+        // =========================================================================
+        // 3. TASKBAR-ENABLED DOCK WIDTH GEOMETRY CALCULATIONS (UNIFIED ZOOM PIPELINE)
+        // =========================================================================
+        // FIXED SIZING PIPELINE: Replaced the hardcoded '48.0f' float limits completely 
+        // with your live fBaseIconSize configuration setting variable!
+        float baseSize = fBaseIconSize;
+        float padding  = 12.0f;
+        
+        size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
-	    float baseSize = 48.0f;
-	    float padding = 12.0f;
-	    
-	    size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
+        size_t activeWindowsCount = 0;
+        for (const auto& w : fTaskbarWindows) {
+            if (*w.openStateFlag == true) activeWindowsCount++;
+        }
 
-	    size_t activeWindowsCount = 0;
-	    for (const auto& w : fTaskbarWindows) {
-	        if (*w.openStateFlag == true) activeWindowsCount++;
-	    }
+        size_t totalIconsCount = baselineLaunchersCount + activeWindowsCount;
 
-	    size_t totalIconsCount = baselineLaunchersCount + activeWindowsCount;
+        // Configuration variables for the status widgets (Now scales dynamically relative to icon size changes!)
+        float clockSectionPadding = 24.0f;
+        float cpuGraphWidth       = 60.0f;
+        float separatorGapPadding = 16.0f;
+        
+        // FIXED SIZING: The trash bin launcher now scales uniformly alongside your application icons
+        float baseTrashSize       = fBaseIconSize; 
+        float baseVolumeWidth     = 44.0f; // Slider horizontal layout width footprint allocation
 
-	    // Configuration variables matching RenderFrame exactly
-	    float clockSectionPadding = 24.0f;
-	    float cpuGraphWidth = 60.0f;
-	    float separatorGapPadding = 16.0f;
-	    float baseTrashSize = 48.0f;
-	    float baseVolumeWidth = 44.0f; 
+        // Arrays to store real-time calculations for EVERY component
+        std::vector<float> dynamicWidths;
+        std::vector<float> dynamicScales;
+        float maxDockHeight = baseSize;
 
-	    std::vector<float> dynamicWidths;
-	    std::vector<float> dynamicScales;
-	    float maxDockHeight = baseSize;
+        // -------------------------------------------------------------------------
+        // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING
+        // -------------------------------------------------------------------------
 
-	    // -------------------------------------------------------------------------
-	    // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING (CONVERGENCE SYNC)
-	    // -------------------------------------------------------------------------
 	    float totalCalculatedWidth = 0.0f; 
 	    
+	    // Run 3 iterations to let the left-offset margin converge perfectly
 	    for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
 	        dynamicWidths.clear();
 	        dynamicScales.clear();
@@ -2497,12 +2744,22 @@ public:
 	        for (size_t i = 0; i < totalIconsCount; ++i) {
 	            float approxCenterX = progressiveX + (baseSize / 2.0f);
 	            
-			float distanceX = std::abs(x - approxCenterX); 
-			
-			float scale = 1.0f;
-			if (y >= (fHeight - 140.0f) && distanceX < 160.0f) { 
- 
-	                float ratio = distanceX / 160.0f;
+	            // CRITICAL SYNC: Calculate the visual center point on the Y axis 
+	            // exactly how your RenderFrame pipeline does it!
+	            float approxCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+	            
+	            // Compute independent delta vectors from click points
+	            float distanceX = std::abs(x - approxCenterX);
+	            float distanceY = std::abs(y - approxCenterY);
+	            
+	            // FIXED TRACKING GAIN: Use true 2D hypotenuse distance to eliminate layout drift!
+	            float distance2D = std::sqrt(distanceX * distanceX + distanceY * distanceY);
+	            
+	            float scale = 1.0f;
+	            // Match the 180.0f Gaussian bubble metrics from your main engine drawing loop
+	            if (distance2D < 180.0f) { 
+	                float ratio = distance2D / 180.0f;
+	                // Smooth Gaussian bell-curve falloff transitions perfectly
 	                scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	            }
 	
@@ -2515,19 +2772,25 @@ public:
 	        }
 	        if (totalIconsCount > 0) progressiveX -= padding; 
 	
-	        // Account for the structural native app split divider (FIXED DE-DUPLICATION)
+	        // Account for the structural native app split divider
 	        if (activeWindowsCount > 0) {
 	            progressiveX += separatorGapPadding;
 	        }
 			
-			// Process Haiku Trash Can Component Metrics
+			// =========================================================================
+			// PROCESS HAIKU TRASH CAN COMPONENT METRICS (2D MATCHED FIXED CHASSIS)
+			// =========================================================================
 	        progressiveX += clockSectionPadding;
 	        float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
-	        float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+	        float approxTrashCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+	        
+	        float distanceTrashX = std::abs(x - approxTrashCenterX);
+	        float distanceTrashY = std::abs(y - approxTrashCenterY);
+	        float distanceTrash2D = std::sqrt(distanceTrashX * distanceTrashX + distanceTrashY * distanceTrashY);
 	        
 	        float trashScale = 1.0f;
-	        if (fMouseY >= (fHeight - 140.0f) && distanceTrashX < 160.0f) {
-	            float ratio = distanceTrashX / 160.0f;
+	        if (distanceTrash2D < 180.0f) {
+	            float ratio = distanceTrash2D / 180.0f;
 	            trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
 	        }
 	        
@@ -2538,9 +2801,9 @@ public:
 	        progressiveX += finalTrashSize;
 
 	        // =========================================================================
-	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (NEW DYNAMIC CODE)
-	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
+	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER 
 	        // =========================================================================
+
 	        float traySectionPadding = clockSectionPadding;
 	        size_t trayCount = fLiveTrayItems.size();
 	        
@@ -2638,14 +2901,17 @@ public:
 	    HaikuRect dockPlate;
 	    float outerPlatePadding = 40.0f; 
 	    dockPlate.left = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f) - (outerPlatePadding / 2.0f);
-	    dockPlate.right = (fWidth / 2.0f) + (totalCalculatedWidth / 2.0f) + (outerPlatePadding / 2.0f);
+	    
+	    // FIXED MINOR TWEAK: Add exactly 50.0f pixels here to manually push the right corner out 
+	    // past the CPU graph box, ensuring it never clips when icons scale up!
+	    dockPlate.right = (fWidth / 2.0f) + (totalCalculatedWidth / 2.0f) + (outerPlatePadding / 2.0f) + 50.0f;
+	    
 	    dockPlate.bottom = fHeight - dockMarginBottom;
 	    dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
 
 	    // Lock down definitive trash hitbox using the converged stream variables
 	    float renderingTrashSize = dynamicWidths[trashSlotIdx];
 	    
-	    // REPLACE WITH THIS TO CALIBRATE ALIGNMENT:
 		float layoutTrackerX = dockPlate.left + 20.0f;
 
 	    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
@@ -2667,20 +2933,33 @@ public:
 	    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
 	    fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
-	    // =========================================================================
-	    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
-	    // =========================================================================
 
-	    float currentX = dockPlate.left + 20.0f; // Exact rendering origin used in Section 5
-	    size_t evaluationSlotIdx = 0;
+	// =========================================================================
+	// PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
+	// =========================================================================
+    // FIXED MATCH PASS: We mirror the exact width expansions from RenderFrame() 
+    // here to guarantee dockPlate.left positions the click hitboxes perfectly over the icons!
+    float leafSizeRatio = baseSize / 48.0f;
+    float clickCpuWidth = dynamicWidths[totalIconsCount + 4] * leafSizeRatio;
+    
+    // Compute the true visual width exactly matching your drawing canvas
+    float clickAdjustedWidth = totalCalculatedWidth + clickCpuWidth + (clockSectionPadding * leafSizeRatio);
+
+    // Re-verify definitive left alignment starting pixel address
+    float visualDockLeft = (fWidth / 2.0f) - (clickAdjustedWidth / 2.0f) - (outerPlatePadding / 2.0f);
+
+    float currentX = visualDockLeft + 20.0f; // Exact pixel-perfect rendering origin match!
+    size_t evaluationSlotIdx = 0;
 	
-	    // STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
-	    for (size_t i = 0; i < baselineLaunchersCount; ++i) {
-	        float size = dynamicWidths[evaluationSlotIdx];
-	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	// STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
+	for (size_t i = 0; i < baselineLaunchersCount; ++i) {
+	    float size = dynamicWidths[evaluationSlotIdx];
+        
+        // Correctly calculate visual height baseline boundary metrics
+	    HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 	
-	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
-	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+	    if (x >= realIconBounds.left && x <= realIconBounds.right &&
+	        y >= realIconBounds.top  && y <= realIconBounds.bottom) {
 	            
             if (i == 0) {
                 // =========================================================================
@@ -2728,31 +3007,23 @@ public:
                         threadArgs->engine->fLeafMenuIsActive = false; 
 
                         if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
-                            if (chosenAction->Message()->what == 'lCFG') {
-                                
-                                // 1. Set the exact layout frame dimensions matching your padded ConfigView (460x240)
-                                float winWidth = 460.0f;
-                                float winHeight = 260.0f;
-
-                                // 2. Query the native Haiku screen subsystem to get active display frame bounds
-                                BScreen screen(B_MAIN_SCREEN_ID);
-                                BRect screenFrame = screen.Frame();
-                                
-                                // 3. Compute absolute horizontal and vertical center point anchors
-                                float centerX = screenFrame.left + (screenFrame.Width() - winWidth) / 2.0f;
-                                float centerY = screenFrame.top + (screenFrame.Height() - winHeight) / 2.0f;
-
-                                // Establish the perfectly centered bounding box rect coordinates
-                                BRect centeredBounds(centerX, centerY, centerX + winWidth, centerY + winHeight);
-                                
-                                // Instantiate standard BWindow base shell with our centered boundaries
-                                BWindow* settingsWindow = new BWindow(centeredBounds, "hdesktop settings", 
-                                    B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_NOT_RESIZABLE);
-                                
-                                settingsWindow->AddChild(new ConfigView(settingsWindow->Bounds()));
-                                settingsWindow->Show();
-
-                            }
+							if (chosenAction->Message()->what == 'lCFG') {
+							    float winWidth = 560.0f;
+							    float winHeight = 450.0f; // Expanded to 450 pixels!
+							
+							    BScreen screen(B_MAIN_SCREEN_ID);
+							    BRect screenFrame = screen.Frame();
+							    
+							    float centerX = screenFrame.left + (screenFrame.Width() - winWidth) / 2.0f;
+							    float centerY = screenFrame.top + (screenFrame.Height() - winHeight) / 2.0f;
+							    BRect centeredBounds(centerX, centerY, centerX + winWidth, centerY + winHeight);
+							    
+							    BWindow* settingsWindow = new BWindow(centeredBounds, "hdesktop settings", 
+							        B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_NOT_RESIZABLE);
+							    
+							    settingsWindow->AddChild(new ConfigView(settingsWindow->Bounds()));
+							    settingsWindow->Show();
+							}
                         }
 
                         delete leafMenu;
@@ -2771,6 +3042,7 @@ public:
                 // =========================================================================
                 // LEAF ICON LEFT-CLICK: TOGGLE NATIVE MAIN DRAWER (ORIGINAL PIPELINE)
                 // =========================================================================
+
                 else {
                     if (gActiveDrawerInstance != nullptr) {                    
                         if (gActiveDrawerInstance->Lock()) {
@@ -2821,7 +3093,7 @@ public:
 	            // FIX: Removed !isTracker condition to let the middle click target Tracker
 	            	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
 	                
-	             	                if (isTracker) {
+	             	if (isTracker) {
 	                    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 	                    if (trackerMessenger.IsValid()) {
 	                        BMessage countRequest(B_COUNT_PROPERTIES);
@@ -3643,8 +3915,10 @@ public:
         // =========================================================================
         // 3. TASKBAR-ENABLED DOCK WIDTH GEOMETRY CALCULATIONS (UNIFIED ZOOM PIPELINE)
         // =========================================================================
-        float baseSize = 48.0f;
-        float padding = 12.0f;
+        // FIXED SIZING PIPELINE: Replaced the hardcoded '48.0f' float limits completely 
+        // with your live fBaseIconSize configuration setting variable!
+        float baseSize = fBaseIconSize;
+        float padding  = 12.0f;
         
         size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
@@ -3655,12 +3929,14 @@ public:
 
         size_t totalIconsCount = baselineLaunchersCount + activeWindowsCount;
 
-        // Configuration variables for the status widgets
+        // Configuration variables for the status widgets (Now scales dynamically relative to icon size changes!)
         float clockSectionPadding = 24.0f;
-        float cpuGraphWidth = 60.0f;
+        float cpuGraphWidth       = 60.0f;
         float separatorGapPadding = 16.0f;
-        float baseTrashSize = 48.0f;
-        float baseVolumeWidth = 44.0f; // Slider horizontal layout width footprint allocation
+        
+        // FIXED SIZING: The trash bin launcher now scales uniformly alongside your application icons
+        float baseTrashSize       = fBaseIconSize; 
+        float baseVolumeWidth     = 44.0f; // Slider horizontal layout width footprint allocation
 
         // Arrays to store real-time calculations for EVERY component
         std::vector<float> dynamicWidths;
@@ -3670,6 +3946,7 @@ public:
         // -------------------------------------------------------------------------
         // PASS 1: PROGRESSIVE MULTI-PASS COORDINATE RE-ANCHORING
         // -------------------------------------------------------------------------
+
         float totalCalculatedWidth = 0.0f;        
         for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
             dynamicWidths.clear();
@@ -3886,25 +4163,35 @@ public:
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
         // -------------------------------------------------------------------------
         // FIXED: Added local explicit type declarations for every tracking index
-        size_t trashSlotIdx   = totalIconsCount;
-        size_t traySlotIdx  = totalIconsCount + 1;
+        size_t trashSlotIdx  = totalIconsCount;
+        size_t traySlotIdx   = totalIconsCount + 1;
         size_t clockSlotIdx  = totalIconsCount + 2;
         size_t volumeSlotIdx = totalIconsCount + 3;
         size_t cpuSlotIdx    = totalIconsCount + 4;
         
+        // Calculate our dynamic size ratio multiplier based on your slider baseline
+        float layoutSizeRatio = baseSize / 48.0f;
 
+        // FIXED UNIQUE TYPE RESOLUTION: Named uniquely to bypass scope redeclaration errors completely!
+        float backplateCpuWidth = dynamicWidths[cpuSlotIdx] * layoutSizeRatio;
 
         float dockMarginBottom = 15.0f;
         HaikuRect dockPlate;
         float outerPlatePadding = 40.0f; 
-        dockPlate.left = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f) - (outerPlatePadding / 2.0f);
-        dockPlate.right = (fWidth / 2.0f) + (totalCalculatedWidth / 2.0f) + (outerPlatePadding / 2.0f);
+        
+        // FIXED HORIZONTAL CLIPPING: Add an extra safety buffer to totalCalculatedWidth 
+        // using your scaled CPU graph footprint to push the right edge out past the graph box!
+        float adjustedTotalWidth = totalCalculatedWidth + backplateCpuWidth + (clockSectionPadding * layoutSizeRatio);
+
+        dockPlate.left = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - (outerPlatePadding / 2.0f);
+        dockPlate.right = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + (outerPlatePadding / 2.0f);
         dockPlate.bottom = fHeight - dockMarginBottom;
         dockPlate.top = dockPlate.bottom - maxDockHeight - 20.0f;
 
         // Lock down definitive trash hitbox using converged data fields
         float renderingTrashSize = dynamicWidths[trashSlotIdx];
         
+        // Re-anchor left coordinate tracker using our freshly expanded plate geometry baseline
         float layoutTrackerX = dockPlate.left + 20.0f;
         for (size_t idx = 0; idx < totalIconsCount; ++idx) {
             layoutTrackerX += dynamicWidths[idx] + padding;
@@ -3916,11 +4203,15 @@ public:
         layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
         
         // Add Clock width second
-        if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
+        if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + (dynamicWidths[clockSlotIdx] * layoutSizeRatio);
         
         // Add Volume slider width third
-        layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+        layoutTrackerX += clockSectionPadding + (dynamicWidths[volumeSlotIdx] * layoutSizeRatio);
 
+        // =========================================================================
+        // FIXED ALIGNMENT: Account for the CPU section before setting the trash rect!
+        // =========================================================================
+        layoutTrackerX += clockSectionPadding + backplateCpuWidth;
         
         layoutTrackerX += clockSectionPadding;
         fTrashRect.left = layoutTrackerX;
@@ -3928,21 +4219,44 @@ public:
         fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
         fTrashRect.bottom = dockPlate.bottom - 10.0f;
 
-
         // Render backplate container shelf
-        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        // 
+        // =========================================================================
+        // BACKPLATE CONTAINER SHELF RENDERING (OPTION A: DYNAMIC SYNCD FADE)
+        // =========================================================================
+        glEnable(GL_BLEND); 
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
         float cornerRadius = 15.0f;
-        DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, 0.4f); 
-        DrawOutlineRoundedRect(dockPlate, cornerRadius, 0.15f, 0.15f, 0.15f, 0.8f);
+
+        DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, fDockAlpha); 
+
+        DrawOutlineRoundedRect(dockPlate, cornerRadius, 0.15f, 0.15f, 0.15f, fDockAlpha); 
+
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-
 
         // =========================================================================
         // 5. CORE ICON RENDERING ENGINE WITH ACTIVE RUNNING TASKBAR SPLITS
         // =========================================================================
+        // -------------------------------------------------------------------------
+        // DEFERRED HOVER STATE REGISTERS (Clears state for the fresh rendering pass)
+        // -------------------------------------------------------------------------
+        
+
+        BString activeDisplayString = "";
+        
+        // -------------------------------------------------------------------------
+        // VERTICAL PREVIEW LIST SETUP
+        // -------------------------------------------------------------------------
+        fShouldDrawList = false;
+        float listBaseX = 0.0f;
+        float listBaseY = 0.0f;
+
+
         float currentX = dockPlate.left + 20.0f;
         size_t renderingSlotIdx = 0;
+
 
         // STEP 1: RENDER THE BASELINE SYSTEM SHORTCUTS (LEAF MENU + DESKTOP DIRECTORY ENTRIES)
         for (size_t i = 0; i < baselineLaunchersCount; ++i) {
@@ -3995,18 +4309,18 @@ public:
 		if (activeWindowsCount > 0) {
 		    currentX += (separatorGapPadding / 2.0f) - padding;
 		    
-		    // FIX: Snap the line to a clean whole pixel boundary to prevent subpixel bleeding
-		    float snappedX = std::floor(currentX + 0.5f); 
-
-		    glLineWidth(2.0f); 
-		    glColor4f(0.15f, 0.15f, 0.15f, 0.5f); // Matte Charcoal split divider
-		    glBegin(GL_LINES);
-		        glVertex2f(snappedX, dockPlate.top + 6.0f);
-		        glVertex2f(snappedX, dockPlate.bottom - 6.0f);
-		    glEnd();
-		    
-		    currentX += (separatorGapPadding / 2.0f) + padding;
-		}
+				// DIVIDER LINE 
+		        float lineLeftSnappedX = std::floor(currentX + 0.5f);
+		        glLineWidth(2.0f); 
+		        glColor4f(0.15f, 0.15f, 0.15f, fDockAlpha * 0.5f); 		        
+		        glBegin(GL_LINES);
+		            glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
+		            glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
+		        glEnd();		        
+		        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+					    
+			currentX += (separatorGapPadding / 2.0f) + padding;
+			}
 
 		
 		// =========================================================================
@@ -4114,38 +4428,28 @@ public:
 	        glEnd();
 	        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
 	    }
+	    
 
-
-	    // HOVER TITLE SYSTEM TEXT OVERLAY
-	    const float BASE_ICON_SIZE_THRESHOLD = 48.0f; 
-	    if (size > BASE_ICON_SIZE_THRESHOLD) {
-	        
-	        // SYSTEM TOGGLE GUARD:
-	        // Only allocate textures and render strings if the overlay flag is active.
-	        if (fShowTitleOverlays) {
-	            // Position the text capsule precisely 12 pixels above the dynamic top boundary edge of the icon
-	            float titleYPosition = iconBounds.top - 12.0f;
-	            
-	            // Find the absolute horizontal centerline of the currently zoomed element
-	            float iconHorizontalCenter = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
-	            
-	            // Renders crisp bold anti-aliased system text boxes using your built-in rendering code
-	            DrawNativeSystemText(activeTaskWin.title.c_str(), iconHorizontalCenter, titleYPosition);
-	        }
-	    }
-
-		/*
-	    // B. Draw an active native glowing mini ledger stripe indicator line below active windows
-	    glDisable(GL_TEXTURE_2D);
-	    if (activeTaskWin.isMinimized == false && !isTracker) {
-	        glColor4f(0.2f, 0.6f, 1.0f, 0.9f); 
-	        glLineWidth(3.0f);
-	        glBegin(GL_LINES);
-	            glVertex2f(iconBounds.left + 4.0f, dockPlate.bottom - 4.0f);
-	            glVertex2f(iconBounds.right - 4.0f, dockPlate.bottom - 4.0f);
-	        glEnd();
-	    }
-		*/
+        // =========================================================================
+        // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
+        // =========================================================================
+        const float BASE_ICON_SIZE_THRESHOLD = 48.0f; 
+        if (size > BASE_ICON_SIZE_THRESHOLD && fShowTitleOverlays) {
+            
+            // Check if the current layout window match represents the item under active hover
+            // Using a proximity calculation against the icon's structural bounds
+            if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right) {
+                listBaseX = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
+                listBaseY = iconBounds.top - 12.0f;
+                
+                if (fHoveredTeam != activeTaskWin.teamId) {
+                    fHoveredTeam = activeTaskWin.teamId;
+                    GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
+                }
+                
+                fShouldDrawList = true;
+            }
+        }
 		
 		    currentX += size + padding;
 		    renderingSlotIdx++;
@@ -4158,14 +4462,24 @@ public:
 	
 		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
 	
-		// Left Clock Divider Line
+        // =========================================================================
+        // LEFT CLOCK DIVIDER LINE 
+        // =========================================================================
+        float lineLeftSnappedX = std::floor(currentX + 0.5f);
+        glLineWidth(2.0f); 
+        
+        // FIXED HYBRID SCALING: We multiply fDockAlpha by 0.5f. 
+        // This caps the divider's maximum opacity to a beautifully soft 50%,
+        // but drops all the way down to a clean 0.0f if full transparency is activated!
+        glColor4f(0.15f, 0.15f, 0.15f, fDockAlpha * 0.5f); 
+        
+        glBegin(GL_LINES);
+            glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
+            glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
+        glEnd();
+        
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-	       float lineLeftSnappedX = std::floor(currentX + 0.5f);
-	       glLineWidth(2.0f); glColor4f(0.15f, 0.15f, 0.15f, 0.5f);
-	       glBegin(GL_LINES);
-	           glVertex2f(lineLeftSnappedX, dockPlate.top + 8.0f);
-	           glVertex2f(lineLeftSnappedX, dockPlate.bottom - 8.0f);
-	       glEnd();
 	       
 	    // =========================================================================
         // 6C. DRAW HAIKU TRASH BIN
@@ -4200,66 +4514,7 @@ public:
             glEnd();
             glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
         }
-		/*
-        if (fTrashRect.Contains(fMouseX, fMouseY)) {
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            if (!fTrashTextGenerated) {
-                if (fTrashTooltipTexId != 0) { glDeleteTextures(1, &fTrashTooltipTexId); fTrashTooltipTexId = 0; }
-                auto generatedTex = RenderTextToTexture("Middle click to empty Trash", &fTrashTooltipW, &fTrashTooltipH);
-                fTrashTooltipTexId = generatedTex.id; 
-                fTrashTextGenerated = true; 
-            }
-
-            float tooltipW = static_cast<float>(fTrashTooltipW) + 12.0f;
-            float tooltipH = static_cast<float>(fTrashTooltipH) + 8.0f;
-            float tooltipLeft = fTrashRect.left + ((fTrashRect.right - fTrashRect.left) / 2.0f) - (tooltipW / 2.0f);
-            float tooltipBottom = fTrashRect.top - 1.0f; 
-
-            HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
-            DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
-
-            glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
-            glBegin(GL_LINE_LOOP);
-                glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
-                glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
-            glEnd();
-			
-            if (fTrashTooltipTexId != 0) {
-
-                glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fTrashTooltipTexId);
-                
-                // =========================================================================
-                // FORCE NEON GREEN COLOR BY OVERRIDING BLACK TEXTURE RGB CHANNELS
-                // =========================================================================
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
-                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
-                glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
-                
-                // Set the blending color filter to match your illuminated matrix neon green
-                glColor4f(0.2f, 1.0f, 0.2f, 1.0f); 
-                // =========================================================================
-                
-                float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
-                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fTrashTooltipW, textY);
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fTrashTooltipW, textY + fTrashTooltipH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fTrashTooltipH);
-                glEnd();
-                
-                // =========================================================================
-                // Cleanly reset texture environment mode back to standard modulation
-                // =========================================================================
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-                glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-                // =========================================================================
-            }
-			
-        } else {
-            fTrashTextGenerated = false;
-        }
-		*/
         currentX = fTrashRect.right;   
 	       
 	       
@@ -4327,15 +4582,20 @@ public:
 
 
 
-        // =========================================================================
-        // 6. DRAW SYSTEM CLOCK STATUS TEXT (MATHEMATICALLY LOCKED SYMMETRY)
+               // =========================================================================
+        // 6. DRAW SYSTEM CLOCK STATUS TEXT (PROPORTIONAL SIZE SCALING)
         // =========================================================================
         if (fClockTexture.id != 0) {
 
-            float clockScale   = dynamicScales[clockSlotIdx];
-            float dynamicClockW = dynamicWidths[clockSlotIdx]; 
+            float clockScale = dynamicScales[clockSlotIdx];
+            
+            // DYNAMIC SIZING: Calculate scaling ratio relative to our base 48.0f profile
+            float sizeRatio = baseSize / 48.0f;
+            
+            // Dynamically scales text width and texture height relative to the slider settings
+            float dynamicClockW = dynamicWidths[clockSlotIdx] * sizeRatio; 
             float highDpiCompensateFactor = 0.42f; 
-            float dynamicClockH = static_cast<float>(fClockHeight) * highDpiCompensateFactor * clockScale;
+            float dynamicClockH = static_cast<float>(fClockHeight) * highDpiCompensateFactor * clockScale * sizeRatio;
 
             currentX += clockSectionPadding;
             float clockY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicClockH / 2.0f));
@@ -4347,33 +4607,87 @@ public:
                 std::floor(clockY + dynamicClockH + 0.5f) 
             };
             
+            // Hover date detection boundaries scale automatically too!
+            bool isMouseHoveringClock = (fMouseX >= clockB.left && fMouseX <= clockB.right &&
+                                         fMouseY >= clockB.top  && fMouseY <= clockB.bottom);
+            
+            if (isMouseHoveringClock) {
+                time_t rawTime = time(nullptr);
+                struct tm* timeInfo = localtime(&rawTime);
+                
+                int day = timeInfo->tm_mday;
+                BString suffix = "th";
+                if (day == 1 || day == 21 || day == 31) suffix = "st";
+                else if (day == 2 || day == 22) suffix = "nd";
+                else if (day == 3 || day == 23) suffix = "rd";
+                
+                char dateBuffer[32];
+                strftime(dateBuffer, sizeof(dateBuffer), "%b ", timeInfo); 
+                
+                BString dateStr;
+                dateStr << dateBuffer << day << suffix << " " << (timeInfo->tm_year + 1900);
+                
+                if (fDockAlpha < 0.35f) {
+                    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+                } else {
+                    glColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+                }
+
+                float textCenterX = clockB.left + (dynamicClockW / 2.0f);
+                // Offset the floating date height proportionally to stay clear of the larger text
+                DrawNativeSystemText(dateStr.String(), textCenterX, clockY - (16.0f * sizeRatio));
+            }
+
+            // Draw standard time texture matching your high-contrast logic
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fClockTexture.id);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+            
+            if (fDockAlpha < 0.35f) {
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+                glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PRIMARY_COLOR);
+                glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_COLOR);
+                glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+            } else {
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+            }
+            
             glBegin(GL_QUADS);
                 glTexCoord2f(0.0f, 0.0f); glVertex2f(clockB.left, clockB.top);
                 glTexCoord2f(1.0f, 0.0f); glVertex2f(clockB.right, clockB.top);
                 glTexCoord2f(1.0f, 1.0f); glVertex2f(clockB.right, clockB.bottom);
                 glTexCoord2f(0.0f, 1.0f); glVertex2f(clockB.left, clockB.bottom);
             glEnd();
+            
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
             glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
             
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
             currentX += dynamicClockW;
         }
 
+
+
+
         // =========================================================================
-        // NEW: DRAW DYNAMIC VOLUME CONTROL SLIDER (RIGHT OF THE CLOCK)
+        // NEW: DRAW DYNAMIC VOLUME CONTROL SLIDER (DYNAMIC SIZE SCALING & SOLID BLACK)
         // =========================================================================
         FetchHaikuMixerVolume(); 
         
         currentX += clockSectionPadding;
         
-        float volScale          = dynamicScales[volumeSlotIdx];
-        float dynamicVolWidth   = dynamicWidths[volumeSlotIdx];
-        float dynamicVolHeight  = 12.0f * volScale; 
+        float volScale = dynamicScales[volumeSlotIdx];
+        
+        // FIXED TYPE RESOLUTION: Declared as an independent local 'float volSizeRatio' variable 
+        // to bypass any surrounding variable declaration scope conflicts completely!
+        float volSizeRatio = baseSize / 48.0f;
+        
+        // Dynamically scale width and height relative to the slider settings
+        float dynamicVolWidth   = dynamicWidths[volumeSlotIdx] * volSizeRatio;
+        float dynamicVolHeight  = 12.0f * volScale * volSizeRatio; 
         float volTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicVolHeight / 2.0f));
         
-        // FIX: Cache these exact screen measurements into class memory fields 
-        // every single frame so HandleMouseInput can access them safely!
+        // CACHE PIPELINE: Store the updated, scaled bounds so hit-testing inputs align perfectly
         fCachedVolLeft   = currentX;
         fCachedVolTop    = volTop;
         fCachedVolWidth  = dynamicVolWidth;
@@ -4381,10 +4695,10 @@ public:
 
         HaikuRect volBounds = { currentX, volTop, currentX + dynamicVolWidth, volTop + dynamicVolHeight };
 
-        // 1. Draw the slider background dark casing trough
-        DrawFilledRect(volBounds, 0.05f, 0.10f, 0.05f, 0.9f); 
+        // 1. RESTORED SOLID BACKGROUND: Swapped 0.9f out for a locked 0.95f dark matte casing trough.
+        DrawFilledRect(volBounds, 0.03f, 0.05f, 0.03f, 0.95f); 
         
-        // 2. Draw active volume fill level
+        // 2. Draw active volume fill level (Green)
         HaikuRect activeVolumeFill = {
             volBounds.left,
             volBounds.top,
@@ -4393,38 +4707,48 @@ public:
         };
         DrawFilledRect(activeVolumeFill, 0.2f, 1.0f, 0.2f, 0.85f);
 
-        // 3. Draw a thin perimeter frame outline edge loop around the slider case boundary
-        glColor4f(0.15f, 0.15f, 0.15f, 0.6f);
+        // 3. Draw a thin perimeter frame outline edge loop (Soften its opacity to match the theme)
+        glColor4f(0.15f, 0.15f, 0.15f, fDockAlpha * 0.5f);
         glBegin(GL_LINE_LOOP);
             glVertex2f(volBounds.left,  volBounds.top);    glVertex2f(volBounds.right, volBounds.top);
             glVertex2f(volBounds.right, volBounds.bottom); glVertex2f(volBounds.left,  volBounds.bottom);
         glEnd();
+
+        // Restore universal color state safety pass
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
         currentX += dynamicVolWidth;
 
 
 
 
-        // =========================================================================
-        // 6B. DRAW GRAPHICAL PURPLE BOUNCING CPU METERS (ROUNDED CORNER CASING)
-        // =========================================================================
 
+        // =========================================================================
+        // 6B. DRAW GRAPHICAL PURPLE BOUNCING CPU METERS (DYNAMIC SIZING & SOLID BLACK)
+        // =========================================================================
         glLineWidth(2.0f);        
         currentX += clockSectionPadding;        
-        float cpuScale          = dynamicScales[cpuSlotIdx];
-        float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
-        float dynamicGraphHeight = 28.0f * cpuScale; 
-        float graphTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicGraphHeight / 2.0f));
         
+        float cpuScale = dynamicScales[cpuSlotIdx];
+        
+        // DYNAMIC SIZING: Calculate a scale ratio relative to your base 48.0f icon setting
+        float sizeRatio = baseSize / 48.0f;
+        
+        // Scales the width and height parameters proportionally as you move the slider
+        float dynamicGraphWidth  = dynamicWidths[cpuSlotIdx] * sizeRatio;
+        float dynamicGraphHeight = 28.0f * cpuScale * sizeRatio; 
+        
+        float graphTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicGraphHeight / 2.0f));
         HaikuRect cpuGraphBounds = { currentX, graphTop, currentX + dynamicGraphWidth, graphTop + dynamicGraphHeight };
 
-        // 1. FIXED: Draw solid dark background container equipped with a clean 4.0-pixel rounding radius
-        DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.05f, 0.05f, 0.08f, 0.9f, true); 
+        // RESTORED DARK BLACK BACKGROUND: Opacity locked back to a rich 95% dark charcoal capsule,
+        // ensuring the purple bars pop with maximum contrast even over 100% clear backplates!
+        DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.03f, 0.03f, 0.05f, 0.95f, true); 
         
         UpdateGlobalCpuLoadTracker();
 
         int numBars = (fCpuHistoryIndex > 0 && fCpuHistoryIndex <= 40) ? fCpuHistoryIndex : 16;
-        float barSpacing = 1.5f;
+        float barSpacing = 1.5f * sizeRatio; // Scale bar spacing proportionally
         float totalSpacingSpace = barSpacing * (numBars + 1);
         float barWidth = (dynamicGraphWidth - totalSpacingSpace) / numBars;
 
@@ -4438,10 +4762,14 @@ public:
             float barLeft = cpuGraphBounds.left + barSpacing + (i * (barWidth + barSpacing));
             float barRight = barLeft + barWidth;
             
-            // Constrain the bar top math to match our internal container corner curve parameters safely
             float barTop = cpuGraphBounds.bottom - (visualBouncingHeights[i] * (dynamicGraphHeight - 2.0f)) - 1.0f;
             
-            glColor4f(0.57f, 0.12f, 0.99f, 0.90f); // Neon Purple
+            // Dynamic Contrast: keep them bright and vivid
+            if (fDockAlpha < 0.35f) {
+                glColor4f(0.68f, 0.25f, 1.00f, 0.95f); // Bright luminous purple
+            } else {
+                glColor4f(0.57f, 0.12f, 0.99f, 0.90f); // Default Neon Purple
+            }
             
             glVertex2f(barLeft,  barTop);
             glVertex2f(barRight, barTop);
@@ -4450,9 +4778,16 @@ public:
         }
         glEnd();
 
+        // Restore global color state sanity
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        
+        currentX += dynamicGraphWidth;
+
+
         // =========================================================================
         // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
         // =========================================================================
+
         if (cpuGraphBounds.Contains(fMouseX, fMouseY)) {
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             int latestIndex = (fCpuHistoryIndex == 0) ? 39 : fCpuHistoryIndex - 1;
@@ -4511,15 +4846,103 @@ public:
 
 
    
-        
         // 4. Update the tracker pointer past the cpu monitor graph layout bounds area cleanly
         currentX += dynamicGraphWidth;
         currentX += clockSectionPadding;
         
         fLastCalculatedWidth = totalCalculatedWidth;
+
+        // =========================================================================
+        // DEFERRED RENDERING PASS: UNIFIED INTERACTIVE HOVER TITLE OVERLAY
+        // =========================================================================
+        if (fShouldDrawList && !fCurrentWindowsList.empty()) {
+            BString displayTitle = fCurrentWindowsList[0].title;
+            
+            float textEstimatedWidth = 240.0f; 
+            BRect unifiedBox;
+            unifiedBox.left   = listBaseX - (textEstimatedWidth / 2.0f);
+            unifiedBox.right  = listBaseX + (textEstimatedWidth / 2.0f);
+            unifiedBox.top    = listBaseY - 14.0f;
+            unifiedBox.bottom = listBaseY + 4.0f;
+
+            // Tracking registers to compute the elapsed hover duration safely across draw frames
+            static team_id lastCheckedTeam = -1;
+            static bigtime_t hoverStartTime = 0;
+            bigtime_t currentTime = system_time();
+
+            if (fMouseX >= unifiedBox.left && fMouseX <= unifiedBox.right &&
+                fMouseY >= unifiedBox.top  && fMouseY <= unifiedBox.bottom) {
+                
+                // 1. If this is the very first frame the mouse entered this box, start the stopwatch
+                if (hoverStartTime == 0 || fHoveredTeam != lastCheckedTeam) {
+                    hoverStartTime = currentTime;
+                    lastCheckedTeam = fHoveredTeam;
+                }
+
+                // 2. Compute the difference. 0.75 seconds translates to exactly 750,000 microseconds.
+                if (currentTime - hoverStartTime >= 750000) {
+                    
+                    // =========================================================================
+                    // LOW-LEVEL HOVER FOCUS PIPELINE
+                    // =========================================================================
+                    app_info targetAppInfo;
+                    if (be_roster->GetRunningAppInfo(fHoveredTeam, &targetAppInfo) == B_OK) {
+                        be_roster->ActivateApp(targetAppInfo.team);
+                    } else {
+                        be_roster->ActivateApp(fHoveredTeam);
+                    }
+                    
+                    // Flush low-level bring-to-front message straight to the app_server link
+                    BPrivate::AppServerLink link;
+                    link.StartMessage(AS_BRING_TEAM_TO_FRONT);
+                    link.Attach<team_id>(fHoveredTeam);
+                    link.Flush();
+                    
+                    // Wake up hidden/minimized windows belonging to this specific team thread context
+                    int32 systemCount = 0;
+                    int32 currentWorkspace = current_workspace();
+                    int32* systemTokens = nullptr;
+                    if (BPrivate::get_window_order(currentWorkspace, &systemTokens, &systemCount) == B_OK && systemTokens != nullptr) {
+                        for (int32 i = 0; i < systemCount; ++i) {
+                            client_window_info* cInfo = get_window_info(systemTokens[i]);
+                            if (cInfo != nullptr) {
+                                if (cInfo->team == fHoveredTeam && cInfo->feel == B_NORMAL_WINDOW_FEEL) {
+                                    BPrivate::AppServerLink winLink;
+                                    winLink.StartMessage(AS_BRING_TEAM_TO_FRONT);
+                                    winLink.Attach<int32>(systemTokens[i]);
+                                    winLink.Flush();
+                                }
+                                free(cInfo);
+                            }
+                        }
+                        free(systemTokens);
+                    }
+                    // =========================================================================
+                    
+                    // Optional: Reset timer after execution so it doesn't endlessly refire link updates
+                    // if you keep your mouse parked on the text bar.
+                    hoverStartTime = currentTime; 
+                }
+            } else {
+                // The cursor slipped out of the box boundaries; clear the stopwatch register instantly!
+                hoverStartTime = 0;
+            }
+            
+            DrawNativeSystemText(displayTitle.String(), listBaseX, listBaseY);
+        } else if (!fShouldDrawList) {
+            fHoveredTeam = -1;
+            fCurrentWindowsList.clear();
+        }
+
+        glDisable(GL_BLEND);   
         glPopMatrix();
 
     } // Exact functional closing brace of RenderFrame() method!
+
+
+
+
+
 
 
 
@@ -5063,50 +5486,6 @@ public:
 
 
 
-
-void LoadConfiguration() {
-    BPath path;
-    gFavoritePaths.clear(); // Reset to prevent duplicate tracking anomalies
-    
-    // Set a safe fallback default before parsing disk files
-    fShowTitleOverlays = false; 
-
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
-        path.Append("hdesktop_settings");
-        
-        BFile file(path.Path(), B_READ_ONLY);
-        BMessage settings;
-        
-        if (settings.Unflatten(&file) == B_OK) {
-            // 1. Recover existing settings
-            bool savedValue;
-            if (settings.FindBool("auto_hide", &savedValue) == B_OK) {
-                autoHideEnabled = savedValue;
-            }
-            if (settings.FindBool("sys_tray", &savedValue) == B_OK) {
-                showSystemTray = savedValue;
-            }
-            if (settings.FindBool("auto_raise", &savedValue) == B_OK) {
-                dockAlwaysOnTop = savedValue;
-            }
-            if (settings.FindBool("text_overlays", &savedValue) == B_OK) {
-                fShowTitleOverlays = savedValue;
-            }
-            
-            // 2. Recover the favorites string index array
-            const char* favPath = nullptr;
-            int32 i = 0;
-            // Loops through every entry inside the key array automatically
-            while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
-                if (favPath != nullptr) {
-                    gFavoritePaths.insert(favPath);
-                }
-                i++;
-            }
-        }
-    }
-}
-
 void SaveConfiguration() {
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
@@ -5120,7 +5499,7 @@ void SaveConfiguration() {
         settings.AddBool("sys_tray",      showSystemTray);
         settings.AddBool("auto_raise",    dockAlwaysOnTop);
         settings.AddBool("text_overlays", fShowTitleOverlays);
-        
+        settings.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
         // 2. Pack all live favorites keys sequentially into the same field name
         std::set<std::string>::iterator it;
         for (it = gFavoritePaths.begin(); it != gFavoritePaths.end(); ++it) {
@@ -5130,6 +5509,49 @@ void SaveConfiguration() {
         settings.Flatten(&file); 
     }
 }
+
+
+
+void LoadConfiguration() {
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
+    path.Append("hdesktop_settings");
+
+    BFile file(path.Path(), B_READ_ONLY);
+    if (file.InitCheck() != B_OK) {
+        fDockAlpha = 0.50f;
+        fBaseIconSize = 48.0f; // Safe fallback initial fallback default
+        return;
+    }
+
+    BMessage settings;
+    if (settings.Unflatten(&file) == B_OK) {
+        settings.FindBool("auto_hide", &autoHideEnabled);
+        settings.FindBool("sys_tray", &showSystemTray);
+        settings.FindBool("auto_raise", &dockAlwaysOnTop);
+        settings.FindBool("text_overlays", &fShowTitleOverlays);
+        settings.FindFloat(kSettingsAlphaKey, &fDockAlpha);
+        
+        // NEW: Unpack icon size safely. Fall back to 48.0f if missing
+        if (settings.FindFloat(kSettingsIconSizeKey, &fBaseIconSize) != B_OK) {
+            fBaseIconSize = 48.0f;           
+         
+        }
+        
+         // Recover the favorites string index array
+         const char* favPath = nullptr;
+         int32 i = 0;
+         // Loops through every entry inside the key array automatically
+         while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
+             if (favPath != nullptr) {
+                 gFavoritePaths.insert(favPath);
+             }
+           i++;
+        }     
+    }
+}
+
+
 
 
 // =========================================================================
@@ -5383,7 +5805,7 @@ int main(int argc, char* argv[]) {
     int screenHeight = currentDisplayMode.h;
     
     int dockPanelW = screenWidth;
-    int dockPanelH = 140; 
+    int dockPanelH = 200; 
     int sensorHeight = 4; 
 
     // Use yExpanded to position the actual SDL window frame at the bottom
@@ -5424,12 +5846,12 @@ int main(int argc, char* argv[]) {
     
 
     SDL_GL_SetSwapInterval(1);
-    glViewport(0, 0, screenWidth, 140);
+    glViewport(0, 0, screenWidth, 200);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     
     // --- WALLPAPER RE-STITCH ALIGNMENT MATH ---
-    float panelTopY    = static_cast<float>(screenHeight) - 140.0f;
+    float panelTopY    = static_cast<float>(screenHeight) - 200.0f;
     float panelBottomY = static_cast<float>(screenHeight);
     
     gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
@@ -5445,7 +5867,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.28"; 
+    const char* localVersion = "v1.0.29"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
@@ -5542,7 +5964,7 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
                 
-                    int hiddenScreenOffset = screenHeight - 140; 
+                    int hiddenScreenOffset = screenHeight - 200; 
                     int adjustedMouseY = mouseY + hiddenScreenOffset;
                 
                     // Feed smooth radial zoom parameters
@@ -5770,7 +6192,7 @@ int main(int argc, char* argv[]) {
         static int lastSentY = -1;
         static uint32 lastSentButtons = 0;
 
-        int hiddenScreenOffset = screenHeight - 140;
+        int hiddenScreenOffset = screenHeight - 200;
         int adjustedMouseY = localMouseY + hiddenScreenOffset;
 
         if (!cursorIsInsideDock) {
