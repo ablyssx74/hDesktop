@@ -78,9 +78,11 @@ bool dockAlwaysOnTop;
 bool fShowTitleOverlays;
 void SaveConfiguration(); 
 float fBaseIconSize = 48.0f;
+float maxDockHeight = 160.0f;
+float fDockAlpha = 0.40f; 
 const char* const kSettingsIconSizeKey = "base_icon_size";
-const uint32 MSG_ICON_SIZE_CHANGED = 'isic';
-float maxDockHeight = 160.0f; 
+const char* const kSettingsAlphaKey = "dock_alpha";
+ 
 
 
 rgb_color GetLiveSystemBackgroundColor() {
@@ -111,32 +113,22 @@ rgb_color GetLiveSystemBackgroundColor() {
 }
 
 
-
-
-
-
 enum {
 	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
     MSG_AUTOHIDE_TOGGLED   = 'ahtg',
     MSG_SYSTEMTRAY_TOGGLED = 'sttg',
     MSG_TEXTOVERLAYS_TOGGLED = 'totg',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
-    MSG_AUTORAISE_TOGGLED  = 'srdt' 
+    MSG_AUTORAISE_TOGGLED  = 'srdt',
+    MSG_ALPHA_SLIDER_CHANGED = 'alsc',
+    MSG_ICON_SIZE_CHANGED = 'isic'
 };
 
-// 1. Unified configuration variable states
+// Unified configuration variable states
 extern bool autoHideEnabled;
 extern bool showSystemTray;
 extern bool dockAlwaysOnTop;
 extern bool fShowTitleOverlays;
-
-// NEW: Global tracker variable for backplate opacity (Defaults to 0.40f)
-float fDockAlpha = 0.40f; 
-
-// Unique constant key handles for file streaming mapping properties
-const char* const kSettingsAlphaKey = "dock_alpha";
-const uint32 MSG_ALPHA_SLIDER_CHANGED = 'alsc';
-
 
 
 struct TrackedWindowInfo {
@@ -148,14 +140,6 @@ struct TrackedWindowInfo {
     TrackedWindowInfo(BString t, int32 idx, BRect box) 
         : title(t), windowIndex(idx), hitBox(box) {}
 };
-
-
-// Add these inside your private/protected class declaration fields:
-bool fShouldDrawList = false;
-team_id fHoveredTeam = -1;
-std::vector<TrackedWindowInfo> fCurrentWindowsList;
-
-
 
 
 struct LeafMenuArgs {
@@ -2241,6 +2225,11 @@ BString GetActiveHaikuWallpaperPath() {
 // THE HAIKU DESKTOP DRAW ENGINE RENDERING INTERFACE CLASS
 // =========================================================================
 class HaikuGlDesktopEngine {
+private:
+	bool fShouldDrawList = false;
+	team_id fHoveredTeam = -1;
+	std::vector<TrackedWindowInfo> fCurrentWindowsList;
+
 public:
     HaikuGlDesktopEngine(int width, int height) : fWidth(width), fHeight(height) {
 
@@ -3661,8 +3650,13 @@ public:
 	                    BMessenger deskbarMessenger("application/x-vnd.be-tskb");
 	                    if (deskbarMessenger.IsValid()) {
 	                        
-	                        // CASE 1: RIGHT-CLICK -> PARSE AND PRESENT REAL CONTEXT DROPDOWNS
+	                        // =========================================================================
+	                        // CASE 1: RIGHT-CLICK -> PARSE AND PRESENT REAL CONTEXT DROPDOWNS (STABLE)
+	                        // =========================================================================
 	                        if (button == SDL_BUTTON_RIGHT) {	
+	                            BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
+	                            bool foundItems = false;
+	
 	                            BMessage menuRequest(B_GET_PROPERTY);
 	                            menuRequest.AddSpecifier("Menu");
 	                            menuRequest.AddSpecifier("Replicant", fLiveTrayItems[t].name.c_str());
@@ -3671,10 +3665,8 @@ public:
 	
 	                            BMessage menuReply;
 	                            if (deskbarMessenger.SendMessage(&menuRequest, &menuReply) == B_OK) {
-	                                BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
 	                                BMessage archivedItem;
 	                                int32 itemIdx = 0;
-	                                bool foundItems = false;
 	
 	                                while (menuReply.FindMessage("item", itemIdx, &archivedItem) == B_OK || 
 	                                       menuReply.FindMessage("_items", itemIdx, &archivedItem) == B_OK) {
@@ -3687,45 +3679,72 @@ public:
 	                                    archivedItem.MakeEmpty();
 	                                    itemIdx++;
 	                                }
-	
-	                                // Structural fail-safe triggers
-	                                if (!foundItems) {
-	                                    if (fLiveTrayItems[t].name == "ProcessController" || fLiveTrayItems[t].name == "ProcessControllerView") {
-	                                        localMenu->AddItem(new BMenuItem("Open Performance Monitor...", new BMessage('act1')));
-	                                        localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
-	                                    } else if (fLiveTrayItems[t].name == "NetworkStatus") {
-	                                        localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
-	                                    } else if (fLiveTrayItems[t].name == "MediaReplicant") {
-	                                        localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
-	                                    }
-	                                }
-	
-	                                int winX = 0, winY = 0;
-	                                SDL_Window* activeWin = SDL_GetMouseFocus();
-	                                if (activeWin) SDL_GetWindowPosition(activeWin, &winX, &winY);
-	                                BPoint screenClickPoint(static_cast<float>(winX + x), static_cast<float>(winY + y));
-	
-	                                BMenuItem* chosenItem = localMenu->Go(screenClickPoint);
-	                                if (chosenItem != nullptr) {
-	                                    BMessage* choiceAction = chosenItem->Message();
-	                                    if (choiceAction != nullptr) {
-	                                        if (choiceAction->what == 'act1') {
-	                                           // std::system("/boot/system/apps/ProcessController &");
-	                                        } else if (choiceAction->what == 'act2') {
-	                                            std::system("/boot/system/apps/ActivityMonitor &");
-	                                        } else if (choiceAction->what == 'net1') {
-	                                            std::system("/boot/system/preferences/Network &");
-	                                        } else if (choiceAction->what == 'aud1') {
-	                                            std::system("/boot/system/preferences/Media &");
-	                                        } else {
-	                                            BMessenger replicantTarget("application/x-vnd.be-tskb");
-	                                            replicantTarget.SendMessage(choiceAction);
-	                                        }
-	                                    }
-	                                }
-	                                delete localMenu;
 	                            }
-	                        } 
+	
+	                            if (!foundItems) {
+	                                if (fLiveTrayItems[t].name == "ProcessController" || fLiveTrayItems[t].name == "ProcessControllerView") {
+	                                    localMenu->AddItem(new BMenuItem("Open Performance Monitor...", new BMessage('act1')));
+	                                    localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
+	                                } else if (fLiveTrayItems[t].name == "NetworkStatus") {
+	                                    localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
+	                                } else if (fLiveTrayItems[t].name == "MediaReplicant") {
+	                                    localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+	                                }
+	                            }
+	
+	                            // Get accurate native window coordinates
+	                            int32 nativeWinX = 0;
+	                            int32 nativeWinY = 0;
+	                            if (be_app && be_app->Lock()) {
+	                                BWindow* mainNativeWin = be_app->WindowAt(0);
+	                                if (mainNativeWin != nullptr) {
+	                                    nativeWinX = static_cast<int32>(mainNativeWin->Frame().left);
+	                                    nativeWinY = static_cast<int32>(mainNativeWin->Frame().top);
+	                                }
+	                                be_app->Unlock();
+	                            }
+	                            
+	                            // Apply the working dynamic scaling calculations
+	                            float currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
+	                            float maxExpectedHeight = 164.0f; 
+	                            float structuralOffset = maxExpectedHeight - currentDockH;
+	                            if (structuralOffset < 0.0f) structuralOffset = 0.0f; 
+	                            
+	                            // STABILITY FIX 1: Anchor X precisely to the physical icon column (localTrayTrackerX) 
+	                            // instead of the volatile mouse coordinate pointer.
+	                            float anchoredMenuX = static_cast<float>(nativeWinX + localTrayTrackerX) + (iconHitboxSize / 2.0f) - 45.0f;
+	                            if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+	                            
+	                            float anchoredMenuY = static_cast<float>(nativeWinY) + structuralOffset - 5.0f; 
+	                            BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+	
+	                            // STABILITY FIX 2: Added explicit parameters down to Go()
+	                            // false = Don't auto-send messages immediately (let our loop process it)
+	                            // true  = OPEN ANYWAY. Forces the menu to stay open and ignore mouse-up glitches!
+	                            BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, true);
+	
+	                            if (chosenItem != nullptr) {
+	                                BMessage* choiceAction = chosenItem->Message();
+	                                if (choiceAction != nullptr) {
+	                                    if (choiceAction->what == 'act1') {
+	                                        // std::system("/boot/system/apps/ProcessController &");
+	                                    } else if (choiceAction->what == 'act2') {
+	                                        std::system("/boot/system/apps/ActivityMonitor &");
+	                                    } else if (choiceAction->what == 'net1') {
+	                                        std::system("/boot/system/preferences/Network &");
+	                                    } else if (choiceAction->what == 'aud1') {
+	                                        std::system("/boot/system/preferences/Media &");
+	                                    } else {
+	                                        BMessenger replicantTarget("application/x-vnd.be-tskb");
+	                                        replicantTarget.SendMessage(choiceAction);
+	                                    }
+	                                }
+	                            }
+	                            delete localMenu; 
+	                        }
+
+
+	                        
 	                        // CASE 2: LEFT-CLICK -> PANEL SHORTCUT LAUNCHERS
 	                        else if (button == SDL_BUTTON_LEFT) {
 	                            if (fLiveTrayItems[t].name == "NetworkStatus") {
@@ -3955,7 +3974,9 @@ void RenderFrame(float yOffset) {
 	    
 	    UpdateLiveClockTexture();
 	    UpdateGlobalCpuLoadTracker(); 
-	
+		static bigtime_t mouseLeftTime = 0; 
+		bool mouseIsOverAnyIcon = false;   
+		    
 	    // KEEP THIS: You still need to read the live color from disk!
 	    rgb_color systemBg = GetLiveSystemBackgroundColor();
 	
@@ -4527,37 +4548,61 @@ void RenderFrame(float yOffset) {
 	    }
 	    
 
-        // =========================================================================
-        // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
-        // =========================================================================
-        const float BASE_ICON_SIZE_THRESHOLD = 48.0f; 
-        if (size > BASE_ICON_SIZE_THRESHOLD && fShowTitleOverlays) {
-            
-            // Check if the current layout window match represents the item under active hover
-            // Using a proximity calculation against the icon's structural bounds
-            if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right) {
-                listBaseX = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
-                listBaseY = iconBounds.top - 12.0f;
-                
-                if (fHoveredTeam != activeTaskWin.teamId) {
-                    fHoveredTeam = activeTaskWin.teamId;
-                    GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
-                }
-                
-                fShouldDrawList = true;
-            }
-        }
-		
+			//@here titles
+			
+		    // =========================================================================
+		    // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
+		    // =========================================================================
+		    const float BASE_ICON_SIZE_THRESHOLD = 48.0f; 
+		    if (size > BASE_ICON_SIZE_THRESHOLD && fShowTitleOverlays) {
+		        
+		        // Check if the current layout window match represents the item under active hover
+		        // FIX: Allow fMouseY to go ABOVE the icon into the text overlay area (e.g., 40 pixels higher)
+		        if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right &&
+		            fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom) {
+		            
+		            listBaseX = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
+		            listBaseY = iconBounds.top - 12.0f;
+		            
+		            if (fHoveredTeam != activeTaskWin.teamId) {
+		                fHoveredTeam = activeTaskWin.teamId;
+		                GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
+		            }
+		            
+		            fShouldDrawList = true;
+		            mouseIsOverAnyIcon = true; 
+		            mouseLeftTime = 0;         
+		        }
+		    }
+		    
 		    currentX += size + padding;
 		    renderingSlotIdx++;
-		}
+		} 
+
 	
-		// 4. RESOURCE CLEANUP PAIRING
-		if (windowTokens != nullptr) {
-		    free(windowTokens);
-		}
+	    // 4. RESOURCE CLEANUP PAIRING
+	    if (windowTokens != nullptr) {
+	        free(windowTokens);
+	    }
 	
-		glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
+	    glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Reset texture filters cleanly
+	
+	    // =========================================================================
+	    // NO-HOVER DETECTOR
+	    // =========================================================================
+	    // If the loop finished and the mouse wasn't over any icon, trigger the countdown
+	    if (!mouseIsOverAnyIcon && fShouldDrawList) {
+	        if (mouseLeftTime == 0) {
+	            mouseLeftTime = system_time(); // Mark the microsecond timestamp when the mouse left
+	        }
+	        
+	        // Check if 2 seconds (2,000,000 microseconds) have passed
+	        if ((system_time() - mouseLeftTime) >= 2000000) {
+	            fShouldDrawList = false; // This turns off the rendering pipeline block cleanly
+	            mouseLeftTime = 0;
+	        }
+	    }
+
 	
         // =========================================================================
         // LEFT CLOCK DIVIDER LINE 
@@ -5963,6 +6008,7 @@ int main(int argc, char* argv[]) {
     
     // --- WALLPAPER RE-STITCH ALIGNMENT MATH ---
     float panelTopY = static_cast<float>(screenHeight) - static_cast<float>(dockPanelH);
+   //float panelTopY    = static_cast<float>(screenHeight) - 140.0f;
     float panelBottomY = static_cast<float>(screenHeight);
     
     gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
@@ -6250,6 +6296,8 @@ int main(int argc, char* argv[]) {
 
 
         if (autoHideEnabled) {
+        	// @here modify
+        	// Create two separate sdl windows
             if (cursorIsInsideDock) {
 
                 if (!hidingSettled) {
