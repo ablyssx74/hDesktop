@@ -1336,7 +1336,7 @@ public:
                 BAlert* aboutAlert = new BAlert("About hdesktop",
                     "hdesktop SDL Dock\n"
                     "MIT License\n"
-                    "Version v1.0.32\n"
+                    "Version v1.0.33\n"
                     "(c) 2026 ablyss\n\n"
                     
                     "Enjoy!\n\n"
@@ -3989,7 +3989,7 @@ void RenderFrame(float yOffset) {
 	    // This allows your desktop wallpaper to show through properly!
 	    glClearColor(0.0f, 0.0f, 0.0f, 0.0f); 
 	    glClear(GL_COLOR_BUFFER_BIT);
-
+		
         // =========================================================================
         // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED) - STATIONARY
         // =========================================================================
@@ -4032,7 +4032,7 @@ void RenderFrame(float yOffset) {
             glBindTexture(GL_TEXTURE_2D, 0); 
             glDisable(GL_TEXTURE_2D);
         }
-
+			
         // =========================================================================
         // NEW MATRIX TRANSLATION FOR THE AUTOHIDE OVERLAY ELEMENTS
         // =========================================================================
@@ -5958,10 +5958,9 @@ int main(int argc, char* argv[]) {
     int screenWidth  = currentDisplayMode.w;
     int screenHeight = currentDisplayMode.h;
     
-    float calculatedBaseHeight = fBaseIconSize + 140.0f; 
-    
+    // Choose a safe, sensible base height for the window to open with initially
     int dockPanelW = screenWidth;
-	int dockPanelH = static_cast<int>(std::ceil(calculatedBaseHeight));
+    int dockPanelH = 140; 
     int sensorHeight = 4; 
 
     // Use yExpanded to position the actual SDL window frame at the bottom
@@ -6024,7 +6023,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.32"; 
+    const char* localVersion = "v1.0.33"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
@@ -6189,43 +6188,60 @@ int main(int argc, char* argv[]) {
         float currentDynamicWidth = desktopEngine.fLastCalculatedWidth;
         if (currentDynamicWidth <= 0.0f) currentDynamicWidth = 600.0f; 
 
-        // 2. DEFINE PHANTOM PADDING BUFFERS (Adjust these to tune the friction feel!)
-        int horizontalPadding = 300; // Extra width padding to prevent horizontal snapping
-        int verticalTopPadding = 2; // Extra overhead clearance padding for diagonal exits
+        // 2. DEFINE PHANTOM PADDING BUFFERS
+        // FIX: Re-expand horizontal padding to give the zoom engine plenty of runway
+        int horizontalPaddingZoom = 250; // Wide buffer to catch mouse early for gradual scaling
+        int horizontalPaddingPlate = 30;  // Tight buffer matched to the physical dock edges
+        int verticalTopPadding = 12;      // Clearance padding for text overlays and menus
 
-        // Calculate padded left and right limits
-        int paddedLeftX  = (dockPanelW / 2) - (static_cast<int>(currentDynamicWidth) / 2) - horizontalPadding;
-        int paddedRightX = (dockPanelW / 2) + (static_cast<int>(currentDynamicWidth) / 2) + horizontalPadding;
+        // Calculate the wide limits for the zoom engine
+        int paddedLeftX_Zoom  = (dockPanelW / 2) - (static_cast<int>(currentDynamicWidth) / 2) - horizontalPaddingZoom;
+        int paddedRightX_Zoom = (dockPanelW / 2) + (static_cast<int>(currentDynamicWidth) / 2) + horizontalPaddingZoom;
 
-        // 3. EVALUATE HVER COMPLIANCE USING PADDED VALUES
+        // Calculate the tight limits for window layering adjustments
+        int paddedLeftX_Plate  = (dockPanelW / 2) - (static_cast<int>(currentDynamicWidth) / 2) - horizontalPaddingPlate;
+        int paddedRightX_Plate = (dockPanelW / 2) + (static_cast<int>(currentDynamicWidth) / 2) + horizontalPaddingPlate;
+
+        // 3. TRACKER 1: Primary Dock Hitbox (Wide for Smooth Zooming Mechanics)
         if (dockState == STATE_HIDDEN) {
-            cursorIsInsideDock = (localMouseX >= paddedLeftX && localMouseX <= paddedRightX &&
+            cursorIsInsideDock = (localMouseX >= paddedLeftX_Zoom && localMouseX <= paddedRightX_Zoom &&
                                   localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
         } else {
-            // Include verticalTopPadding to extend the tracking area above the dock shelf
-            cursorIsInsideDock = (localMouseX >= paddedLeftX && localMouseX <= paddedRightX &&
-                                  localMouseY >= -verticalTopPadding && localMouseY < dockPanelH);
+            cursorIsInsideDock = (localMouseX >= paddedLeftX_Zoom && localMouseX <= paddedRightX_Zoom &&
+                                  localMouseY >= (static_cast<int>(currentY) - verticalTopPadding) && localMouseY < dockPanelH);
         }
 
-        // Pass this padded layout verification flag directly into your engine instance
+        // TRACKER 2: Physical Plate Check (Tight to prevent wide window-focus stealing)
+        bool cursorIsOverPhysicalPlate = false;
+        
+        // FIX: Only evaluate the physical plate if the dock is fully deployed or actively sliding out.
+        // We include currentY in the calculation so the focus boundary follows the physical graphic asset!
+        if (dockState == STATE_VISIBLE || dockState == STATE_SHOWING) {
+            int visualDockHeight = static_cast<int>(fBaseIconSize + 80.0f); // Approximate height of the physical plate asset
+            int livePlateTopBound = (dockPanelH - visualDockHeight) + static_cast<int>(currentY);
+            
+            cursorIsOverPhysicalPlate = (localMouseX >= paddedLeftX_Plate && localMouseX <= paddedRightX_Plate &&
+                                         localMouseY >= (livePlateTopBound - verticalTopPadding) && localMouseY < dockPanelH);
+        }
+
+
+        // Pass the wide tracking flag to the background rendering engine
         desktopEngine.fCursorIsInsideHitbox = cursorIsInsideDock;
 
-        // =========================================================================
-        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM (STRICT TRACKER DISCRIMINATOR)
+          // =========================================================================
+        // EDGE-TRIGGERED NATIVE HOVER LAYERING SYSTEM
         // =========================================================================
         static bool lastHoverState = false; 
         
-        if (dockAlwaysOnTop && (cursorIsInsideDock != lastHoverState)) {
-            lastHoverState = cursorIsInsideDock; 
+        // FIX: Drive the focus rules smoothly by tracking the physical plate status alongside visibility state
+        if (dockAlwaysOnTop && ((cursorIsOverPhysicalPlate != lastHoverState) || (dockState == STATE_VISIBLE && lastHoverState))) {
+            lastHoverState = cursorIsOverPhysicalPlate; 
             
             bool trackerSubmenuIsOpen = false;
             app_info activeAppInfo;
            
-            // Query the roster right at the moment of exit boundary trip
             if (be_roster && be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
                 if (strcmp(activeAppInfo.signature, "application/x-vnd.Be-TRAK") == 0) {
-                    
-                    // Deep Scan: Check specifically for Tracker's unique right-click menu footprint
                     int32 currentWorkspace = current_workspace();
                     int32* tokens = nullptr;
                     int32 totalTokens = 0;
@@ -6235,7 +6251,6 @@ int main(int argc, char* argv[]) {
                             client_window_info* wInfo = get_window_info(tokens[i]);
                             if (wInfo != nullptr) {
                                 if (wInfo->team == activeAppInfo.team) {
-                                    // Based on your debug logs, 1025 represents active context/pop-up submenus.
                                     if (wInfo->feel == 1025) {
                                         trackerSubmenuIsOpen = true;
                                         free(wInfo);
@@ -6250,9 +6265,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // PERMISSION RULE: 
-            // We proceed with normal dock layering adaptations (allowing clipping) UNLESS
-            // a Tracker right-click submenu is actively open on the screen.
+            // PERMISSION RULE:
             if (!trackerSubmenuIsOpen) {
                 if (be_app && be_app->Lock()) {
                     int32 windowCount = be_app->CountWindows();
@@ -6261,22 +6274,27 @@ int main(int argc, char* argv[]) {
                         if (win != nullptr && win->Lock()) {
                             uint32 flags = win->Flags();
 
-                            if (cursorIsInsideDock) {
-                                // 1. Elevate instantly above all standard applications
-                                win->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
-                                flags &= ~B_AVOID_FRONT;
-                                flags &= ~B_AVOID_FOCUS;
-                                win->Activate(true);
+                            // FIX: Only float the window over other apps if the mouse is touching the 
+                            // physical plate AND the dock animation has successfully finished deploying (STATE_VISIBLE)
+                            if (cursorIsOverPhysicalPlate && dockState == STATE_VISIBLE) {
+                                if (win->Feel() != B_FLOATING_ALL_WINDOW_FEEL) {
+                                    win->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
+                                    flags &= ~B_AVOID_FRONT;
+                                    flags &= ~B_AVOID_FOCUS;
+                                    win->Activate(true);
+                                }
                             } else {
-                                // 2. Return to normal window layer (Allows standard windows/folders to clip it)
-                                win->SetFeel(B_NORMAL_WINDOW_FEEL);
-                                flags |= B_AVOID_FRONT;
-                                flags |= B_AVOID_FOCUS;
-                                win->SendBehind(nullptr);
-                                
-                                app_info currentActiveInfo;                           
-                                if (be_roster && be_roster->GetActiveAppInfo(&currentActiveInfo) == B_OK) {
-                                    be_roster->ActivateApp(currentActiveInfo.team);
+                                // Return to normal depth layering when hidden or in transparent space
+                                if (win->Feel() != B_NORMAL_WINDOW_FEEL) {
+                                    win->SetFeel(B_NORMAL_WINDOW_FEEL);
+                                    flags |= B_AVOID_FRONT;
+                                    flags |= B_AVOID_FOCUS;
+                                    win->SendBehind(nullptr);
+                                    
+                                    app_info currentActiveInfo;                           
+                                    if (be_roster && be_roster->GetActiveAppInfo(&currentActiveInfo) == B_OK) {
+                                        be_roster->ActivateApp(currentActiveInfo.team);
+                                    }
                                 }
                             }
                            
@@ -6291,15 +6309,11 @@ int main(int argc, char* argv[]) {
             needsRender = true;
         }
 
-		
         // =========================================================================
-
-
+        // AUTO-HIDE TRIGGER EVALUATOR
+        // =========================================================================
         if (autoHideEnabled) {
-        	// @here modify
-        	// Create two separate sdl windows
             if (cursorIsInsideDock) {
-
                 if (!hidingSettled) {
                     targetY = 0.0f; 
                     if (dockState == STATE_HIDDEN || dockState == STATE_HIDING) {
@@ -6318,6 +6332,7 @@ int main(int argc, char* argv[]) {
             dockState = STATE_VISIBLE;
             hidingSettled = false;
         }
+
 
         // =========================================================================
         // TIMING DELTA CALCULATIONS (SMOOTHING MULTIPLIER)
@@ -6388,13 +6403,47 @@ int main(int argc, char* argv[]) {
         }
 
         if (needsRender) {
-            // A. Instruct your engine to paint the core dock backdrop textures
+            // =========================================================================
+            // DYNAMIC HARDWARE WINDOW RESIZING ENGINE
+            // =========================================================================
+            // FIX: Access the global fBaseIconSize variable directly
+            float liveIconSize = fBaseIconSize; 
+            if (liveIconSize <= 0.0f) liveIconSize = 48.0f; // Fail-safe default
+
+            // Apply your dynamic scaling height equation
+            int targetWindowHeight = static_cast<int>(std::ceil(liveIconSize * 2.0f + 50.0f)); 
+            int targetWindowWidth  = screenWidth;
+            int targetWindowY      = screenHeight - targetWindowHeight;
+
+            // Track the size across frames so we don't spam the OS window manager
+            static int lastSetH = -1;
+            static int lastSetY = -1;
+
+            if (targetWindowHeight != lastSetH || targetWindowY != lastSetY) {
+                SDL_SetWindowSize(window, targetWindowWidth, targetWindowHeight);
+                SDL_SetWindowPosition(window, 0, targetWindowY);
+                
+                glViewport(0, 0, targetWindowWidth, targetWindowHeight);
+                
+                glMatrixMode(GL_PROJECTION);
+                glLoadIdentity();
+                float panelTopY    = static_cast<float>(screenHeight - targetWindowHeight);
+                float panelBottomY = static_cast<float>(screenHeight);
+                gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
+                glMatrixMode(GL_MODELVIEW);
+                
+                dockPanelH = targetWindowHeight;
+                lastSetH = targetWindowHeight;
+                lastSetY = targetWindowY;
+            }
+            // =========================================================================
+
             desktopEngine.RenderFrame(currentY);   
-            
-            // B. Flush out the double buffer canvas matrix to the monitor screen display safely
             SDL_GL_SwapWindow(window);
             needsRender = false; 
         }
+
+
 
     }
 
