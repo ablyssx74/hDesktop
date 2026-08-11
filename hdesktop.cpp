@@ -65,6 +65,8 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
+
+
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
 HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
@@ -79,6 +81,38 @@ float fBaseIconSize = 48.0f;
 const char* const kSettingsIconSizeKey = "base_icon_size";
 const uint32 MSG_ICON_SIZE_CHANGED = 'isic';
 float maxDockHeight = 160.0f; 
+
+
+rgb_color GetLiveSystemBackgroundColor() {
+    // Default fallback color (Standard Haiku Grey)
+    rgb_color color = { 216, 216, 216, 255 }; 
+    
+    BFile file("/boot/home/config/settings/system/app_server/appearance", B_READ_ONLY);
+    if (file.InitCheck() != B_OK) return color;
+
+    BMessage settingsMsg;
+    if (settingsMsg.Unflatten(&file) != B_OK) return color;
+
+    int32 packedColorValue = 0;
+    // Keep targeting "color2" since you confirmed color1/2/3 shift with your panel preferences!
+    if (settingsMsg.FindInt32("color2", &packedColorValue) == B_OK) {
+        
+        // CORRECTED BYTE OFFSET SHIFTS FOR LITTLE-ENDIAN HAIKU MESSAGES:
+        color.red   = (uint8)(packedColorValue & 0xFF);
+        color.green = (uint8)((packedColorValue >> 8) & 0xFF);
+        color.blue  = (uint8)((packedColorValue >> 16) & 0xFF);
+        color.alpha = (uint8)((packedColorValue >> 24) & 0xFF);
+
+        // Safety fallback: if Alpha channel decodes to 0, force full opacity
+        if (color.alpha == 0) color.alpha = 255;
+    }
+    
+    return color;
+}
+
+
+
+
 
 
 enum {
@@ -1318,7 +1352,7 @@ public:
                 BAlert* aboutAlert = new BAlert("About hdesktop",
                     "hdesktop SDL Dock\n"
                     "MIT License\n"
-                    "Version v1.0.31\n"
+                    "Version v1.0.32\n"
                     "(c) 2026 ablyss\n\n"
                     
                     "Enjoy!\n\n"
@@ -2822,7 +2856,7 @@ public:
             progressiveX += finalTrashSize;
 
  			
-   	    // =========================================================================
+   	    	// =========================================================================
 	        // DYNAMIC SYSTEM TRAY SLOT WIDTH PARAMETER (2D SMOOTH FIX)
 	        // NOTE: Uses 6.0f internal spacing to match your main RenderFrame pipeline!
 	        // =========================================================================
@@ -2902,10 +2936,13 @@ public:
             // =========================================================================
             // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
-            progressiveX += clockSectionPadding;
-            float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
+            float layoutSizeRatio = baseSize / 48.0f;
             
-            // Calculate spatial center point on the Y axis for the slider asset
+            // Proportional Separator
+            progressiveX += (clockSectionPadding * layoutSizeRatio);
+            
+            float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
+            float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
             float approxVolCenterY = fHeight - 10.0f - (baseSize / 2.0f);
             
             float distanceVolX = std::abs(fMouseX - approxVolCenterX);
@@ -2917,18 +2954,19 @@ public:
                 float ratio = distanceVol2D / 180.0f;
                 volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
-            dynamicWidths.push_back(baseVolumeWidth * volScale);
+            
+            dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
             dynamicScales.push_back(volScale);
-            progressiveX += (baseVolumeWidth * volScale);
-
+            progressiveX += (scaledBaseVolumeWidth * volScale);
 
             // =========================================================================
             // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
-            progressiveX += clockSectionPadding; 
-            float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
+            // Proportional Separator
+            progressiveX += (clockSectionPadding * layoutSizeRatio); 
             
-            // Calculate spatial center point on the Y axis for the processor chart cells
+            float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
+            float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
             float approxCpuCenterY = fHeight - 10.0f - (baseSize / 2.0f);
             
             float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
@@ -2941,177 +2979,176 @@ public:
                 cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
             
-            float finalCpuWidth = cpuGraphWidth * cpuScale;
+            float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
             dynamicWidths.push_back(finalCpuWidth);
             dynamicScales.push_back(cpuScale);
             progressiveX += finalCpuWidth;
 
-            // Save converged dimensions to update anchor points on the next pass
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
         }
+
 		
 		//@here
+		//@mouseclick
 	    // -------------------------------------------------------------------------
 	    // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
 	    // -------------------------------------------------------------------------
 	    size_t trashSlotIdx   = totalIconsCount;
-    size_t traySlotIdx    = totalIconsCount + 1;
-    size_t clockSlotIdx   = totalIconsCount + 2;
-    size_t volumeSlotIdx  = totalIconsCount + 3;
-    size_t cpuSlotIdx     = totalIconsCount + 4;
-    
-    float dockMarginBottom = 15.0f;
-    HaikuRect dockPlate;
+	    size_t traySlotIdx    = totalIconsCount + 1;
+	    size_t clockSlotIdx   = totalIconsCount + 2;
+	    size_t volumeSlotIdx  = totalIconsCount + 3;
+	    size_t cpuSlotIdx     = totalIconsCount + 4;
+	    
+	    float dockMarginBottom = 15.0f;
+	    HaikuRect dockPlate;
+	
+	    // =========================================================================
+	    // 1:1 RENDER MATCHING: REPLICATE THE EXACT DYNAMIC GEOMETRY
+	    // =========================================================================
+	    float layoutSizeRatio = baseSize / 48.0f;
+	    float leftPaddingbuffer = 1.0f;
+	    float internalSidePadding = fBaseIconSize * layoutSizeRatio; 
+	    
+	    float clippingCompensation = 0.0f;
+	    if (layoutSizeRatio > 1.0f) {
+	        clippingCompensation = (leftPaddingbuffer * (layoutSizeRatio - 60.0f));
+	    }
+	
+	    // Apply the identical responsive width tracking variable
+	    float adjustedTotalWidth = totalCalculatedWidth + clippingCompensation;
+	
+	    // Balance the dock plate exactly how it is drawn on screen
+	    dockPlate.left   = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - internalSidePadding;
+	    dockPlate.right  = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + internalSidePadding;
+	    dockPlate.bottom = fHeight - dockMarginBottom;
+	    dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
+	
+	    // Lock down definitive trash hitbox using converged data fields
+	    float renderingTrashSize = dynamicWidths[trashSlotIdx];
+	    
+	    float layoutTrackerX = dockPlate.left + 20.0f;
+	
+	    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
+	        layoutTrackerX += dynamicWidths[idx] + padding;
+	    }
+	    if (totalIconsCount > 0) layoutTrackerX -= padding;
+	    if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
+	    
+	    // SYNCHRONIZED: Account for the horizontal width footprint of the System Tray slot
+	    layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
+	    
+	    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
+	    
+	    // Accountability shift step past our volume metrics
+	    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];       
+	    layoutTrackerX += clockSectionPadding;
+	    
+	    fTrashRect.left = layoutTrackerX;
+	    fTrashRect.right = fTrashRect.left + renderingTrashSize;
+	    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
+	    fTrashRect.bottom = dockPlate.bottom - 10.0f;
+	
+	    // =========================================================================
+	    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
+	    // =========================================================================
+	    // The exact starting visual layout anchor coordinate used in pass 5 of rendering
+	    float currentX = dockPlate.left + 20.0f; 
+	    size_t evaluationSlotIdx = 0;
 
-    // =========================================================================
-    // 1:1 RENDER MATCHING: REPLICATE THE EXACT DYNAMIC GEOMETRY
-    // =========================================================================
-    float layoutSizeRatio = baseSize / 48.0f;
-    float leftPaddingbuffer = 1.0f;
-    float internalSidePadding = fBaseIconSize * layoutSizeRatio; 
-    
-    float clippingCompensation = 0.0f;
-    if (layoutSizeRatio > 1.0f) {
-        clippingCompensation = (leftPaddingbuffer * (layoutSizeRatio - 60.0f));
-    }
-
-    // Apply the identical responsive width tracking variable
-    float adjustedTotalWidth = totalCalculatedWidth + clippingCompensation;
-
-    // Balance the dock plate exactly how it is drawn on screen
-    dockPlate.left   = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - internalSidePadding;
-    dockPlate.right  = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + internalSidePadding;
-    dockPlate.bottom = fHeight - dockMarginBottom;
-    dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
-
-    // Lock down definitive trash hitbox using converged data fields
-    float renderingTrashSize = dynamicWidths[trashSlotIdx];
-    
-    float layoutTrackerX = dockPlate.left + 20.0f;
-
-    for (size_t idx = 0; idx < totalIconsCount; ++idx) {
-        layoutTrackerX += dynamicWidths[idx] + padding;
-    }
-    if (totalIconsCount > 0) layoutTrackerX -= padding;
-    if (activeWindowsCount > 0) layoutTrackerX += separatorGapPadding;
-    
-    // SYNCHRONIZED: Account for the horizontal width footprint of the System Tray slot
-    layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
-    
-    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
-    
-    // Accountability shift step past our volume metrics
-    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];       
-    layoutTrackerX += clockSectionPadding;
-    
-    fTrashRect.left = layoutTrackerX;
-    fTrashRect.right = fTrashRect.left + renderingTrashSize;
-    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
-    fTrashRect.bottom = dockPlate.bottom - 10.0f;
-
-    // =========================================================================
-    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
-    // =========================================================================
-    // The exact starting visual layout anchor coordinate used in pass 5 of rendering
-    float currentX = dockPlate.left + 20.0f; 
-    size_t evaluationSlotIdx = 0;
-    
-    // STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
-    for (size_t i = 0; i < baselineLaunchersCount; ++i) {
-        float size = dynamicWidths[evaluationSlotIdx];
+	    // STEP A: EVALUATE BASELINE SYSTEM LAUNCHERS (MENU LEAF + FILE SHORTCUTS)
+	    for (size_t i = 0; i < baselineLaunchersCount; ++i) {
+	        float size = dynamicWidths[evaluationSlotIdx];
         
-        // Correctly calculate visual height baseline boundary metrics
-        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
-    
-        if (x >= realIconBounds.left && x <= realIconBounds.right &&
-            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
-                
-            if (i == 0) {
-            // =========================================================================
-            // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
-            // =========================================================================
-
-
-                if (button == SDL_BUTTON_RIGHT) {                                  
-                    if (fLeafMenuIsActive) return;
-                    fLeafMenuIsActive = true;
-
-                    // FIX 1: Declared exactly ONCE so initialization properties are preserved
-                    LeafMenuArgs* args = new LeafMenuArgs();
-                    args->engine = this;
-                    args->winX = 0; 
-                    args->winY = 0;
-                    args->mouseX = static_cast<int32>(x);
-                    
-                    // Match the baseline dynamic scaling formula used by the window sizing logic
-                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f)); 
-
-                    if (be_app && be_app->Lock()) {
-                        BWindow* mainNativeWin = be_app->WindowAt(0);
-                        if (mainNativeWin != nullptr) {
-                            args->winX = static_cast<int32>(mainNativeWin->Frame().left);
-                            args->winY = static_cast<int32>(mainNativeWin->Frame().top);
-                        }
-                        be_app->Unlock();
-                    }
-
-                    // Inline background thread function context
-                    int32 (*inlineLeafThreadFunc)(void*) = [](void* data) -> int32 {
-                        LeafMenuArgs* threadArgs = static_cast<LeafMenuArgs*>(data);
-                        if (!threadArgs || !threadArgs->engine) {
-                            if (threadArgs) delete threadArgs;
-                            return B_ERROR;
-                        }
-
-                        BPopUpMenu* leafMenu = new BPopUpMenu("LeafPopup", false, false);
-                        leafMenu->SetRadioMode(false);
-                        leafMenu->AddItem(new BMenuItem("Preferences…", new BMessage('lCFG')));
-                        
-                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 15.0f;
-                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f; 
-
-                        // FIX 2: Correct layout normalization metrics boundary limit tracker.
-                        // Assuming 164.0f is your standard maximum baseline footprint width layout,
-                        // this naturally pushes the layout down when currentDockH drops to ~116.0f.
-                        float maxExpectedHeight = 164.0f; 
-                        float structuralOffset = maxExpectedHeight - threadArgs->currentDockH;
-                        if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Safety clamp prevent clipping
-                        
-                        // Push it lower down screen boundary context as your dock container shrivels
-                        float anchoredMenuY = static_cast<float>(threadArgs->winY) + structuralOffset - 5.0f; 
-                        
-                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
-
-                        BMenuItem* chosenAction = leafMenu->Go(screenClickPoint, false, false);
-                        
-                        threadArgs->engine->fLastLeafMenuCloseTime = SDL_GetTicks();
-                        threadArgs->engine->fLeafMenuIsActive = false; 
-
-                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
-							if (chosenAction->Message()->what == 'lCFG') {
-							    float winWidth = 560.0f;
-							    float winHeight = 450.0f; // Expanded to 450 pixels!
-							
-							    BScreen screen(B_MAIN_SCREEN_ID);
-							    BRect screenFrame = screen.Frame();
-							    
-							    float centerX = screenFrame.left + (screenFrame.Width() - winWidth) / 2.0f;
-							    float centerY = screenFrame.top + (screenFrame.Height() - winHeight) / 2.0f;
-							    BRect centeredBounds(centerX, centerY, centerX + winWidth, centerY + winHeight);
-							    
-							    BWindow* settingsWindow = new BWindow(centeredBounds, "hdesktop settings", 
-							        B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_NOT_RESIZABLE);
-							    
-							    settingsWindow->AddChild(new ConfigView(settingsWindow->Bounds()));
-							    settingsWindow->Show();
-							}
-                        }
-
-                        delete leafMenu;
-                        delete threadArgs; 
-                        return B_OK;
-                    };
+	        // Correctly calculate visual height baseline boundary metrics
+	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	    
+	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
+	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
+	                
+		            if (i == 0) {
+		            // =========================================================================
+		            // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
+		            // =========================================================================			
+		                if (button == SDL_BUTTON_RIGHT) {                                  
+		                    if (fLeafMenuIsActive) return;
+		                    fLeafMenuIsActive = true;
+		
+		                    // FIX 1: Declared exactly ONCE so initialization properties are preserved
+		                    LeafMenuArgs* args = new LeafMenuArgs();
+		                    args->engine = this;
+		                    args->winX = 0; 
+		                    args->winY = 0;
+		                    args->mouseX = static_cast<int32>(x);
+		                    
+		                    // Match the baseline dynamic scaling formula used by the window sizing logic
+		                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f)); 
+		
+		                    if (be_app && be_app->Lock()) {
+		                        BWindow* mainNativeWin = be_app->WindowAt(0);
+		                        if (mainNativeWin != nullptr) {
+		                            args->winX = static_cast<int32>(mainNativeWin->Frame().left);
+		                            args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+		                        }
+		                        be_app->Unlock();
+		                    }
+		
+		                    // Inline background thread function context
+		                    int32 (*inlineLeafThreadFunc)(void*) = [](void* data) -> int32 {
+		                        LeafMenuArgs* threadArgs = static_cast<LeafMenuArgs*>(data);
+		                        if (!threadArgs || !threadArgs->engine) {
+		                            if (threadArgs) delete threadArgs;
+		                            return B_ERROR;
+		                        }
+		
+		                        BPopUpMenu* leafMenu = new BPopUpMenu("LeafPopup", false, false);
+		                        leafMenu->SetRadioMode(false);
+		                        leafMenu->AddItem(new BMenuItem("Preferences…", new BMessage('lCFG')));
+		                        
+		                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 15.0f;
+		                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f; 
+		
+		                        // FIX 2: Correct layout normalization metrics boundary limit tracker.
+		                        // Assuming 164.0f is your standard maximum baseline footprint width layout,
+		                        // this naturally pushes the layout down when currentDockH drops to ~116.0f.
+		                        float maxExpectedHeight = 164.0f; 
+		                        float structuralOffset = maxExpectedHeight - threadArgs->currentDockH;
+		                        if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Safety clamp prevent clipping
+		                        
+		                        // Push it lower down screen boundary context as your dock container shrivels
+		                        float anchoredMenuY = static_cast<float>(threadArgs->winY) + structuralOffset - 5.0f; 
+		                        
+		                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+		
+		                        BMenuItem* chosenAction = leafMenu->Go(screenClickPoint, false, false);
+		                        
+		                        threadArgs->engine->fLastLeafMenuCloseTime = SDL_GetTicks();
+		                        threadArgs->engine->fLeafMenuIsActive = false; 
+		
+		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
+									if (chosenAction->Message()->what == 'lCFG') {
+									    float winWidth = 560.0f;
+									    float winHeight = 450.0f; // Expanded to 450 pixels!
+									
+									    BScreen screen(B_MAIN_SCREEN_ID);
+									    BRect screenFrame = screen.Frame();
+									    
+									    float centerX = screenFrame.left + (screenFrame.Width() - winWidth) / 2.0f;
+									    float centerY = screenFrame.top + (screenFrame.Height() - winHeight) / 2.0f;
+									    BRect centeredBounds(centerX, centerY, centerX + winWidth, centerY + winHeight);
+									    
+									    BWindow* settingsWindow = new BWindow(centeredBounds, "hdesktop settings", 
+									        B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_NOT_RESIZABLE);
+									    
+									    settingsWindow->AddChild(new ConfigView(settingsWindow->Bounds()));
+									    settingsWindow->Show();
+									}
+		                        }
+		
+		                        delete leafMenu;
+		                        delete threadArgs; 
+		                        return B_OK;
+		                    };
 
                     thread_id menuThread = spawn_thread(inlineLeafThreadFunc, "async_leaf_menu", B_NORMAL_PRIORITY, args);
                     if (menuThread >= B_OK) {
@@ -3146,6 +3183,7 @@ public:
 	        currentX += size + padding;
 	        evaluationSlotIdx++;
 	    }
+
 	
 	    // Account for horizontal visual taskbar line padding offsets split
 	    if (activeWindowsCount > 0) {
@@ -3710,13 +3748,15 @@ public:
 	        currentX += dynamicTrayWidth;
 	    }
 	    
-
-	
 	    // -------------------------------------------------------------------------
 	    // Evaluate Click Bounds for System Clock Component
 	    // -------------------------------------------------------------------------
+	    // Establish the universal scaling ratio to keep all components in sync
+	    float sizeRatio = static_cast<float>(fBaseIconSize) / 48.0f;
+
 	    if (fClockTexture.id != 0) {
-	        float dynamicClockW = dynamicWidths[clockSlotIdx];
+	        // Apply size ratio to match exact rendering dimensions
+	        float dynamicClockW = dynamicWidths[clockSlotIdx] * sizeRatio;
 	        currentX += clockSectionPadding;
 	        
 	        HaikuRect clockBounds = { currentX, dockPlate.top, currentX + dynamicClockW, dockPlate.bottom };
@@ -3728,40 +3768,41 @@ public:
 	    }
 	
 	    // -------------------------------------------------------------------------
-	    // Skip past Volume Slider component space footprint natively 
+	    // Skip past Volume Slider component space footprint natively (WITH SIZE RATIO)
 	    // -------------------------------------------------------------------------
-	    currentX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
-	
+	    // Multiplying this by sizeRatio prevents the layout tracking from shifting out of position
+	    currentX += clockSectionPadding + (dynamicWidths[volumeSlotIdx] * sizeRatio);
 
-	
 	    // -------------------------------------------------------------------------
 	    // Evaluate Click Bounds for Graphical LED CPU Monitor Component
 	    // -------------------------------------------------------------------------
 	    currentX += clockSectionPadding;
+	    
 	    float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
-	    HaikuRect cpuBounds = { currentX, dockPlate.top, currentX + dynamicGraphWidth, dockPlate.bottom };
+	    
+	    HaikuRect cpuBounds = { 
+	        currentX, 
+	        dockPlate.top, 
+	        currentX + dynamicGraphWidth, 
+	        dockPlate.bottom 
+	    };
 	    
 	    if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
-	        // ACTIVE MENU CLOSE CHECK: Let the menu naturally collapse if they click again
 	        if (fCpuMenuIsActive) {
 	            return; 
 	        }
 	
 	        if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
-	            fCpuMenuIsActive = true; // Engage active state safety shield latch
+	            fCpuMenuIsActive = true; 
 	
-	            // Bundle coordinates to pass safely across the memory barrier
 	            CpuMenuArgs* args = new CpuMenuArgs();
 	            args->engine = this;
 	            args->winX = 0;
 	            args->winY = 0;
 	            args->mouseX = static_cast<int32>(x);
 	            args->mouseY = static_cast<int32>(y);
-	            
-	            // SMART MATCH: Mirror the exact dynamic layout sizing math 
 	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
 
-	            // SMART NAVIGATION: Query native Haiku window coordinates like other smart popups
 	            if (be_app && be_app->Lock()) {
 	                BWindow* mainNativeWin = be_app->WindowAt(0);
 	                if (mainNativeWin != nullptr) {
@@ -3771,11 +3812,12 @@ public:
 	                be_app->Unlock();
 	            }
 	
-	            // Spawns and detaches the menu runner immediately.
 	            new AsyncCpuMenuRunner(args);
 	        }
 	        return;
 	    }
+
+	    currentX += dynamicGraphWidth;
 
 	} // HandleMouseClick end closing brace
 
@@ -3857,58 +3899,6 @@ public:
 	}
 
 
-
-
-	class OpenGlShapeIterator : public BShapeIterator {
-	public:
-	    // We add an explicit horizontal aspect scaling parameter (e.g. 1.25f)
-	    OpenGlShapeIterator(float xOffset, float baselineY, float aspectX) 
-	        : fX(xOffset), fBaselineY(baselineY), fAspectX(aspectX) {}
-	
-	    virtual status_t IterateMoveTo(BPoint* point) {
-	        glEnd();
-	        glBegin(GL_LINE_STRIP);
-	        // RESTORED DIRECT MATCH: Reverted back to your working right-side up vertical plane layout.
-	        // We stretch the x coordinate with our proportional structural spacing multiplier.
-	        glVertex2f(fX + (point->x * fAspectX), fBaselineY + point->y);
-	        return B_OK;
-	    }
-	
-	    virtual status_t IterateLineTo(int32 count, BPoint* points) {
-	        for (int32 i = 0; i < count; i++) {
-	            glVertex2f(fX + (points[i].x * fAspectX), fBaselineY + points[i].y);
-	        }
-	        return B_OK;
-	    }
-	
-	    virtual status_t IterateBezierTo(int32 count, BPoint* points) {
-	        for (int32 i = 0; i < count; i += 3) {
-	            BPoint p0 = (i == 0) ? BPoint(0,0) : points[i-1];
-	            BPoint p1 = points[i];
-	            BPoint p2 = points[i+1];
-	            BPoint p3 = points[i+2];
-	            
-	            // High fidelity 8-step subdivision tracks maintain curve smoothness
-	            for (float t = 0.125f; t <= 1.0f; t += 0.125f) {
-	                float u = 1.0f - t;
-	                float x = u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x;
-	                float y = u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y;
-	                
-	                glVertex2f(fX + (x * fAspectX), fBaselineY + y);
-	            }
-	        }
-	        return B_OK;
-	    }
-	
-	    virtual status_t IterateClose() {
-	        glEnd();
-	        glBegin(GL_LINE_STRIP);
-	        return B_OK;
-	    }
-	
-	private:
-	    float fX, fBaselineY, fAspectX;
-	};
 	
 	void DrawNativeSystemText(const char* text, float centerX, float baselineY) {
 	    if (text == nullptr || text[0] == '\0') return;
@@ -3956,17 +3946,28 @@ public:
 
 
 
-  void RenderFrame(float yOffset) {
-        // =========================================================================
-        // 1. STEP POSIX TIMING ENGINES AND KERNEL RECORD SAMPLES
-        // =========================================================================
-        SyncDockWithRunningDeskbarApps(); // Rebuilds fTaskbarWindows using real OS states!
-        
-        UpdateLiveClockTexture();
-        UpdateGlobalCpuLoadTracker(); // Pull processor ticks and update our 40-cell buffer array
 
-        glClearColor(fBgColorR, fBgColorG, fBgColorB, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+void RenderFrame(float yOffset) {
+	    // =========================================================================
+	    // 1. STEP POSIX TIMING ENGINES AND KERNEL RECORD SAMPLES
+	    // =========================================================================
+	    SyncDockWithRunningDeskbarApps(); 
+	    
+	    UpdateLiveClockTexture();
+	    UpdateGlobalCpuLoadTracker(); 
+	
+	    // KEEP THIS: You still need to read the live color from disk!
+	    rgb_color systemBg = GetLiveSystemBackgroundColor();
+	
+	    // KEEP THIS: Keep updating your global class floats dynamically
+	    fBgColorR = systemBg.red   / 255.0f;
+	    fBgColorG = systemBg.green / 255.0f;
+	    fBgColorB = systemBg.blue  / 255.0f;
+	
+	    // CHANGE THIS: Clear the canvas with transparency (0.0f alpha) 
+	    // This allows your desktop wallpaper to show through properly!
+	    glClearColor(0.0f, 0.0f, 0.0f, 0.0f); 
+	    glClear(GL_COLOR_BUFFER_BIT);
 
         // =========================================================================
         // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED) - STATIONARY
@@ -4214,10 +4215,13 @@ public:
             // =========================================================================
             // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
-            progressiveX += clockSectionPadding;
-            float approxVolCenterX = progressiveX + (baseVolumeWidth / 2.0f);
+            float layoutSizeRatio = baseSize / 48.0f;
             
-            // Calculate spatial center point on the Y axis for the slider asset
+            // Proportional Separator
+            progressiveX += (clockSectionPadding * layoutSizeRatio);
+            
+            float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
+            float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
             float approxVolCenterY = fHeight - 10.0f - (baseSize / 2.0f);
             
             float distanceVolX = std::abs(fMouseX - approxVolCenterX);
@@ -4229,18 +4233,19 @@ public:
                 float ratio = distanceVol2D / 180.0f;
                 volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
-            dynamicWidths.push_back(baseVolumeWidth * volScale);
+            
+            dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
             dynamicScales.push_back(volScale);
-            progressiveX += (baseVolumeWidth * volScale);
-
+            progressiveX += (scaledBaseVolumeWidth * volScale);
 
             // =========================================================================
             // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
-            progressiveX += clockSectionPadding; 
-            float approxCpuCenterX = progressiveX + (cpuGraphWidth / 2.0f);
+            // Proportional Separator
+            progressiveX += (clockSectionPadding * layoutSizeRatio); 
             
-            // Calculate spatial center point on the Y axis for the processor chart cells
+            float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
+            float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
             float approxCpuCenterY = fHeight - 10.0f - (baseSize / 2.0f);
             
             float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
@@ -4253,17 +4258,21 @@ public:
                 cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
             }
             
-            float finalCpuWidth = cpuGraphWidth * cpuScale;
+            float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
             dynamicWidths.push_back(finalCpuWidth);
             dynamicScales.push_back(cpuScale);
             progressiveX += finalCpuWidth;
 
-            // Save converged dimensions to update anchor points on the next pass
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
         }
 
-		// @here2
+
+
+
+
+		//@here0
+        //Renderdraw
         // -----------------------------	--------------------------------------------
         // PASS 2: BOUNDS SETTLEMENT AND BACKPLATE GEOMETRY ALLOCATION
         // -------------------------------------------------------------------------
@@ -4316,8 +4325,10 @@ public:
         
         float cornerRadius = 15.0f;
 
-        DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, fDockAlpha); 
+        //DrawFilledRoundedRect(dockPlate, cornerRadius, 0.95f, 0.95f, 0.95f, fDockAlpha); 
 
+        DrawFilledRoundedRect(dockPlate, cornerRadius, fBgColorR, fBgColorG, fBgColorB, fDockAlpha); 
+        
         DrawOutlineRoundedRect(dockPlate, cornerRadius, 0.15f, 0.15f, 0.15f, fDockAlpha); 
 
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -4343,7 +4354,7 @@ public:
         float currentX = dockPlate.left + 20.0f;
         size_t renderingSlotIdx = 0;
 
-
+		// Step A
         // STEP 1: RENDER THE BASELINE SYSTEM SHORTCUTS (LEAF MENU + DESKTOP DIRECTORY ENTRIES)
         for (size_t i = 0; i < baselineLaunchersCount; ++i) {
             float size = dynamicWidths[renderingSlotIdx];
@@ -4652,15 +4663,16 @@ public:
 	            // Advance layout vector forward using dynamic scaling specs
 	            localTrayX += itemWidth + traySpacing;
 	        }
-	
+			/*
 	        // --- CRITICAL DEFENSIVE SHIELD: FORCE FULL OpenGL STATE SHUTDOWN ---
 	        // This explicitly cuts off the texture matrix pipeline, guaranteeing the clock text 
 	        // and trash bin drawing routines downstream inherit a pristine state machine!
 	        glBindTexture(GL_TEXTURE_2D, 0);
 	        glDisable(GL_TEXTURE_2D);
 	        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	        glColor4f(fBgColorR, fBgColorG, fBgColorB, 1.0f);
 	        // =========================================================================
-	
+			*/
 	        currentX += dynamicTrayWidth;
         }
 
@@ -4807,8 +4819,6 @@ public:
 
 
 
-
-
         // =========================================================================
         // 6B. DRAW GRAPHICAL PURPLE BOUNCING CPU METERS (DYNAMIC SIZING & SOLID BLACK)
         // =========================================================================
@@ -4821,7 +4831,7 @@ public:
         float sizeRatio = baseSize / 48.0f;
         
         // Scales the width and height parameters proportionally as you move the slider
-        float dynamicGraphWidth  = dynamicWidths[cpuSlotIdx] * sizeRatio;
+        float dynamicGraphWidth  = dynamicWidths[cpuSlotIdx];
         float dynamicGraphHeight = 28.0f * cpuScale * sizeRatio; 
         
         float graphTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicGraphHeight / 2.0f));
@@ -5968,7 +5978,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.31"; 
+    const char* localVersion = "v1.0.32"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
