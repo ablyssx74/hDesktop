@@ -1087,12 +1087,6 @@ void SyncDynamicSystrayTextures() {
 }
 
 
-
-
-
-
-
-
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
@@ -1207,7 +1201,7 @@ public:
         
         SetFont(be_bold_font);
         SetFontSize(12.0f);
-        BString shutdownText("Shutdown App");
+        BString shutdownText("Shutdown hDesktop");
         float shutdownTextW = StringWidth(shutdownText.String());
         DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
 
@@ -1333,10 +1327,11 @@ public:
             }
             
             case 'abou': {
+            	
                 BAlert* aboutAlert = new BAlert("About hdesktop",
                     "hdesktop SDL Dock\n"
                     "MIT License\n"
-                    "Version v1.0.33\n"
+                    "Version v1.0.34\n"
                     "(c) 2026 ablyss\n\n"
                     
                     "Enjoy!\n\n"
@@ -1607,7 +1602,7 @@ public:
 
         // Power buttons stay safely on the far left side
         BRect shutdownSysRect(30.0f, 45.0f, 110.0f, 76.0f); // Shifted over to start at X=30
-        BRect rebootSysRect(120.0f, 45.0f, 190.0f, 76.0f);
+        BRect rebootSysRect(120.0f, 45.0f, 215.0f, 76.0f);
 
 
 
@@ -1615,21 +1610,11 @@ public:
         BPoint cursorPoint;
         uint32 transitButtons;
         GetMouse(&cursorPoint, &transitButtons, false);
-
         SetDrawingMode(B_OP_ALPHA);
 
-        // 3. Draw Exit Button (Left Side)
-        if (exitIconRect.Contains(cursorPoint)) {
-            SetHighColor(rgb_color{230, 75, 75, 45}); // Soft red hover glow
-            FillRect(exitIconRect.InsetBySelf(-4, -4));
-            SetHighColor(rgb_color{255, 90, 90, 255});
-        } else {
-            SetHighColor(rgb_color{200, 70, 70, 220}); // Muted red vector
-        }
-        StrokeLine(BPoint(exitIconRect.left, exitIconRect.top), BPoint(exitIconRect.right, exitIconRect.bottom));
-        StrokeLine(BPoint(exitIconRect.left, exitIconRect.bottom), BPoint(exitIconRect.right, exitIconRect.top));
+
         
-                // --- ADDED: DRAW SHUTDOWN BUTTON ---
+        // --- ADDED: DRAW SHUTDOWN BUTTON ---
         if (shutdownSysRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{220, 60, 60, 45}); // Soft red hover glow
             FillRect(shutdownSysRect);
@@ -1643,7 +1628,7 @@ public:
         
         SetFont(be_plain_font);
         SetFontSize(11.0f);
-        BString shutText("Shutdown");
+        BString shutText("Power off");
         float shutTextW = StringWidth(shutText.String());
         DrawString(shutText.String(), BPoint(shutdownSysRect.left + (shutdownSysRect.Width() - shutTextW) / 2.0f, 64.0f));
 
@@ -1659,12 +1644,12 @@ public:
         }
         StrokeRect(rebootSysRect);
 
-        BString rebootText("Reboot");
+        BString rebootText("Restart system");
         float rebootTextW = StringWidth(rebootText.String());
         DrawString(rebootText.String(), BPoint(rebootSysRect.left + (rebootSysRect.Width() - rebootTextW) / 2.0f, 64.0f));
 
-
-        // 4. Draw Config Gear Button (Right Side)
+		/*
+        // Draw Config Gear Button (Right Side)
         if (configIconRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{100, 120, 160, 50}); // Slate hover glow
             FillRect(configIconRect.InsetBySelf(-4, -4));
@@ -1674,7 +1659,18 @@ public:
         }
         StrokeRect(configIconRect);
         StrokeEllipse(configIconRect.InsetByCopy(6, 6));
-
+      
+        // Draw Exit Button (Right Side)
+        if (exitIconRect.Contains(cursorPoint)) {
+            SetHighColor(rgb_color{230, 75, 75, 45}); // Soft red hover glow
+            FillRect(exitIconRect.InsetBySelf(-4, -4));
+            SetHighColor(rgb_color{255, 90, 90, 255});
+        } else {
+            SetHighColor(rgb_color{200, 70, 70, 220}); // Muted red vector
+        }
+        StrokeLine(BPoint(exitIconRect.left, exitIconRect.top), BPoint(exitIconRect.right, exitIconRect.bottom));
+        StrokeLine(BPoint(exitIconRect.left, exitIconRect.bottom), BPoint(exitIconRect.right, exitIconRect.top));
+	     */
 
         // 5. Draw Separator Line Accent
         SetHighColor(rgb_color{50, 52, 60, 255}); // Sleek dark baseline border
@@ -1848,8 +1844,8 @@ public:
 		            
 		            // Extract the vertical wheel movement delta
 		            if (message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0.0f) {
-		                // Multiplier to increase scrolling speed (adjust 15.0f to taste)
-		                float scrollSpeedMultiplier = 15.0f; 
+		                // Multiplier to increase scrolling speed (adjust 30.0f to taste)
+		                float scrollSpeedMultiplier = 30.0f; 
 		                float scrollAmount = deltaY * scrollSpeedMultiplier;
 		
 		                // Option A: If your view is hosted directly in a standard BScrollView
@@ -1882,37 +1878,6 @@ public:
         BRect shutdownSysRect(30.0f, 45.0f, 110.0f, 76.0f);
         BRect rebootSysRect(120.0f, 45.0f, 190.0f, 76.0f);
 
-        // 1. Process Exit Button Trigger Click
-        if (exitIconRect.Contains(point)) {
-
-            if (Window()) {
-                Window()->Quit(); 
-            }
-            return;
-        }
-
-		/*
-        // --- INTERCEPT SHUTDOWN SYSTEM TRACKER ---
-        if (shutdownSysRect.Contains(point)) {
-            std::cout << "[hdesktop] Invoking Native CLI System Power Down." << std::endl;
-            
-            // Native Haiku System Message identifier for power-off sequence
-            BMessage msg(0x53485554); // 'SHUT'
-            be_roster->Broadcast(&msg);
-            return;
-        }
-
-        // --- INTERCEPT REBOOT SYSTEM TRACKER ---
-        if (rebootSysRect.Contains(point)) {
-            std::cout << "[hdesktop] Invoking Native CLI System Restart." << std::endl;
-            
-            // Native Haiku System Message identifier for reboot sequence
-            BMessage msg(0x52454254); // 'REBT'
-            be_roster->Broadcast(&msg);
-            return;
-        }
-		*/
-
 		
         // --- ADDED: INTERCEPT SHUTDOWN SYSTEM TRACKER ---
         if (shutdownSysRect.Contains(point)) {
@@ -1936,7 +1901,15 @@ public:
         }
 		
 		
-		
+		/*
+	    // 1. Process Exit Button Trigger Click
+        if (exitIconRect.Contains(point)) {
+
+            if (Window()) {
+                Window()->Quit(); 
+            }
+            return;
+        }
         // 2. Process Configuration Button Trigger Click
         if (configIconRect.Contains(point)) {           
             if (gActiveConfigInstance == nullptr && Window()) {
@@ -1949,7 +1922,7 @@ public:
             }
             return;
         }
-
+		*/
 
         // =========================================================================
         // 3. Process Standard Grid Icon Coordinates
@@ -3071,7 +3044,7 @@ public:
 		                    args->mouseX = static_cast<int32>(x);
 		                    
 		                    // Match the baseline dynamic scaling formula used by the window sizing logic
-		                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f)); 
+		                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f)); 
 		
 		                    if (be_app && be_app->Lock()) {
 		                        BWindow* mainNativeWin = be_app->WindowAt(0);
@@ -3113,7 +3086,7 @@ public:
 		                        
 		                        threadArgs->engine->fLastLeafMenuCloseTime = SDL_GetTicks();
 		                        threadArgs->engine->fLeafMenuIsActive = false; 
-		
+								//@here
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
@@ -3308,7 +3281,7 @@ public:
 				        args->mouseX = static_cast<int32>(x); 
 				        
 				        // SMART MATCH: Mirror the exact dynamic layout sizing math 
-				        args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f)); 
+				        args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f)); 
 
 				        // SMART NAVIGATION: Query native Haiku window coordinates like preferences popup
 				        if (be_app && be_app->Lock()) {
@@ -3525,7 +3498,7 @@ public:
 	            args->mouseY = static_cast<int32>(y); 
 	            
 	            // SMART MATCH: Pass the live unified dynamic scaling height parameter down
-	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
+	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
 
 	            // SMART NAVIGATION: Lock native Haiku app frames rather than querying raw SDL views
 	            if (be_app && be_app->Lock()) {
@@ -3820,7 +3793,7 @@ public:
 	            args->winY = 0;
 	            args->mouseX = static_cast<int32>(x);
 	            args->mouseY = static_cast<int32>(y);
-	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
+	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
 
 	            if (be_app && be_app->Lock()) {
 	                BWindow* mainNativeWin = be_app->WindowAt(0);
@@ -6023,7 +5996,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.33"; 
+    const char* localVersion = "v1.0.34"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
