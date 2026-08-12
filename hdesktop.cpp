@@ -1101,12 +1101,12 @@ public:
 
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255});
-
+		/*
         // 1. Define the "About hdesktop" Button Layout (Y: 82 to 106)
         BRect aboutBtnRect(25.0f, 82.0f, frame.Width() - 25.0f, 106.0f);
         fAboutButton = new BButton(aboutBtnRect, "about_btn", "About hdesktop", new BMessage('abou'));
         AddChild(fAboutButton);
-
+		*/
         // 2. FIXED CLIPPING: Inward margins expanded from 25.0f to 35.0f to wrap inside the tray borders beautifully!
         // Row 1: Shifted lower to match the expanded tray offset (Y: 135)
         BRect checkboxRect(35.0f, 135.0f, frame.Width() - 35.0f, 150.0f);
@@ -1185,7 +1185,7 @@ public:
         GetMouse(&cursorPoint, &transitButtons, false);
         SetDrawingMode(B_OP_ALPHA);
 
-        // 3. Define the Interactive "Shutdown App" Button Metrics (COMPRESSED)
+        // 3. Define the Interactive "Shutdown hDesktop" Button Metrics (COMPRESSED)
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
         
         if (shutdownBtnRect.Contains(cursorPoint)) {
@@ -1204,8 +1204,37 @@ public:
         BString shutdownText("Shutdown hDesktop");
         float shutdownTextW = StringWidth(shutdownText.String());
         DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
+        
+        
 
-        // 4. BALANCED BACKING CONTAINER (FULLY EXTENDED BOTTOM STRIDE)
+        // 4. Define the "About hdesktop" Button Layout (Y: 82 to 106)
+        BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
+        
+        if (aboutBtnRect.Contains(cursorPoint)) {
+            // Hover state: Muted blue background (matching the 45 alpha layout) and bright blue text
+            SetHighColor(rgb_color{60, 90, 220, 45});
+            FillRect(aboutBtnRect);
+            SetHighColor(rgb_color{120, 150, 255, 255}); // Bright hover blue
+        } else {
+            // Normal state: Dark background and standard medium blue text
+            SetHighColor(rgb_color{35, 36, 42, 255}); 
+            FillRect(aboutBtnRect);
+            SetHighColor(rgb_color{90, 110, 210, 255});  // Standard medium blue
+        }
+        StrokeRect(aboutBtnRect);
+
+
+        
+        // 5. Draw the Text centered inside the button
+        SetFont(be_bold_font);
+        SetFontSize(12.0f);
+        BString aboutText("About hdesktop");
+        float aboutTextW = StringWidth(aboutText.String());
+        // Baseline calculated at Y: 98.0f to center 12px font inside 82-106 bounds
+        DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - aboutTextW) / 2.0f, 98.0f));
+  
+
+        // 6. BALANCED BACKING CONTAINER (FULLY EXTENDED BOTTOM STRIDE)
         // FIXED: Pushed bottom coordinate from 335.0f down to 355.0f so it 
         // completely wraps the "Small" and "Large" text labels perfectly!
         SetHighColor(rgb_color{30, 31, 37, 255}); 
@@ -1214,7 +1243,7 @@ public:
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
 
-        // 5. Standard Window Control "Close" button tracking metrics at footer
+        // 7. Standard Window Control "Close" button tracking metrics at footer
         // Shifted downward below the fully wrapped tray baseline (Y: 370 to 395)
         BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
                            (canvasWidth + 100.0f) / 2.0f, 395.0f);
@@ -1246,14 +1275,15 @@ public:
         float canvasWidth = Bounds().Width();
         
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
+        
+        // Match Layout Calibration: Y: 82 to 106 (Synchronized with your Draw location)
+        BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
 
         // MATCH LAYOUT CALIBRATION: Synchronized with your new button position (Y: 370 to 395)
         BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
                            (canvasWidth + 100.0f) / 2.0f, 395.0f);
 
-
-
-        
+        // Check if Shutdown button was clicked
         if (shutdownBtnRect.Contains(point)) {
             if (be_app) {
                 be_app->PostMessage(B_QUIT_REQUESTED);
@@ -1261,13 +1291,27 @@ public:
             return;
         }
 
+        // Check if About button was clicked
+        if (aboutBtnRect.Contains(point)) {
+            if (Window()) {
+                // Posts the 'abou' message back to this view's handler to pop the window open
+                Window()->PostMessage('abou', this);
+            }
+            return;
+        }
+
+        // Check if Close button was clicked
         if (closeBtnRect.Contains(point)) {
             if (Window()) {
                 Window()->Quit(); 
             }
             return;
         }
+        
+        // Pass unhandled clicks down to the base class
+        BView::MouseDown(point);
     }
+
 
 
 
@@ -1280,7 +1324,7 @@ public:
         fTextOverlaysCheckbox->SetTarget(this);
         fAlphaSlider->SetTarget(this); 
         fIconSizeSlider->SetTarget(this); 
-        fAboutButton->SetTarget(this); 
+       // fAboutButton->SetTarget(this); 
     }
 
     virtual void MessageReceived(BMessage* message) {
