@@ -96,7 +96,6 @@ rgb_color GetLiveSystemBackgroundColor() {
     if (settingsMsg.Unflatten(&file) != B_OK) return color;
 
     int32 packedColorValue = 0;
-    // Keep targeting "color2" since you confirmed color1/2/3 shift with your panel preferences!
     if (settingsMsg.FindInt32("color2", &packedColorValue) == B_OK) {
         
         // CORRECTED BYTE OFFSET SHIFTS FOR LITTLE-ENDIAN HAIKU MESSAGES:
@@ -124,12 +123,6 @@ enum {
     MSG_ICON_SIZE_CHANGED = 'isic'
 };
 
-// Unified configuration variable states
-extern bool autoHideEnabled;
-extern bool showSystemTray;
-extern bool dockAlwaysOnTop;
-extern bool fShowTitleOverlays;
-
 
 struct TrackedWindowInfo {
     BString title;
@@ -155,7 +148,7 @@ struct TrayItem {
     std::string name;
     int32 internalId;
     GLuint textureId;
-    float currentRenderX; // Cached during Pass 2 for Mouse Click math!
+    float currentRenderX; 
     float currentRenderWidth;
 };
 std::vector<TrayItem> fLiveTrayItems;
@@ -167,7 +160,7 @@ struct SystrayMenuArgs {
     int32 winY;
     int32 mouseX;
     int32 mouseY;
-    std::string itemName; // Safe isolated string copy
+    std::string itemName; 
 };
 
 struct CpuMenuArgs {
@@ -224,15 +217,12 @@ struct TaskbarItem {
 
 struct DesktopIconItem {
     std::string name;
-    HaikuTexture texture;       // Core 48x48 icon file asset
-    HaikuTexture textTexture;   // Dynamic text string label texture
+    HaikuTexture texture;       
+    HaikuTexture textTexture;   
     HaikuRect bounds;
-    HaikuRect textBounds;       // Layout boundaries for label text box below the icon
+    HaikuRect textBounds;      
     bool isFolder;
 };
-
-
-
 
 
 void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& outList) {
@@ -321,7 +311,6 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
         BString fallbackName = (hasAppInfo && info.ref.name) ? info.ref.name : "Application";
         if (hasAppInfo) {
             if (strcmp(info.signature, "application/x-vnd.Be-TRAK") == 0) fallbackName = "Tracker";
-            else if (strcmp(info.signature, "application/x-vnd.beunited.pe") == 0) fallbackName = "Pe";
         }
         outList.push_back(TrackedWindowInfo(fallbackName, 0, BRect()));
     }
@@ -392,8 +381,6 @@ public:
 protected:
     virtual void GetContentSize(float* width, float* height) override {
         BMenuItem::GetContentSize(width, height);
-        // FIXED: Expanded the total bounding box width parameter from 320px to 420px 
-        // to give your long memory telemetry strings plenty of breathing room!
         *width = 420.0f;
         *height = 18.0f;
     }
@@ -409,10 +396,9 @@ protected:
         menu->GetFontHeight(&fh);
         float fontBaseline = bounds.top + (itemHeight - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
 
-        // FIXED: Pushed columns significantly rightward to completely eliminate text overlapping!
         float nameColumnLeft = bounds.left + 5.0f;   
-        float textColumnLeft = bounds.left + 280.0f; // Shifted right by 100 pixels
-        float barColumnLeft  = bounds.left + 330.0f; // Shifted right by 100 pixels
+        float textColumnLeft = bounds.left + 280.0f; 
+        float barColumnLeft  = bounds.left + 330.0f;
         float barWidth = 80.0f;
 
         // Render the descriptive text label
@@ -439,11 +425,11 @@ protected:
 
         // Dynamic resource footprint styling thresholds
         if (fFillPercentage > 85.0) {
-            menu->SetHighColor(220, 20, 60);    // Crimson Red
+            menu->SetHighColor(50, 205, 50);    // Neon Green
         } else if (fFillPercentage > 60.0) {
-            menu->SetHighColor(255, 140, 0);   // Dark Orange
+            menu->SetHighColor(220, 20, 60);    // Crimson Red
         } else {
-            menu->SetHighColor(50, 205, 50);    // Neon Green matching your UI!
+            menu->SetHighColor(255, 140, 0);   // Dark Orange
         }
 
         if (fillCap.Width() > 0) {
@@ -535,7 +521,7 @@ protected:
         menu->FillRect(barTrack);
 
         if (fCpuPercent > 75.0) {
-            menu->SetHighColor(220, 20, 60);    // Crimson Red
+            menu->SetHighColor(50, 205, 50);    // Neon Green
         } else if (fCpuPercent > 35.0) {
             menu->SetHighColor(255, 140, 0);   // Dark Orange
         } else {
@@ -1101,14 +1087,8 @@ public:
 
     ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255});
-		/*
-        // 1. Define the "About hdesktop" Button Layout (Y: 82 to 106)
-        BRect aboutBtnRect(25.0f, 82.0f, frame.Width() - 25.0f, 106.0f);
-        fAboutButton = new BButton(aboutBtnRect, "about_btn", "About hdesktop", new BMessage('abou'));
-        AddChild(fAboutButton);
-		*/
-        // 2. FIXED CLIPPING: Inward margins expanded from 25.0f to 35.0f to wrap inside the tray borders beautifully!
-        // Row 1: Shifted lower to match the expanded tray offset (Y: 135)
+
+        // Row 1: 
         BRect checkboxRect(35.0f, 135.0f, frame.Width() - 35.0f, 150.0f);
         fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide", 
             new BMessage(MSG_AUTOHIDE_TOGGLED));
@@ -1203,10 +1183,8 @@ public:
         SetFontSize(12.0f);
         BString shutdownText("Shutdown hDesktop");
         float shutdownTextW = StringWidth(shutdownText.String());
-        DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
+        DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));    
         
-        
-
         // 4. Define the "About hdesktop" Button Layout (Y: 82 to 106)
         BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
         
@@ -1222,8 +1200,6 @@ public:
             SetHighColor(rgb_color{90, 110, 210, 255});  // Standard medium blue
         }
         StrokeRect(aboutBtnRect);
-
-
         
         // 5. Draw the Text centered inside the button
         SetFont(be_bold_font);
@@ -1235,8 +1211,6 @@ public:
   
 
         // 6. BALANCED BACKING CONTAINER (FULLY EXTENDED BOTTOM STRIDE)
-        // FIXED: Pushed bottom coordinate from 335.0f down to 355.0f so it 
-        // completely wraps the "Small" and "Large" text labels perfectly!
         SetHighColor(rgb_color{30, 31, 37, 255}); 
         BRect checkboxTrayRect(20.0f, 120.0f, canvasWidth - 20.0f, 355.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -1244,7 +1218,6 @@ public:
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
 
         // 7. Standard Window Control "Close" button tracking metrics at footer
-        // Shifted downward below the fully wrapped tray baseline (Y: 370 to 395)
         BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
                            (canvasWidth + 100.0f) / 2.0f, 395.0f);
         
@@ -1262,8 +1235,6 @@ public:
         BString btnText("close");
         float btnTextW = StringWidth(btnText.String());
         DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 387.0f));
-
-
     }
 
 
@@ -1324,7 +1295,6 @@ public:
         fTextOverlaysCheckbox->SetTarget(this);
         fAlphaSlider->SetTarget(this); 
         fIconSizeSlider->SetTarget(this); 
-       // fAboutButton->SetTarget(this); 
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -1417,9 +1387,6 @@ public:
 	    ConfigView* configView = new ConfigView(Bounds());
 	    AddChild(configView);
 	}
-
-
-
 
     virtual ~HaikuConfigWindow() {
         gActiveConfigInstance = nullptr; // Reset address register safely on destruction
@@ -1639,26 +1606,17 @@ public:
         BPoint titlePos((canvasWidth - titleWidth) / 2.0f, 30.0f);
         DrawString(titleStr.String(), titlePos);
 
-        // 2. Define Action Icon Boundary Metrics
-        // --- Exit button is now calculated dynamically from the right side ---
-        BRect configIconRect(canvasWidth - 62.0f, 45.0f, canvasWidth - 31.0f, 76.0f);
-        BRect exitIconRect(canvasWidth - 103.0f, 45.0f, canvasWidth - 72.0f, 76.0f); // 31px wide, placed left of config
-
         // Power buttons stay safely on the far left side
         BRect shutdownSysRect(30.0f, 45.0f, 110.0f, 76.0f); // Shifted over to start at X=30
         BRect rebootSysRect(120.0f, 45.0f, 215.0f, 76.0f);
-
-
 
         // Fetch active cursor coordinates for interface tracking
         BPoint cursorPoint;
         uint32 transitButtons;
         GetMouse(&cursorPoint, &transitButtons, false);
         SetDrawingMode(B_OP_ALPHA);
-
-
         
-        // --- ADDED: DRAW SHUTDOWN BUTTON ---
+        // --- DRAW SHUTDOWN BUTTON ---
         if (shutdownSysRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{220, 60, 60, 45}); // Soft red hover glow
             FillRect(shutdownSysRect);
@@ -1676,7 +1634,7 @@ public:
         float shutTextW = StringWidth(shutText.String());
         DrawString(shutText.String(), BPoint(shutdownSysRect.left + (shutdownSysRect.Width() - shutTextW) / 2.0f, 64.0f));
 
-        // --- ADDED: DRAW REBOOT BUTTON ---
+        // --- DRAW REBOOT BUTTON ---
         if (rebootSysRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{60, 140, 220, 45}); // Soft blue hover glow
             FillRect(rebootSysRect);
@@ -1691,30 +1649,6 @@ public:
         BString rebootText("Restart system");
         float rebootTextW = StringWidth(rebootText.String());
         DrawString(rebootText.String(), BPoint(rebootSysRect.left + (rebootSysRect.Width() - rebootTextW) / 2.0f, 64.0f));
-
-		/*
-        // Draw Config Gear Button (Right Side)
-        if (configIconRect.Contains(cursorPoint)) {
-            SetHighColor(rgb_color{100, 120, 160, 50}); // Slate hover glow
-            FillRect(configIconRect.InsetBySelf(-4, -4));
-            SetHighColor(rgb_color{150, 180, 230, 255});
-        } else {
-            SetHighColor(rgb_color{130, 140, 160, 200}); // Muted slate vector
-        }
-        StrokeRect(configIconRect);
-        StrokeEllipse(configIconRect.InsetByCopy(6, 6));
-      
-        // Draw Exit Button (Right Side)
-        if (exitIconRect.Contains(cursorPoint)) {
-            SetHighColor(rgb_color{230, 75, 75, 45}); // Soft red hover glow
-            FillRect(exitIconRect.InsetBySelf(-4, -4));
-            SetHighColor(rgb_color{255, 90, 90, 255});
-        } else {
-            SetHighColor(rgb_color{200, 70, 70, 220}); // Muted red vector
-        }
-        StrokeLine(BPoint(exitIconRect.left, exitIconRect.top), BPoint(exitIconRect.right, exitIconRect.bottom));
-        StrokeLine(BPoint(exitIconRect.left, exitIconRect.bottom), BPoint(exitIconRect.right, exitIconRect.top));
-	     */
 
         // 5. Draw Separator Line Accent
         SetHighColor(rgb_color{50, 52, 60, 255}); // Sleek dark baseline border
@@ -1923,7 +1857,7 @@ public:
         BRect rebootSysRect(120.0f, 45.0f, 190.0f, 76.0f);
 
 		
-        // --- ADDED: INTERCEPT SHUTDOWN SYSTEM TRACKER ---
+        // --- INTERCEPT SHUTDOWN SYSTEM TRACKER ---
         if (shutdownSysRect.Contains(point)) {
 
             std::system("shutdown &");
@@ -1934,7 +1868,7 @@ public:
             return;
         }
 
-        // --- ADDED: INTERCEPT REBOOT SYSTEM TRACKER ---
+        // --- INTERCEPT REBOOT SYSTEM TRACKER ---
         if (rebootSysRect.Contains(point)) {
             std::system("shutdown -r &");
             if (Window()) {
@@ -1944,29 +1878,6 @@ public:
             return;
         }
 		
-		
-		/*
-	    // 1. Process Exit Button Trigger Click
-        if (exitIconRect.Contains(point)) {
-
-            if (Window()) {
-                Window()->Quit(); 
-            }
-            return;
-        }
-        // 2. Process Configuration Button Trigger Click
-        if (configIconRect.Contains(point)) {           
-            if (gActiveConfigInstance == nullptr && Window()) {
-                // Instantiate the sub-panel, centering it smoothly within the app drawer's viewport bounds
-                gActiveConfigInstance = new HaikuConfigWindow(Window()->Frame());
-                gActiveConfigInstance->Show();
-            } else if (gActiveConfigInstance != nullptr) {
-                // If the panel is already open, pull it to the front instead of duplicating it
-                gActiveConfigInstance->Activate(true);
-            }
-            return;
-        }
-		*/
 
         // =========================================================================
         // 3. Process Standard Grid Icon Coordinates
