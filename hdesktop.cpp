@@ -2166,6 +2166,11 @@ public:
         fMouseX = 0;
         fMouseY = 0;
         
+        // Fix for 32bit
+        fCpuMenuIsActive = false;
+        //
+        
+        
         fTrashTooltipTexId = 0; 
 		fTrashTextGenerated = false;
 		fTrashTooltipW = 0;
@@ -2482,8 +2487,9 @@ public:
                             }
 
                             fTrackerMenuIsActive = true; 
-
+							//@here
                             int winX = 0, winY = 0;
+                            //int32 winX = 0, winY = 0;
                             SDL_Window* activeWin = SDL_GetMouseFocus();
                             if (activeWin) {
                                 SDL_GetWindowPosition(activeWin, &winX, &winY);
@@ -5958,7 +5964,7 @@ int main(int argc, char* argv[]) {
     // Update Chcker
    	{
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.34"; 
+    const char* localVersion = "v1.0.35"; 
     char updateCmd[1024];
     snprintf(updateCmd, sizeof(updateCmd),
     	#ifndef IS_HAIKU_32BIT
