@@ -1991,7 +1991,7 @@ class HaikuAppDrawerWindow : public BWindow {
 private:
     BMessageRunner* fHoverTicker;
     bool            fMouseHasEntered; // Safety check flag
-
+	
 public:
     HaikuAppDrawerWindow(float screenH)
         : BWindow(BRect(0, 0, 100, 100), "App Dashboard Menu",
@@ -2024,6 +2024,7 @@ public:
         fHoverTicker = new BMessageRunner(BMessenger(this), &tickMessage, 100000);
     }
     
+       
     virtual ~HaikuAppDrawerWindow() {
         delete fHoverTicker;
         gActiveDrawerInstance = nullptr;
@@ -2662,7 +2663,7 @@ public:
         // FIXED SIZING PIPELINE: Replaced the hardcoded '48.0f' float limits completely 
         // with your live fBaseIconSize configuration setting variable!
         float baseSize = fBaseIconSize;
-        float padding  = 16.0f;
+        float padding  = 12.0f;
         
         size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
@@ -3973,7 +3974,7 @@ void RenderFrame(float yOffset) {
         // FIXED SIZING PIPELINE: Replaced the hardcoded '48.0f' float limits completely 
         // with your live fBaseIconSize configuration setting variable!
         float baseSize = fBaseIconSize;
-        float padding  = 16.0f;
+        float padding  = 12.0f;
         
         size_t baselineLaunchersCount = fDesktopItems.size() + 1; 
 
@@ -5557,42 +5558,51 @@ public:
 
 void SaveConfiguration() {
     BPath path;
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
-        path.Append("hdesktop_settings");
-        
-        BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-        BMessage settings;
-        
-        // 1. Pack existing settings
-        settings.AddBool("auto_hide",     autoHideEnabled);
-        settings.AddBool("sys_tray",      showSystemTray);
-        settings.AddBool("auto_raise",    dockAlwaysOnTop);
-        settings.AddBool("text_overlays", fShowTitleOverlays);
-        settings.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
-        settings.AddFloat(kSettingsAlphaKey, fDockAlpha);
-        // 2. Pack all live favorites keys sequentially into the same field name
-        std::set<std::string>::iterator it;
-        for (it = gFavoritePaths.begin(); it != gFavoritePaths.end(); ++it) {
-            settings.AddString("favorite_apps", it->c_str());
-        }
-        
-        settings.Flatten(&file); 
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
+    path.Append("hdesktop_settings");
+    
+    BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+    if (file.InitCheck() != B_OK) return;
+
+    BMessage settings;
+    
+    // 1. Use SetBool/SetFloat instead of AddBool/AddFloat to overwrite old values
+    settings.SetBool("auto_hide",     autoHideEnabled);
+    settings.SetBool("sys_tray",      showSystemTray);
+    settings.SetBool("auto_raise",    dockAlwaysOnTop);
+    settings.SetBool("text_overlays", fShowTitleOverlays);
+    settings.SetFloat(kSettingsIconSizeKey, fBaseIconSize);
+    settings.SetFloat(kSettingsAlphaKey, fDockAlpha);
+    
+    // 2. Clear out any previous favorite apps array entries before rewriting
+    settings.RemoveName("favorite_apps");
+    
+    // 3. Modern C++ range-based loop (much cleaner than explicit iterators)
+    for (const auto& favPath : gFavoritePaths) {
+        settings.AddString("favorite_apps", favPath.c_str());
     }
+    
+    settings.Flatten(&file); 
 }
 
 
 
+
 void LoadConfiguration() {
+    // 1. Set all defaults upfront
+    fDockAlpha = 0.50f;
+    fBaseIconSize = 48.0f; 
+    autoHideEnabled = false;
+    showSystemTray = false;
+    dockAlwaysOnTop = false;
+    fShowTitleOverlays = true;
+
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
     path.Append("hdesktop_settings");
 
     BFile file(path.Path(), B_READ_ONLY);
-    if (file.InitCheck() != B_OK) {
-        fDockAlpha = 0.50f;
-        fBaseIconSize = 48.0f; // Safe fallback initial fallback default
-        return;
-    }
+    if (file.InitCheck() != B_OK) return; // Safely returns with defaults intact
 
     BMessage settings;
     if (settings.Unflatten(&file) == B_OK) {
@@ -5602,24 +5612,21 @@ void LoadConfiguration() {
         settings.FindBool("text_overlays", &fShowTitleOverlays);
         settings.FindFloat(kSettingsAlphaKey, &fDockAlpha);
         
-        // NEW: Unpack icon size safely. Fall back to 48.0f if missing
-        if (settings.FindFloat(kSettingsIconSizeKey, &fBaseIconSize) != B_OK) {
-            fBaseIconSize = 48.0f;           
-         
-        }
+        // No 'if' check or duplicate fallback needed anymore
+        settings.FindFloat(kSettingsIconSizeKey, &fBaseIconSize); 
         
-         // Recover the favorites string index array
-         const char* favPath = nullptr;
-         int32 i = 0;
-         // Loops through every entry inside the key array automatically
-         while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
-             if (favPath != nullptr) {
-                 gFavoritePaths.insert(favPath);
-             }
-           i++;
+        // Recover the favorites string index array
+        const char* favPath = nullptr;
+        int32 i = 0;
+        while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
+            if (favPath != nullptr) {
+                gFavoritePaths.insert(favPath);
+            }
+            i++;
         }     
     }
 }
+
 
 
 
