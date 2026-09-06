@@ -35,6 +35,7 @@
 #include <MenuItem.h>
 #include <Message.h>
 #include <Messenger.h>
+#include <MenuField.h>
 #include <Node.h>
 #include <NodeInfo.h>
 #include <NodeMonitor.h>
@@ -65,7 +66,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.37"
+#define APP_LOCAL_VERSION "v1.0.38"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -76,6 +77,11 @@ bool autoHideEnabled;
 bool showSystemTray; 
 bool dockAlwaysOnTop;
 bool fShowTitleOverlays;
+bool fEffectBounceEnabled = true;
+bool fEffectSpinEnabled = false;
+bool fEffectIllusionEnabled = false;
+bool fEffectWobbleEnabled = false;
+bool fEffectExplodeEnabled = false;
 void SaveConfiguration(); 
 float fBaseIconSize = 48.0f;
 float maxDockHeight = 160.0f;
@@ -121,8 +127,13 @@ enum {
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
     MSG_AUTORAISE_TOGGLED  = 'srdt',
     MSG_ALPHA_SLIDER_CHANGED = 'alsc',
-    MSG_ICON_SIZE_CHANGED = 'isic'
-};
+    MSG_ICON_SIZE_CHANGED = 'isic',
+    MSG_EFFECT_BOUNCE_TOGGLED = 'efbn',
+    MSG_EFFECT_SPIN_TOGGLED = 'efsp',
+    MSG_EFFECT_ILLUSION_TOGGLED = 'efil',
+    MSG_EFFECT_WOBBLE_TOGGLED = 'efwb',
+    MSG_EFFECT_EXPLODE_TOGGLED = 'efex'
+};;
 
 
 struct TrackedWindowInfo {
@@ -1082,6 +1093,7 @@ private:
     BCheckBox* fSystemTrayCheckbox;
     BCheckBox* fAutoRaiseCheckbox;
     BCheckBox* fTextOverlaysCheckbox;
+    BMenuField* fEffectsMenuField;
     BSlider*   fAlphaSlider; 
     BSlider*   fIconSizeSlider; 
     BButton*   fAboutButton; 
@@ -1122,9 +1134,38 @@ public:
         fTextOverlaysCheckbox->SetHighColor(rgb_color{220, 225, 235, 255}); 
         fTextOverlaysCheckbox->SetValue(fShowTitleOverlays ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysCheckbox);
+
+        // Consolidated Effects Dropdown Menu (Replacing the 5 individual effect checkboxes)
+        BPopUpMenu* effectsPopup = new BPopUpMenu("Effects");
+        
+        BMenuItem* bounceItem = new BMenuItem("Bounce", new BMessage(MSG_EFFECT_BOUNCE_TOGGLED));
+        bounceItem->SetMarked(fEffectBounceEnabled);
+        effectsPopup->AddItem(bounceItem);
+
+        BMenuItem* spinItem = new BMenuItem("Spin", new BMessage(MSG_EFFECT_SPIN_TOGGLED));
+        spinItem->SetMarked(fEffectSpinEnabled);
+        effectsPopup->AddItem(spinItem);
+
+        BMenuItem* illusionItem = new BMenuItem("Illusion", new BMessage(MSG_EFFECT_ILLUSION_TOGGLED));
+        illusionItem->SetMarked(fEffectIllusionEnabled);
+        effectsPopup->AddItem(illusionItem);
+
+        BMenuItem* wobbleItem = new BMenuItem("Wobble", new BMessage(MSG_EFFECT_WOBBLE_TOGGLED));
+        wobbleItem->SetMarked(fEffectWobbleEnabled);
+        effectsPopup->AddItem(wobbleItem);
+
+        BMenuItem* explodeItem = new BMenuItem("Explode", new BMessage(MSG_EFFECT_EXPLODE_TOGGLED));
+        explodeItem->SetMarked(fEffectExplodeEnabled);
+        effectsPopup->AddItem(explodeItem);
+
+		BRect effectsMenuRect(35.0f, 220.0f, frame.Width() - 35.0f, 250.0f);
+		fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", "Effects:", effectsPopup);
+		fEffectsMenuField->SetHighColor(rgb_color{220, 225, 235, 255});
+		fEffectsMenuField->SetDivider(60.0f); // Explicitly allocate space for the "Effects:" label
+		AddChild(fEffectsMenuField);
         
         // Transparency Slider Row
-        BRect sliderRect(35.0f, 225.0f, frame.Width() - 35.0f, 265.0f);
+        BRect sliderRect(35.0f, 270.0f, frame.Width() - 35.0f, 310.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1133,7 +1174,7 @@ public:
         AddChild(fAlphaSlider);
 
         // Icon Size Slider Row
-        BRect sizeSliderRect(35.0f, 285.0f, frame.Width() - 35.0f, 325.0f);
+        BRect sizeSliderRect(35.0f, 330.0f, frame.Width() - 35.0f, 370.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1213,16 +1254,16 @@ public:
         DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - aboutTextW) / 2.0f, 98.0f));
   
 
-        // 6. BALANCED BACKING CONTAINER (FULLY EXTENDED BOTTOM STRIDE)
+		// 6. BALANCED BACKING CONTAINER (REFINED HEIGHT)
         SetHighColor(rgb_color{30, 31, 37, 255}); 
-        BRect checkboxTrayRect(20.0f, 120.0f, canvasWidth - 20.0f, 355.0f);
+        BRect checkboxTrayRect(20.0f, 120.0f, canvasWidth - 20.0f, 390.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
 
-        // 7. Standard Window Control "Close" button tracking metrics at footer
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 395.0f);
+		// 7. Standard Window Control "Close" button tracking metrics at footer
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 405.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 430.0f);
         
         if (closeBtnRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{100, 120, 160, 45});
@@ -1235,9 +1276,14 @@ public:
         }
         StrokeRect(closeBtnRect);
         
-        BString btnText("close");
+        BString btnText("Close");
         float btnTextW = StringWidth(btnText.String());
-        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, 387.0f));
+        
+        font_height fh;
+        GetFontHeight(&fh);
+        float textY = closeBtnRect.top + (closeBtnRect.Height() + fh.ascent - fh.descent) / 2.0f;
+        
+        DrawString(btnText.String(), BPoint((canvasWidth - btnTextW) / 2.0f, textY));
     }
 
 
@@ -1245,17 +1291,15 @@ public:
         Invalidate(); 
     }
 
-    virtual void MouseDown(BPoint point) {
+	virtual void MouseDown(BPoint point) {
         float canvasWidth = Bounds().Width();
         
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
-        
-        // Match Layout Calibration: Y: 82 to 106 (Synchronized with your Draw location)
         BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
 
-        // MATCH LAYOUT CALIBRATION: Synchronized with your new button position (Y: 370 to 395)
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 370.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 395.0f);
+        // Updated to match the Draw() position (Y: 405 to 430)
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 405.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, 430.0f);
 
         // Check if Shutdown button was clicked
         if (shutdownBtnRect.Contains(point)) {
@@ -1268,7 +1312,6 @@ public:
         // Check if About button was clicked
         if (aboutBtnRect.Contains(point)) {
             if (Window()) {
-                // Posts the 'abou' message back to this view's handler to pop the window open
                 Window()->PostMessage('abou', this);
             }
             return;
@@ -1282,7 +1325,6 @@ public:
             return;
         }
         
-        // Pass unhandled clicks down to the base class
         BView::MouseDown(point);
     }
 
@@ -1290,12 +1332,13 @@ public:
 
 
     
-    virtual void AttachedToWindow() {
+	virtual void AttachedToWindow() {
         BView::AttachedToWindow();
         fAutoHideCheckbox->SetTarget(this);
         fSystemTrayCheckbox->SetTarget(this);
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
+        fEffectsMenuField->Menu()->SetTargetForItems(this);
         fAlphaSlider->SetTarget(this); 
         fIconSizeSlider->SetTarget(this); 
     }
@@ -1327,6 +1370,116 @@ public:
                 Invalidate();
                 break;
             }
+
+			case MSG_EFFECT_BOUNCE_TOGGLED: {
+                fEffectBounceEnabled = !fEffectBounceEnabled;
+                if (fEffectBounceEnabled) {
+                    fEffectSpinEnabled = false;
+                    fEffectIllusionEnabled = false;
+                    fEffectWobbleEnabled = false;
+                    fEffectExplodeEnabled = false;
+                }
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectBounceEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_SPIN_TOGGLED))
+                    item->SetMarked(fEffectSpinEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectIllusionEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectWobbleEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_SPIN_TOGGLED: {
+                fEffectSpinEnabled = !fEffectSpinEnabled;
+                if (fEffectSpinEnabled) {
+                    fEffectBounceEnabled = false;
+                    fEffectIllusionEnabled = false;
+                    fEffectWobbleEnabled = false;
+                    fEffectExplodeEnabled = false;
+                }
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_SPIN_TOGGLED))
+                    item->SetMarked(fEffectSpinEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectBounceEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectIllusionEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectWobbleEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_ILLUSION_TOGGLED: {
+                fEffectIllusionEnabled = !fEffectIllusionEnabled;
+                if (fEffectIllusionEnabled) {
+                    fEffectBounceEnabled = false;
+                    fEffectSpinEnabled = false;
+                    fEffectWobbleEnabled = false;
+                    fEffectExplodeEnabled = false;
+                }
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectIllusionEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectBounceEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_SPIN_TOGGLED))
+                    item->SetMarked(fEffectSpinEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectWobbleEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_WOBBLE_TOGGLED: {
+                fEffectWobbleEnabled = !fEffectWobbleEnabled;
+                if (fEffectWobbleEnabled) {
+                    fEffectBounceEnabled = false;
+                    fEffectSpinEnabled = false;
+                    fEffectIllusionEnabled = false;
+                    fEffectExplodeEnabled = false;
+                }
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectWobbleEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectBounceEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_SPIN_TOGGLED))
+                    item->SetMarked(fEffectSpinEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectIllusionEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_EXPLODE_TOGGLED: {
+                fEffectExplodeEnabled = !fEffectExplodeEnabled;
+                if (fEffectExplodeEnabled) {
+                    fEffectBounceEnabled = false;
+                    fEffectSpinEnabled = false;
+                    fEffectIllusionEnabled = false;
+                    fEffectWobbleEnabled = false;
+                }
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectExplodeEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectBounceEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_SPIN_TOGGLED))
+                    item->SetMarked(fEffectSpinEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectIllusionEnabled);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectWobbleEnabled);
+                SaveConfiguration();
+                break;
+            }
             
              case MSG_ALPHA_SLIDER_CHANGED: {
                 fDockAlpha = fAlphaSlider->Value() / 100.0f;
@@ -1334,7 +1487,6 @@ public:
                 Invalidate();
                 break;
             }
-            
             
             case MSG_ICON_SIZE_CHANGED: {
                 fBaseIconSize = static_cast<float>(fIconSizeSlider->Value());
@@ -1355,8 +1507,6 @@ public:
 			    break;
 			}
 
-
-            
             default:
                 BView::MessageReceived(message);
                 break;
@@ -1374,13 +1524,13 @@ public:
 class HaikuConfigWindow : public BWindow {
 public:
 	HaikuConfigWindow(BRect centralAnchor)
-	    : BWindow(BRect(0, 0, 560, 450), "hdesktop Configuration",
+	    : BWindow(BRect(0, 0, 560, 540), "hdesktop Configuration",
 	              B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
 	              B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 	    
-	    ResizeTo(560.0f, 450.0f);
+	    ResizeTo(560.0f, 540.0f);
 	    float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-	    float targetY = centralAnchor.top + (centralAnchor.Height() - 450.0f) / 2.0f;
+	    float targetY = centralAnchor.top + (centralAnchor.Height() - 540.0f) / 2.0f;
 	    MoveTo(targetX, targetY);
 	    
 	    ConfigView* configView = new ConfigView(Bounds());
@@ -4454,26 +4604,98 @@ void RenderFrame(float yOffset) {
                     
                     float bounceOffset = 0.0f;
                     float popScale = 1.0f;
-                    
+                    float rotationAngle = 0.0f;
+                    float scaleX = 1.0f;
+                    float scaleY = 1.0f;
+            		float animProgress = 0.0f;
+            		bool isExploding = false;   
+            		                  
                     if (!fSpinningAppName.empty() && fSpinningAppName == "LeafMenu" && fSpinAnimationStartTime > 0) {
                         uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-                        if (elapsedTicks < kSpinDurationMs) {
-                            float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
-                            bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
-                            popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+if (elapsedTicks < kSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                            
+                            if (fEffectSpinEnabled) {
+                                rotationAngle = animProgress * 360.0f;
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectIllusionEnabled) {
+                                scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
+                            } else if (fEffectWobbleEnabled) {
+                                rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectExplodeEnabled) {
+                                isExploding = true;
+                            } else {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            }
                         }
                     }
-                    
-                    glTranslatef(centerX, centerY - bounceOffset, 0.0f);
-                    glScalef(popScale, popScale, 1.0f);
-                    
+				
+					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+                    if (rotationAngle != 0.0f) {
+                        glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
+                    }
+                    glScalef(scaleX, scaleY, 1.0f);
+                    if (isExploding && animProgress > 0.0f) {
+                        // Shatter into a 5x5 grid of flying pieces with gravity drop
+                        int cols = 5;
+                        int rows = 5;
+                        float subSize = size / cols;
+                        
+                        glBegin(GL_QUADS);
+                        for (int y = 0; y < rows; ++y) {
+                            for (int x = 0; x < cols; ++x) {
+                                float relX = (x + 0.5f) / cols - 0.5f;
+                                float relY = (y + 0.5f) / rows - 0.5f;
+                                
+                                float scatterDist = animProgress * 140.0f;
+                                float angle = static_cast<float>(x * 37 + y * 59);
+                                float dirX = relX + std::cos(angle) * 0.3f;
+                                float dirY = relY + std::sin(angle) * 0.3f;
+                                
+                                float len = std::sqrt(dirX * dirX + dirY * dirY);
+                                if (len > 0.001f) {
+                                    dirX /= len;
+                                    dirY /= len;
+                                }
+                                
+                                float offsetX = dirX * scatterDist * (0.8f + (x % 2) * 0.4f);
+                                float offsetY = dirY * scatterDist * (0.8f + (y % 2) * 0.4f) + (animProgress * animProgress * 50.0f); // Gravity
+                                
+								float pLeft = -size/2.0f + x * subSize + offsetX;
+                                float pRight = pLeft + subSize;
+                                float pTop = -size/2.0f + y * subSize + offsetY;
+                                float pBottom = pTop + subSize;
+                                
+                                float u1 = static_cast<float>(x) / cols;
+                                float u2 = static_cast<float>(x + 1) / cols;
+                                float v1 = static_cast<float>(y) / rows;
+                                float v2 = static_cast<float>(y + 1) / rows;
+                                
+                                glTexCoord2f(u1, v1); glVertex2f(pLeft, pTop);
+                                glTexCoord2f(u2, v1); glVertex2f(pRight, pTop);
+                                glTexCoord2f(u2, v2); glVertex2f(pRight, pBottom);
+                                glTexCoord2f(u1, v2); glVertex2f(pLeft, pBottom);
+                            }
+                        }
+                        glEnd();
+                    } else {
                     glBegin(GL_QUADS);
                         glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
                         glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
                         glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
                         glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
                     glEnd();
-                    
+                    }
                     glPopMatrix();
                     // ----------------------------------------------
                     
@@ -4491,26 +4713,97 @@ void RenderFrame(float yOffset) {
                     
                     float bounceOffset = 0.0f;
                     float popScale = 1.0f;
+                    float rotationAngle = 0.0f;
+                    float scaleX = 1.0f;
+                    float scaleY = 1.0f;
+            		float animProgress = 0.0f;
+            		bool isExploding = false;  
                     
                     if (!fSpinningAppName.empty() && item.name == fSpinningAppName && fSpinAnimationStartTime > 0) {
                         uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-                        if (elapsedTicks < kSpinDurationMs) {
-                            float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
-                            bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
-                            popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+						if (elapsedTicks < kSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                            
+                            if (fEffectSpinEnabled) {
+                                rotationAngle = animProgress * 360.0f;
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectIllusionEnabled) {
+                                scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
+                            } else if (fEffectWobbleEnabled) {
+                                rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectExplodeEnabled) {
+                                isExploding = true;
+                            } else {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            }
                         }
                     }
-                    
-                    glTranslatef(centerX, centerY - bounceOffset, 0.0f);
-                    glScalef(popScale, popScale, 1.0f);
-                    
+					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+                    if (rotationAngle != 0.0f) {
+                        glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
+                    }
+                    glScalef(scaleX, scaleY, 1.0f);
+                    if (isExploding && animProgress > 0.0f) {
+                        // Shatter into a 5x5 grid of flying pieces with gravity drop
+                        int cols = 5;
+                        int rows = 5;
+                        float subSize = size / cols;
+                        
+                        glBegin(GL_QUADS);
+                        for (int y = 0; y < rows; ++y) {
+                            for (int x = 0; x < cols; ++x) {
+                                float relX = (x + 0.5f) / cols - 0.5f;
+                                float relY = (y + 0.5f) / rows - 0.5f;
+                                
+                                float scatterDist = animProgress * 140.0f;
+                                float angle = static_cast<float>(x * 37 + y * 59);
+                                float dirX = relX + std::cos(angle) * 0.3f;
+                                float dirY = relY + std::sin(angle) * 0.3f;
+                                
+                                float len = std::sqrt(dirX * dirX + dirY * dirY);
+                                if (len > 0.001f) {
+                                    dirX /= len;
+                                    dirY /= len;
+                                }
+                                
+                                float offsetX = dirX * scatterDist * (0.8f + (x % 2) * 0.4f);
+                                float offsetY = dirY * scatterDist * (0.8f + (y % 2) * 0.4f) + (animProgress * animProgress * 50.0f); // Gravity
+                                
+								float pLeft = -size/2.0f + x * subSize + offsetX;
+                                float pRight = pLeft + subSize;
+                                float pTop = -size/2.0f + y * subSize + offsetY;
+                                float pBottom = pTop + subSize;
+                                
+                                float u1 = static_cast<float>(x) / cols;
+                                float u2 = static_cast<float>(x + 1) / cols;
+                                float v1 = static_cast<float>(y) / rows;
+                                float v2 = static_cast<float>(y + 1) / rows;
+                                
+                                glTexCoord2f(u1, v1); glVertex2f(pLeft, pTop);
+                                glTexCoord2f(u2, v1); glVertex2f(pRight, pTop);
+                                glTexCoord2f(u2, v2); glVertex2f(pRight, pBottom);
+                                glTexCoord2f(u1, v2); glVertex2f(pLeft, pBottom);
+                            }
+                        }
+                        glEnd();
+                    } else {
                     glBegin(GL_QUADS);
                         glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
                         glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
                         glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
                         glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
                     glEnd();
-                    
+                    }
                     glPopMatrix();
                     //
                     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
@@ -4655,28 +4948,99 @@ void RenderFrame(float yOffset) {
 				float centerX = iconBounds.left + (size / 2.0f);
 				float centerY = iconBounds.top + (size / 2.0f);
 				
-				float bounceOffset = 0.0f;
-				float popScale = 1.0f;
-				
+                float bounceOffset = 0.0f;
+                float popScale = 1.0f;
+                float rotationAngle = 0.0f;
+                float scaleX = 1.0f;
+                float scaleY = 1.0f;
+            	float animProgress = 0.0f;
+            	bool isExploding = false;  
+                
 				if (fSpinningAppTeam != -1 && activeTaskWin.teamId == fSpinningAppTeam && fSpinAnimationStartTime > 0) {
 				    uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-				    if (elapsedTicks < kSpinDurationMs) {
-				        float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
-				        bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
-				        popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
-				    }
-				}
-				
-				glTranslatef(centerX, centerY - bounceOffset, 0.0f);
-				glScalef(popScale, popScale, 1.0f);
-				
+					if (elapsedTicks < kSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                            
+                            if (fEffectSpinEnabled) {
+                                rotationAngle = animProgress * 360.0f;
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectIllusionEnabled) {
+                                scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
+                            } else if (fEffectWobbleEnabled) {
+                                rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectExplodeEnabled) {
+                                isExploding = true;
+                            } else {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            }
+                        }
+                    }
+					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+                    if (rotationAngle != 0.0f) {
+                        glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
+                    }
+                    glScalef(scaleX, scaleY, 1.0f);
+				if (isExploding && animProgress > 0.0f) {
+                        // Shatter into a 5x5 grid of flying pieces with gravity drop
+                        int cols = 5;
+                        int rows = 5;
+                        float subSize = size / cols;
+                        
+                        glBegin(GL_QUADS);
+                        for (int y = 0; y < rows; ++y) {
+                            for (int x = 0; x < cols; ++x) {
+                                float relX = (x + 0.5f) / cols - 0.5f;
+                                float relY = (y + 0.5f) / rows - 0.5f;
+                                
+                                float scatterDist = animProgress * 140.0f;
+                                float angle = static_cast<float>(x * 37 + y * 59);
+                                float dirX = relX + std::cos(angle) * 0.3f;
+                                float dirY = relY + std::sin(angle) * 0.3f;
+                                
+                                float len = std::sqrt(dirX * dirX + dirY * dirY);
+                                if (len > 0.001f) {
+                                    dirX /= len;
+                                    dirY /= len;
+                                }
+                                
+                                float offsetX = dirX * scatterDist * (0.8f + (x % 2) * 0.4f);
+                                float offsetY = dirY * scatterDist * (0.8f + (y % 2) * 0.4f) + (animProgress * animProgress * 50.0f); // Gravity
+                                
+								float pLeft = -size/2.0f + x * subSize + offsetX;
+                                float pRight = pLeft + subSize;
+                                float pTop = -size/2.0f + y * subSize + offsetY;
+                                float pBottom = pTop + subSize;
+                                
+                                float u1 = static_cast<float>(x) / cols;
+                                float u2 = static_cast<float>(x + 1) / cols;
+                                float v1 = static_cast<float>(y) / rows;
+                                float v2 = static_cast<float>(y + 1) / rows;
+                                
+                                glTexCoord2f(u1, v1); glVertex2f(pLeft, pTop);
+                                glTexCoord2f(u2, v1); glVertex2f(pRight, pTop);
+                                glTexCoord2f(u2, v2); glVertex2f(pRight, pBottom);
+                                glTexCoord2f(u1, v2); glVertex2f(pLeft, pBottom);
+                            }
+                        }
+                        glEnd();
+                    } else {
 				glBegin(GL_QUADS);
 				    glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
 				    glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
 				    glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
 				    glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
 				glEnd();
-				
+                    }
 				glPopMatrix();
 				//	
 		        glBindTexture(GL_TEXTURE_2D, 0); 
@@ -4792,26 +5156,97 @@ void RenderFrame(float yOffset) {
             
             float bounceOffset = 0.0f;
             float popScale = 1.0f;
-            
+            float rotationAngle = 0.0f;
+            float scaleX = 1.0f;
+            float scaleY = 1.0f;
+            float animProgress = 0.0f;
+            bool isExploding = false;  
+                  
             if (!fSpinningAppName.empty() && fSpinningAppName == "TrashBin" && fSpinAnimationStartTime > 0) {
                 uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-                if (elapsedTicks < kSpinDurationMs) {
-                    float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
-                    bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
-                    popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
-                }
-            }
-            
-            glTranslatef(centerX, centerY - bounceOffset, 0.0f);
-            glScalef(popScale, popScale, 1.0f);
-
+					if (elapsedTicks < kSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                            
+                            if (fEffectSpinEnabled) {
+                                rotationAngle = animProgress * 360.0f;
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectIllusionEnabled) {
+                                scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                                rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
+                            } else if (fEffectWobbleEnabled) {
+                                rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectExplodeEnabled) {
+                                isExploding = true;
+                            } else {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            }
+                        }
+                    }
+					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+                    if (rotationAngle != 0.0f) {
+                        glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
+                    }
+                    glScalef(scaleX, scaleY, 1.0f);
+					if (isExploding && animProgress > 0.0f) {
+                        // Shatter into a 5x5 grid of flying pieces with gravity drop
+                        int cols = 5;
+                        int rows = 5;
+                        float subSize = renderingTrashSize / cols;
+                        
+                        glBegin(GL_QUADS);
+                        for (int y = 0; y < rows; ++y) {
+                            for (int x = 0; x < cols; ++x) {
+                                float relX = (x + 0.5f) / cols - 0.5f;
+                                float relY = (y + 0.5f) / rows - 0.5f;
+                                
+                                float scatterDist = animProgress * 140.0f;
+                                float angle = static_cast<float>(x * 37 + y * 59);
+                                float dirX = relX + std::cos(angle) * 0.3f;
+                                float dirY = relY + std::sin(angle) * 0.3f;
+                                
+                                float len = std::sqrt(dirX * dirX + dirY * dirY);
+                                if (len > 0.001f) {
+                                    dirX /= len;
+                                    dirY /= len;
+                                }
+                                
+                                float offsetX = dirX * scatterDist * (0.8f + (x % 2) * 0.4f);
+                                float offsetY = dirY * scatterDist * (0.8f + (y % 2) * 0.4f) + (animProgress * animProgress * 50.0f); // Gravity
+                                
+                                float pLeft = -renderingTrashSize/2.0f + x * subSize + offsetX;
+                                float pRight = pLeft + subSize;
+                                float pTop = -renderingTrashSize/2.0f + y * subSize + offsetY;
+                                float pBottom = pTop + subSize;
+                                
+                                float u1 = static_cast<float>(x) / cols;
+                                float u2 = static_cast<float>(x + 1) / cols;
+                                float v1 = static_cast<float>(y) / rows;
+                                float v2 = static_cast<float>(y + 1) / rows;
+                                
+                                glTexCoord2f(u1, v1); glVertex2f(pLeft, pTop);
+                                glTexCoord2f(u2, v1); glVertex2f(pRight, pTop);
+                                glTexCoord2f(u2, v2); glVertex2f(pRight, pBottom);
+                                glTexCoord2f(u1, v2); glVertex2f(pLeft, pBottom);
+                            }
+                        }
+                        glEnd();
+                    } else {
             glBegin(GL_QUADS);
                 glTexCoord2f(0.0f, 0.0f); glVertex2f(-renderingTrashSize/2.0f, -renderingTrashSize/2.0f);
                 glTexCoord2f(1.0f, 0.0f); glVertex2f(renderingTrashSize/2.0f, -renderingTrashSize/2.0f);
                 glTexCoord2f(1.0f, 1.0f); glVertex2f(renderingTrashSize/2.0f, renderingTrashSize/2.0f);
                 glTexCoord2f(0.0f, 1.0f); glVertex2f(-renderingTrashSize/2.0f, renderingTrashSize/2.0f);
             glEnd();
-
+                    }
             glPopMatrix();
             // ----------------------------------------------
 
@@ -5798,18 +6233,19 @@ void SaveConfiguration() {
 
     BMessage settings;
     
-    // 1. Use SetBool/SetFloat instead of AddBool/AddFloat to overwrite old values
     settings.SetBool("auto_hide",     autoHideEnabled);
     settings.SetBool("sys_tray",      showSystemTray);
     settings.SetBool("auto_raise",    dockAlwaysOnTop);
     settings.SetBool("text_overlays", fShowTitleOverlays);
+    settings.SetBool("effect_bounce", fEffectBounceEnabled);
+    settings.SetBool("effect_spin",   fEffectSpinEnabled);
+    settings.SetBool("effect_illusion", fEffectIllusionEnabled);
+    settings.SetBool("effect_wobble", fEffectWobbleEnabled);
+    settings.SetBool("effect_explode", fEffectExplodeEnabled);
     settings.SetFloat(kSettingsIconSizeKey, fBaseIconSize);
     settings.SetFloat(kSettingsAlphaKey, fDockAlpha);
     
-    // 2. Clear out any previous favorite apps array entries before rewriting
     settings.RemoveName("favorite_apps");
-    
-    // 3. Modern C++ range-based loop (much cleaner than explicit iterators)
     for (const auto& favPath : gFavoritePaths) {
         settings.AddString("favorite_apps", favPath.c_str());
     }
@@ -5817,24 +6253,25 @@ void SaveConfiguration() {
     settings.Flatten(&file); 
 }
 
-
-
-
 void LoadConfiguration() {
-    // 1. Set all defaults upfront
     fDockAlpha = 0.50f;
     fBaseIconSize = 48.0f; 
     autoHideEnabled = false;
     showSystemTray = false;
     dockAlwaysOnTop = false;
     fShowTitleOverlays = true;
+    fEffectBounceEnabled = false;
+    fEffectSpinEnabled = false;
+    fEffectIllusionEnabled = false;
+    fEffectWobbleEnabled = false;
+    fEffectExplodeEnabled = false;
 
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
     path.Append("hdesktop_settings");
 
     BFile file(path.Path(), B_READ_ONLY);
-    if (file.InitCheck() != B_OK) return; // Safely returns with defaults intact
+    if (file.InitCheck() != B_OK) return;
 
     BMessage settings;
     if (settings.Unflatten(&file) == B_OK) {
@@ -5842,12 +6279,14 @@ void LoadConfiguration() {
         settings.FindBool("sys_tray", &showSystemTray);
         settings.FindBool("auto_raise", &dockAlwaysOnTop);
         settings.FindBool("text_overlays", &fShowTitleOverlays);
+        settings.FindBool("effect_bounce", &fEffectBounceEnabled);
+        settings.FindBool("effect_spin", &fEffectSpinEnabled);
+        settings.FindBool("effect_illusion", &fEffectIllusionEnabled);
+        settings.FindBool("effect_wobble", &fEffectWobbleEnabled);
+        settings.FindBool("effect_explode", &fEffectExplodeEnabled);
         settings.FindFloat(kSettingsAlphaKey, &fDockAlpha);
+        settings.FindFloat(kSettingsIconSizeKey, &fBaseIconSize);
         
-        // No 'if' check or duplicate fallback needed anymore
-        settings.FindFloat(kSettingsIconSizeKey, &fBaseIconSize); 
-        
-        // Recover the favorites string index array
         const char* favPath = nullptr;
         int32 i = 0;
         while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
