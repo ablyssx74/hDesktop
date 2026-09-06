@@ -65,7 +65,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-
+#define APP_LOCAL_VERSION "v1.0.36"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -82,6 +82,7 @@ float maxDockHeight = 160.0f;
 float fDockAlpha = 0.40f; 
 const char* const kSettingsIconSizeKey = "base_icon_size";
 const char* const kSettingsAlphaKey = "dock_alpha";
+
  
 
 
@@ -945,7 +946,14 @@ void SyncDynamicSystrayTextures() {
         const char* foundName = nullptr;
         if (deskbarControl.GetItemInfo(idProber, &foundName) == B_OK) {
             if (foundName != nullptr && strlen(foundName) > 0) {
-                activeSnapshot.push_back({std::string(foundName), idProber});
+                std::string itemNameStr(foundName);
+                
+                // --- FILTER OUT PROCESSCONTROLLER ---
+                if (itemNameStr == "ProcessController" || itemNameStr == "ProcessControllerView") {
+                    continue;
+                }
+
+                activeSnapshot.push_back({itemNameStr, idProber});
             }
         }
     }
@@ -982,16 +990,12 @@ void SyncDynamicSystrayTextures() {
             BString itemName(snap.first.c_str());
             BString signature = "application/x-vnd.Haiku-";
             
-            if (itemName == "ProcessControllerView" || itemName == "ProcessController") {
-                itemName = "ProcessController";
-                signature = "application/x-vnd.Haiku-ProcessController";
-            } else if (itemName == "MediaReplicant") {
+            if (itemName == "MediaReplicant") {
                 itemName = "Media"; 
                 signature = "application/x-vnd.Haiku-MediaPreferences";
             } else if (itemName == "NetworkStatus") {
                 signature = "application/x-vnd.Haiku-NetworkStatus";
             } else if (itemName == "SuperMusicTrayIcon") {
-                // Configured perfectly for your unique system music app environment layout
                 itemName = "HaikuSuperMusicThingy"; 
                 signature = "application/x-vnd.HaikuSuperMusicThingy"; 
             } else {
@@ -1071,7 +1075,6 @@ void SyncDynamicSystrayTextures() {
         }
     }
 }
-
 
 class ConfigView : public BView {
 private:
@@ -1340,21 +1343,17 @@ public:
                 break;
             }
             
-            case 'abou': {
-            	
-                BAlert* aboutAlert = new BAlert("About hdesktop",
-                    "hdesktop SDL Dock\n"
-                    "MIT License\n"
-                    "Version v1.0.34\n"
-                    "(c) 2026 ablyss\n\n"
-                    
-                    "Enjoy!\n\n"
-                    
-                    "",
-                    "Awesome!", nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
-                aboutAlert->Go(); 
-                break;
-            }
+           case 'abou': {
+			    BAlert* aboutAlert = new BAlert("About hdesktop",
+			        "hdesktop SDL Dock\n"
+			        "MIT License\n"
+			        "Version " APP_LOCAL_VERSION "\n"
+			        "(c) 2026 ablyss\n\n"
+			        "Enjoy!\n\n",
+			        "Awesome!", nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+			    aboutAlert->Go(); 
+			    break;
+			}
 
 
             
@@ -2487,7 +2486,6 @@ public:
                             }
 
                             fTrackerMenuIsActive = true; 
-							//@here
                             int winX = 0, winY = 0;
                             //int32 winX = 0, winY = 0;
                             SDL_Window* activeWin = SDL_GetMouseFocus();
@@ -2553,30 +2551,52 @@ public:
 										    } else if (threadArgs->itemName == "MediaReplicant") {
 										        localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
 										    } else if (threadArgs->itemName == "SuperMusicTrayIcon" || threadArgs->itemName == "HaikuSuperMusicThingy") {
-										        // --- MATCHING EXACT HAIKUSUPERMUSICTHINGY FourCC CONSTANTS ---
-										        localMenu->AddItem(new BMenuItem("Open Player", new BMessage('atry')));
-										        localMenu->AddItem(new BMenuItem("Play", new BMessage('play')));
+										        // --- MATCHING NATIVE HAIKUSUPERMUSICTHINGY MENU STRUCTURE & TAB ROUTING ---
+										        
+										        // 1. Show Player (Targets Radio Tab)
+										        BMessage* showMsg = new BMessage('atry');
+										        showMsg->AddString("target_tab", "radio");
+										        localMenu->AddItem(new BMenuItem("Show Player", showMsg));
+										
+										        localMenu->AddSeparatorItem();
+										
+										        // 2. Navigation Tabs
+										        BMessage* stationsMsg = new BMessage('atry');
+										        stationsMsg->AddString("target_tab", "stations");
+										        localMenu->AddItem(new BMenuItem("Stations", stationsMsg));
+										
+										        BMessage* favsMsg = new BMessage('atry');
+										        favsMsg->AddString("target_tab", "favorites");
+										        localMenu->AddItem(new BMenuItem("Favorites", favsMsg));
+										
+										        BMessage* eqMsg = new BMessage('atry');
+										        eqMsg->AddString("target_tab", "eq");
+										        localMenu->AddItem(new BMenuItem("Config", eqMsg));
+										
+										        localMenu->AddSeparatorItem();
+										
+										        // 3. Playback Controls
+										        localMenu->AddItem(new BMenuItem("Shuffle", new BMessage('shuf')));
 										        localMenu->AddItem(new BMenuItem("Pause", new BMessage('paus')));
 										        localMenu->AddItem(new BMenuItem("Stop", new BMessage('stop')));
-										        localMenu->AddItem(new BMenuItem("Next Station (Shuffle)", new BMessage('shuf')));
+										
 										        localMenu->AddSeparatorItem();
-										        localMenu->AddItem(new BMenuItem("Settings...", new BMessage('mtse')));
-										        localMenu->AddSeparatorItem();
-										        localMenu->AddItem(new BMenuItem("Quit SuperMusicThingy", new BMessage(B_QUIT_REQUESTED)));
+										
+										        // 4. Quit Option
+										        localMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED)));
 										    }
 										}
-
-                                        // Aligns popup horizontally, then places it right above the dock frame
-                                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
-                                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
-                                        
-                                        // TWEAKED: Changed from -5.0f to +20.0f to slide the menu downwards
-                                        float anchoredMenuY = static_cast<float>(threadArgs->winY) + 10.0f; 
-                                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
-
-                                        BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, false);
-
-                                        
+										
+										// Aligns popup horizontally, then places it right above the dock frame
+										float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
+										if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
+										
+										// TWEAKED: Changed from -5.0f to +10.0f to slide the menu downwards
+										float anchoredMenuY = static_cast<float>(threadArgs->winY) + 10.0f; 
+										BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+										
+										BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, false);
+										
 										if (chosenItem != nullptr) {
 										    BMessage* choiceAction = chosenItem->Message();
 										    if (choiceAction != nullptr) {
@@ -2587,18 +2607,24 @@ public:
 										        } else if (choiceAction->what == 'aud1') {
 										            std::system("/boot/system/preferences/Media &");
 										        } else if (choiceAction->what == 'atry' || 
-										                   choiceAction->what == 'play' || 
+										                   choiceAction->what == 'shuf' || 
 										                   choiceAction->what == 'paus' || 
 										                   choiceAction->what == 'stop' || 
-										                   choiceAction->what == 'shuf' || 
-										                   choiceAction->what == 'mtse' || 
 										                   choiceAction->what == B_QUIT_REQUESTED) {
 										            
 										            BMessenger musicApp("application/x-vnd.HaikuSuperMusicThingy");
+										            
+										            // Auto-launch app using be_roster if it is not currently running
+										            if (!musicApp.IsValid()) {
+										                status_t launchErr = be_roster->Launch("application/x-vnd.HaikuSuperMusicThingy");
+										                if (launchErr == B_OK || launchErr == B_ALREADY_RUNNING) {
+										                    musicApp = BMessenger("application/x-vnd.HaikuSuperMusicThingy");
+										                }
+										            }
+										
+										            // Forward the full BMessage payload (including "target_tab")
 										            if (musicApp.IsValid()) {
 										                musicApp.SendMessage(choiceAction);
-										            } else if (choiceAction->what == 'atry') {
-										                std::system("/boot/system/apps/HaikuSuperMusicThingy &");
 										            }
 										        } else {
 										            BMessenger replicantTarget("application/x-vnd.be-tskb");
@@ -5986,24 +6012,22 @@ int main(int argc, char* argv[]) {
     SDL_Event incomingEventPackage;
     
     
-    // Update Chcker
-   	{
-    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-    const char* localVersion = "v1.0.35"; 
-    char updateCmd[1024];
-    snprintf(updateCmd, sizeof(updateCmd),
-    	#ifndef IS_HAIKU_32BIT
-        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-        #else
-        "(REMOTE_V=$(curl-x86 -sL \"%s\" | tr -d '\\r\\n'); "
-        #endif
-        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-        "notify --title \"Update Available\" --group \"hDesktop\" "
-        "\"A newer version of hDesktop is available! ($REMOTE_V)\"; fi) &",
-        targetUrl, localVersion);	
-    system(updateCmd);
-   }
-    
+	// Update Checker
+	{
+	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
+	    char updateCmd[1024];
+	    snprintf(updateCmd, sizeof(updateCmd),
+	        #ifndef IS_HAIKU_32BIT
+	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
+	        #else
+	        "(REMOTE_V=$(curl-x86 -sL \"%s\" | tr -d '\\r\\n'); "
+	        #endif
+	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
+	        "notify --title \"Update Available\" --group \"hDesktop\" "
+	        "\"A newer version of hDesktop is available! ($REMOTE_V)\"; fi) &",
+	        targetUrl, APP_LOCAL_VERSION);    
+	    system(updateCmd);
+	}
 
 
 
