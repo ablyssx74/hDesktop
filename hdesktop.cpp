@@ -65,7 +65,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.36"
+#define APP_LOCAL_VERSION "v1.0.37"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -3171,15 +3171,21 @@ void SyncDockWithRunningDeskbarApps() {
                 // LEAF ICON LEFT-CLICK: TOGGLE NATIVE MAIN DRAWER (ORIGINAL PIPELINE)
                 // =========================================================================
 
-                else {
+					else {                    
                     if (gActiveDrawerInstance != nullptr) {                    
                         if (gActiveDrawerInstance->Lock()) {
                             gActiveDrawerInstance->Quit(); 
                         }
                     } 
-                    else {                   
+                    else {                    
                         gActiveDrawerInstance = new HaikuAppDrawerWindow(fHeight);
                         gActiveDrawerInstance->Show();
+                        
+                        // --- TRIGGER BOUNCE/POP ANIMATION FOR LEAF ---
+                        fSpinningAppName = "LeafMenu";
+                        fSpinningAppTeam = -1;
+                        fSpinAnimationStartTime = SDL_GetTicks();
+                        // ---------------------------------------------
                     }
                     
                     fShowMainMenu = false; 
@@ -3527,15 +3533,29 @@ void SyncDockWithRunningDeskbarApps() {
 	        }
 	        fShowMainMenu = false;
 	
-	        if (button == SDL_BUTTON_LEFT) {
-	            std::system("/boot/system/Tracker /boot/trash &");
-	            return;
-	        }
-	        else if (button == SDL_BUTTON_MIDDLE) {
-	            std::system("trash --empty &"); 
-	            fLastTrashCheckTime = 0; 
-	            return;
-	        }
+			if (button == SDL_BUTTON_LEFT) {
+                std::system("/boot/system/Tracker /boot/trash &");
+                
+                // --- TRIGGER BOUNCE/POP FOR TRASH BIN ---
+                fSpinningAppName = "TrashBin";
+                fSpinningAppTeam = -1;
+                fSpinAnimationStartTime = SDL_GetTicks();
+                // ----------------------------------------
+                
+                return;
+            }
+            else if (button == SDL_BUTTON_MIDDLE) {
+                std::system("trash --empty &"); 
+                fLastTrashCheckTime = 0; 
+                
+                // --- TRIGGER BOUNCE/POP FOR TRASH BIN ---
+                fSpinningAppName = "TrashBin";
+                fSpinningAppTeam = -1;
+                fSpinAnimationStartTime = SDL_GetTicks();
+                // ----------------------------------------
+                
+                return;
+            }
 	        else if (button == SDL_BUTTON_RIGHT) {
 	            uint32 currentClickTick = SDL_GetTicks();
 	            
@@ -3613,33 +3633,27 @@ void SyncDockWithRunningDeskbarApps() {
 	                threadArgs->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
 	                threadArgs->engine->fTrackerMenuIsActive = false; 
 	
-	                // PROCESS SELECTIONS VIA TRACKER MESSENGER LOOP
+					// PROCESS SELECTIONS VIA TRACKER MESSENGER LOOP
 
-	                if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
-	                    uint32 command = chosenAction->Message()->what;
-	                    
-	                    if (command == B_REFS_RECEIVED) {
-	                        entry_ref ref;
-	                        if (get_ref_for_path("/boot/trash", &ref) == B_OK) {
-	                            BMessage openMsg(B_REFS_RECEIVED);
-	                            openMsg.AddRef("refs", &ref);
-								if (trackerMessenger.IsValid()) {
+                    if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
+                        uint32 command = chosenAction->Message()->what;
+                        
+                        if (command == B_REFS_RECEIVED) {
+                            entry_ref ref;
+                            if (get_ref_for_path("/boot/trash", &ref) == B_OK) {
+                                BMessage openMsg(B_REFS_RECEIVED);
+                                openMsg.AddRef("refs", &ref);
+                                if (trackerMessenger.IsValid()) {
                                     trackerMessenger.SendMessage(&openMsg);
                                     
-                                    // --- TRIGGER THE BOUNCE/POP ANIMATION ---
-                                    team_id trackerTeam = -1;
-                                    app_info trackerInfo;
-                                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
-                                        trackerTeam = trackerInfo.team;
-                                    }
-
-                                    threadArgs->engine->fSpinningAppTeam = trackerTeam;
-                                    threadArgs->engine->fSpinningAppName = "";
+                                    // --- TRIGGER THE TRASH BIN BOUNCE/POP ANIMATION ---
+                                    threadArgs->engine->fSpinningAppTeam = -1;
+                                    threadArgs->engine->fSpinningAppName = "TrashBin";
                                     threadArgs->engine->fSpinAnimationStartTime = SDL_GetTicks();
-                                    // ----------------------------------------
+                                    // ------------------------------------------------
                                 }
-	                        }
-	                    } 
+                            }
+                        }
 	                    else if (command == 'mEMP') {
 	                        std::system("trash --empty &");
 	                    }
@@ -4432,50 +4446,76 @@ void RenderFrame(float yOffset) {
             if (i == 0) {
                 if (fHaikuMenuIcon.id != 0) {
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fHaikuMenuIcon.id);
+                    
+                    // --- BOUNCE AND POP TRANSFORM FOR LEAF ICON ---
+                    glPushMatrix();
+                    float centerX = iconBounds.left + (size / 2.0f);
+                    float centerY = iconBounds.top + (size / 2.0f);
+                    
+                    float bounceOffset = 0.0f;
+                    float popScale = 1.0f;
+                    
+                    if (!fSpinningAppName.empty() && fSpinningAppName == "LeafMenu" && fSpinAnimationStartTime > 0) {
+                        uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
+                        if (elapsedTicks < kSpinDurationMs) {
+                            float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                            bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
+                            popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+                        }
+                    }
+                    
+                    glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+                    glScalef(popScale, popScale, 1.0f);
+                    
                     glBegin(GL_QUADS);
-                        glTexCoord2f(0.0f, 0.0f); glVertex2f(iconBounds.left, iconBounds.top);
-                        glTexCoord2f(1.0f, 0.0f); glVertex2f(iconBounds.right, iconBounds.top);
-                        glTexCoord2f(1.0f, 1.0f); glVertex2f(iconBounds.right, iconBounds.bottom);
-                        glTexCoord2f(0.0f, 1.0f); glVertex2f(iconBounds.left, iconBounds.bottom);
+                        glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
+                        glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
+                        glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
+                        glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
                     glEnd();
+                    
+                    glPopMatrix();
+                    // ----------------------------------------------
+                    
                     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
                 }
-				} else {
+            } else {
                 size_t itemIdx = i - 1; auto& item = fDesktopItems[itemIdx];
                 if (item.texture.id != 0) {
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, item.texture.id);
 
-					// Bounce and Pop pass 1
-					glPushMatrix();
-					float centerX = iconBounds.left + (size / 2.0f);
-					float centerY = iconBounds.top + (size / 2.0f);
-					
-					float bounceOffset = 0.0f;
-					float popScale = 1.0f;
-					
-					if (!fSpinningAppName.empty() && item.name == fSpinningAppName && fSpinAnimationStartTime > 0) {
-					    uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-					    if (elapsedTicks < kSpinDurationMs) {
-					        float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
-					        bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
-					        popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
-					    }
-					}
-					
-					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
-					glScalef(popScale, popScale, 1.0f);
-					
-					glBegin(GL_QUADS);
-					    glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
-					    glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
-					    glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
-					    glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
-					glEnd();
-					
-					glPopMatrix();
-					//
+                    // Bounce and Pop pass 1
+                    glPushMatrix();
+                    float centerX = iconBounds.left + (size / 2.0f);
+                    float centerY = iconBounds.top + (size / 2.0f);
+                    
+                    float bounceOffset = 0.0f;
+                    float popScale = 1.0f;
+                    
+                    if (!fSpinningAppName.empty() && item.name == fSpinningAppName && fSpinAnimationStartTime > 0) {
+                        uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
+                        if (elapsedTicks < kSpinDurationMs) {
+                            float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                            bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
+                            popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+                        }
+                    }
+                    
+                    glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+                    glScalef(popScale, popScale, 1.0f);
+                    
+                    glBegin(GL_QUADS);
+                        glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
+                        glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
+                        glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
+                        glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
+                    glEnd();
+                    
+                    glPopMatrix();
+                    //
                     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
                 }
+
                 if (scale > 1.4f && item.textTexture.id != 0) {
                     int tw = 0, th = 0;
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, item.textTexture.id);
@@ -4719,7 +4759,7 @@ void RenderFrame(float yOffset) {
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
 	       
-	    // =========================================================================
+		// =========================================================================
         // 6C. DRAW HAIKU TRASH BIN
         // =========================================================================
         uint32 currentTicks = SDL_GetTicks();
@@ -4731,10 +4771,10 @@ void RenderFrame(float yOffset) {
             }
             fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
         }
-		
+        
         // Extra divider lines cleanly neutralized to maintain your preferred borderless style
         currentX += clockSectionPadding;
-		
+        
         // Pin hitbox geometry directly to our current track pointer
         fTrashRect.left   = currentX;
         fTrashRect.right  = fTrashRect.left + renderingTrashSize;
@@ -4744,16 +4784,41 @@ void RenderFrame(float yOffset) {
         if (fHaikuTrashIcon.id != 0) {
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fHaikuTrashIcon.id);
             glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+
+            // --- BOUNCE AND POP TRANSFORM FOR TRASH BIN ---
+            glPushMatrix();
+            float centerX = fTrashRect.left + (renderingTrashSize / 2.0f);
+            float centerY = fTrashRect.top + (renderingTrashSize / 2.0f);
+            
+            float bounceOffset = 0.0f;
+            float popScale = 1.0f;
+            
+            if (!fSpinningAppName.empty() && fSpinningAppName == "TrashBin" && fSpinAnimationStartTime > 0) {
+                uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
+                if (elapsedTicks < kSpinDurationMs) {
+                    float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                    bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
+                    popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+                }
+            }
+            
+            glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+            glScalef(popScale, popScale, 1.0f);
+
             glBegin(GL_QUADS);
-                glTexCoord2f(0.0f, 0.0f); glVertex2f(fTrashRect.left,  fTrashRect.top);
-                glTexCoord2f(1.0f, 0.0f); glVertex2f(fTrashRect.right, fTrashRect.top);
-                glTexCoord2f(1.0f, 1.0f); glVertex2f(fTrashRect.right, fTrashRect.bottom);
-                glTexCoord2f(0.0f, 1.0f); glVertex2f(fTrashRect.left,  fTrashRect.bottom);
+                glTexCoord2f(0.0f, 0.0f); glVertex2f(-renderingTrashSize/2.0f, -renderingTrashSize/2.0f);
+                glTexCoord2f(1.0f, 0.0f); glVertex2f(renderingTrashSize/2.0f, -renderingTrashSize/2.0f);
+                glTexCoord2f(1.0f, 1.0f); glVertex2f(renderingTrashSize/2.0f, renderingTrashSize/2.0f);
+                glTexCoord2f(0.0f, 1.0f); glVertex2f(-renderingTrashSize/2.0f, renderingTrashSize/2.0f);
             glEnd();
+
+            glPopMatrix();
+            // ----------------------------------------------
+
             glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
         }
 
-        currentX = fTrashRect.right;   
+        currentX = fTrashRect.right;
 	       
 	       
 
