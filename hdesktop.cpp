@@ -2448,22 +2448,30 @@ void SyncDockWithRunningDeskbarApps() {
 	    BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 	
 	    // BLOCKING CALL (Inside background thread only): Freezes safely until user chooses or clicks away
-	    BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
-	
-	    // =========================================================================
-	    // RESTORED SHIELD LOGIC: LOG TIMESTAMPS ONLY ON ACTUAL MENU COLLAPSE
-	    // =========================================================================
-	    args->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
-	    args->engine->fTrackerMenuIsActive = false; // Reset the active status lock flag
-	
-	    if (chosenAction != nullptr) {
-	        BMessage* actionMsg = chosenAction->Message();
-	        if (actionMsg != nullptr && actionMsg->what == B_REFS_RECEIVED) {
-	            if (trackerMessenger.IsValid()) {
-	                trackerMessenger.SendMessage(actionMsg);
-	            }
-	        }
-	    }
+		BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
+		
+		args->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
+		args->engine->fTrackerMenuIsActive = false;
+		
+		if (chosenAction != nullptr) {
+            BMessage* actionMsg = chosenAction->Message();
+            if (actionMsg != nullptr && actionMsg->what == B_REFS_RECEIVED) {
+                if (trackerMessenger.IsValid()) {
+                    trackerMessenger.SendMessage(actionMsg);
+                    
+                    // --- TRIGGER BOUNCE/POP ANIMATION HERE ---
+                    team_id trackerTeam = -1;
+                    app_info trackerInfo;
+                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
+                        trackerTeam = trackerInfo.team;
+                    }
+                    args->engine->fSpinningAppTeam = trackerTeam;
+                    args->engine->fSpinningAppName = "";
+                    args->engine->fSpinAnimationStartTime = SDL_GetTicks();
+                    // ------------------------------------------
+                }
+            }
+        }
 	
 	    delete asyncNavMenu;
 	    delete navMenuWrapper;
@@ -3411,18 +3419,29 @@ void SyncDockWithRunningDeskbarApps() {
 	                        free(tokens);
 	                    }
 
-	                    if (fileFolderCount == 0) {
+						if (fileFolderCount == 0) {
 	                        BEntry entry("/boot/home");
 	                        entry_ref ref;
 	                        if (entry.GetRef(&ref) == B_OK) {
 	                            BMessage message(B_REFS_RECEIVED);
 	                            message.AddRef("refs", &ref);
 	                            be_roster->Launch("application/x-vnd.Be-TRAK", &message);
-	                        }
-	                        
-	                        isButtonLatchedMap[actionKey] = false; 
-	                        return; 
-	                    }
+	                            
+	                            // --- TRIGGER ANIMATION ON FRESH LAUNCH ---
+	                            team_id trackerTeam = -1;
+	                            app_info trackerInfo;
+	                            if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
+	                                trackerTeam = trackerInfo.team;
+	                            }
+	                            fSpinningAppTeam = trackerTeam;
+	                            fSpinningAppName = "";
+	                            fSpinAnimationStartTime = SDL_GetTicks();
+	                            // ----------------------------------------
+                        }
+                        
+                        isButtonLatchedMap[actionKey] = false; 
+                        return; 
+                    }
 	                }
 
 	                
@@ -3604,9 +3623,21 @@ void SyncDockWithRunningDeskbarApps() {
 	                        if (get_ref_for_path("/boot/trash", &ref) == B_OK) {
 	                            BMessage openMsg(B_REFS_RECEIVED);
 	                            openMsg.AddRef("refs", &ref);
-	                            if (trackerMessenger.IsValid()) {
-	                                trackerMessenger.SendMessage(&openMsg);
-	                            }
+								if (trackerMessenger.IsValid()) {
+                                    trackerMessenger.SendMessage(&openMsg);
+                                    
+                                    // --- TRIGGER THE BOUNCE/POP ANIMATION ---
+                                    team_id trackerTeam = -1;
+                                    app_info trackerInfo;
+                                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
+                                        trackerTeam = trackerInfo.team;
+                                    }
+
+                                    threadArgs->engine->fSpinningAppTeam = trackerTeam;
+                                    threadArgs->engine->fSpinningAppName = "";
+                                    threadArgs->engine->fSpinAnimationStartTime = SDL_GetTicks();
+                                    // ----------------------------------------
+                                }
 	                        }
 	                    } 
 	                    else if (command == 'mEMP') {
