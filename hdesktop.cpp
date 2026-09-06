@@ -2545,15 +2545,26 @@ public:
                                             itemIdx++;
                                         }
 
-                                        if (!foundItems) {
-                                            if (threadArgs->itemName == "ProcessController" || threadArgs->itemName == "ProcessControllerView") {
-                                                localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
-                                            } else if (threadArgs->itemName == "NetworkStatus") {
-                                                localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
-                                            } else if (threadArgs->itemName == "MediaReplicant") {
-                                                localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
-                                            }
-                                        }
+										if (!foundItems) {
+										    if (threadArgs->itemName == "ProcessController" || threadArgs->itemName == "ProcessControllerView") {
+										        localMenu->AddItem(new BMenuItem("Memory Usage Profiles...", new BMessage('act2')));
+										    } else if (threadArgs->itemName == "NetworkStatus") {
+										        localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
+										    } else if (threadArgs->itemName == "MediaReplicant") {
+										        localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+										    } else if (threadArgs->itemName == "SuperMusicTrayIcon" || threadArgs->itemName == "HaikuSuperMusicThingy") {
+										        // --- MATCHING EXACT HAIKUSUPERMUSICTHINGY FourCC CONSTANTS ---
+										        localMenu->AddItem(new BMenuItem("Open Player", new BMessage('atry')));
+										        localMenu->AddItem(new BMenuItem("Play", new BMessage('play')));
+										        localMenu->AddItem(new BMenuItem("Pause", new BMessage('paus')));
+										        localMenu->AddItem(new BMenuItem("Stop", new BMessage('stop')));
+										        localMenu->AddItem(new BMenuItem("Next Station (Shuffle)", new BMessage('shuf')));
+										        localMenu->AddSeparatorItem();
+										        localMenu->AddItem(new BMenuItem("Settings...", new BMessage('mtse')));
+										        localMenu->AddSeparatorItem();
+										        localMenu->AddItem(new BMenuItem("Quit SuperMusicThingy", new BMessage(B_QUIT_REQUESTED)));
+										    }
+										}
 
                                         // Aligns popup horizontally, then places it right above the dock frame
                                         float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
@@ -2566,22 +2577,36 @@ public:
                                         BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, false);
 
                                         
-                                        if (chosenItem != nullptr) {
-                                            BMessage* choiceAction = chosenItem->Message();
-                                            if (choiceAction != nullptr) {
-                                                if (choiceAction->what == 'act2') {
-                                                    std::system("/boot/system/apps/ActivityMonitor &");
-                                                } else if (choiceAction->what == 'net1') {
-                                                    std::system("/boot/system/preferences/Network &");
-                                                } else if (choiceAction->what == 'aud1') {
-                                                    std::system("/boot/system/preferences/Media &");
-                                                } else {
-                                                    BMessenger replicantTarget("application/x-vnd.be-tskb");
-                                                    replicantTarget.SendMessage(choiceAction);
-                                                }
-                                            }
-                                        }
-                                        delete localMenu;
+										if (chosenItem != nullptr) {
+										    BMessage* choiceAction = chosenItem->Message();
+										    if (choiceAction != nullptr) {
+										        if (choiceAction->what == 'act2') {
+										            std::system("/boot/system/apps/ActivityMonitor &");
+										        } else if (choiceAction->what == 'net1') {
+										            std::system("/boot/system/preferences/Network &");
+										        } else if (choiceAction->what == 'aud1') {
+										            std::system("/boot/system/preferences/Media &");
+										        } else if (choiceAction->what == 'atry' || 
+										                   choiceAction->what == 'play' || 
+										                   choiceAction->what == 'paus' || 
+										                   choiceAction->what == 'stop' || 
+										                   choiceAction->what == 'shuf' || 
+										                   choiceAction->what == 'mtse' || 
+										                   choiceAction->what == B_QUIT_REQUESTED) {
+										            
+										            BMessenger musicApp("application/x-vnd.HaikuSuperMusicThingy");
+										            if (musicApp.IsValid()) {
+										                musicApp.SendMessage(choiceAction);
+										            } else if (choiceAction->what == 'atry') {
+										                std::system("/boot/system/apps/HaikuSuperMusicThingy &");
+										            }
+										        } else {
+										            BMessenger replicantTarget("application/x-vnd.be-tskb");
+										            replicantTarget.SendMessage(choiceAction);
+										        }
+										    }
+										}
+										delete localMenu;
                                     }
                                 }
 
