@@ -2157,8 +2157,15 @@ private:
 	bool fShouldDrawList = false;
 	team_id fHoveredTeam = -1;
 	std::vector<TrackedWindowInfo> fCurrentWindowsList;
+	
+
 
 public:
+		// --- 3D Icon Spin Animation State ---
+	team_id fSpinningAppTeam = -1;      // Team ID or identifier of the launching app
+	std::string fSpinningAppName = ""; // Name/path backup for launchers
+	uint32 fSpinAnimationStartTime = 0;
+	const uint32 kSpinDurationMs = 1000; // Exactly 1 second
     HaikuGlDesktopEngine(int width, int height) : fWidth(width), fHeight(height) {
 
         fBgColorR = 0.20f; fBgColorG = 0.42f; fBgColorB = 0.58f;         
@@ -2251,119 +2258,136 @@ public:
     }
 
 
-	void SyncDockWithRunningDeskbarApps() {
-	    // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
-	    // =================================================================
-	    for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
-	        // Look inside your existing TaskbarItem layout parameters
-	        if (fTaskbarWindows[i].icon.id > 0) {
-	            // Force OpenGL to instantly liberate the graphic texture memory allocations
-	            glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
-	            fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
-	        }
-	    }
-	    
-	    // 1. Keep a local backup so we don't blow away our click modifications
-	    std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
-	    fTaskbarWindows.clear();
-	
-	    std::vector<std::string> processedSignatures;
-	
-	    // Fetch the absolute active app info once up front to optimize the loop
-	    app_info activeAppInfo;
-	    team_id activeTeamId = -1;
-	    if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-	        activeTeamId = activeAppInfo.team;
-	    }
-	
-	    // 2. Query the global Haiku roster for all active running teams
-	    BList teamList;
-	    be_roster->GetAppList(&teamList);
-	
-	    int32 count = teamList.CountItems();
-	    for (int32 i = 0; i < count; ++i) {
-	        team_id id = (team_id)(addr_t)teamList.ItemAt(i);
-	        
-	        app_info info;
-	        // Hide background apps and/or other apps we don't want to see.
-	        if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
-	            if ((info.flags & B_BACKGROUND_APP) != 0) continue;
-	            if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
-	
-	            std::string appSignature(info.signature);
-	            
-	            // --- Duplicate Filter For Firefox and Other Clones ---
-	            // =================================================================
-	            bool isDuplicate = false;
-	            if (appSignature == "application/x-vnd.iceweasel"   	|| 
-	            	appSignature == "application/x-vnd.Mozilla-Firefox" || 
-	            	appSignature == "application/x-vnd.waterfox" 		|| 
-	            	appSignature == "application/x-vnd.floorp-browser") {
-	                for (const auto& sig : processedSignatures) {
-	                    if (sig == appSignature) {
-	                        isDuplicate = true; 
-	                        break;
-	                    }
-	                }
-	            }
-	            if (isDuplicate) continue; // Skip subsequent Iceweasel/Firefox teams, allow all other apps
-	
-	            BEntry entry(&info.ref);
-	            if (entry.InitCheck() != B_OK) continue;
-	
-	            char nameBuf[B_FILE_NAME_LENGTH];
-	            entry.GetName(nameBuf);
-	            std::string appTitle(nameBuf);
-	
-	            if (appTitle == "Deskbar") {
-	                continue;
-	            }
-	
-	            BPath path;
-	            entry.GetPath(&path);
-	
-	            TaskbarItem openApp;
-	            openApp.title = appTitle;
-	            openApp.icon = LoadIconFromNode(path.Path(), 128); 
-	            openApp.teamId = id; 
-	
-	            // --- FIXED STATE RESTORE LAYER WITH FOREGROUND CHECK ---
-	            bool foundOldInstance = false;
-	            for (const auto& oldWin : oldTaskbarWindows) {
-	                if (oldWin.teamId == id) {
-	                    openApp.isMinimized = oldWin.isMinimized;
-	                    foundOldInstance = true;
-	                    break;
-	                }
-	            }
-	
-	            // CORRECTION: If it's a completely new application node or our dock app itself 
-	            // currently holds stolen click focus, evaluate it cleanly via the roster information.
-	            if (!foundOldInstance || activeTeamId == id) {
-	                // If it's the absolute front window, it is not minimized
-	                if (activeTeamId == id) {
-	                    openApp.isMinimized = false;
-	                } 
-	                // If our dock app currently holds focus, fallback safely to its previous state 
-	                // or assume it's minimized if it wasn't tracked yet and isn't us
-	                else if (activeTeamId == be_app->Team()) {
-	                    openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
-	                } 
-	                else {
-	                    openApp.isMinimized = true;
-	                }
-	            }
-	
-	            static bool sAlwaysTrue = true;
-	            openApp.openStateFlag = &sAlwaysTrue;
-	            openApp.minimizeStateFlag = &openApp.isMinimized; 
-	
-	            // Store signatures to maintain historical state tracking for the filtered targets
-	            processedSignatures.push_back(appSignature);
-	            fTaskbarWindows.push_back(openApp);
-	        }
-	    }
-	}
+void SyncDockWithRunningDeskbarApps() {
+        // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
+        // =================================================================
+        for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
+            // Look inside your existing TaskbarItem layout parameters
+            if (fTaskbarWindows[i].icon.id > 0) {
+                // Force OpenGL to instantly liberate the graphic texture memory allocations
+                glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
+                fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
+            }
+        }
+        
+        // 1. Keep a local backup so we don't blow away our click modifications
+        std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
+        fTaskbarWindows.clear();
+    
+        std::vector<std::string> processedSignatures;
+    
+        // Fetch the absolute active app info once up front to optimize the loop
+        app_info activeAppInfo;
+        team_id activeTeamId = -1;
+        if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+            activeTeamId = activeAppInfo.team;
+        }
+    
+        // 2. Query the global Haiku roster for all active running teams
+        BList teamList;
+        be_roster->GetAppList(&teamList);
+    
+        int32 count = teamList.CountItems();
+        for (int32 i = 0; i < count; ++i) {
+            team_id id = (team_id)(addr_t)teamList.ItemAt(i);
+            
+            app_info info;
+            // Hide background apps and/or other apps we don't want to see.
+            if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
+                if ((info.flags & B_BACKGROUND_APP) != 0) continue;
+                if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
+    
+                std::string appSignature(info.signature);
+                
+                // --- Duplicate Filter For Firefox and Other Clones ---
+                // =================================================================
+                bool isDuplicate = false;
+                if (appSignature == "application/x-vnd.iceweasel"    || 
+                    appSignature == "application/x-vnd.Mozilla-Firefox" || 
+                    appSignature == "application/x-vnd.waterfox"         || 
+                    appSignature == "application/x-vnd.floorp-browser") {
+                    for (const auto& sig : processedSignatures) {
+                        if (sig == appSignature) {
+                            isDuplicate = true; 
+                            break;
+                        }
+                    }
+                }
+                if (isDuplicate) continue; // Skip subsequent Iceweasel/Firefox teams, allow all other apps
+    
+                BEntry entry(&info.ref);
+                if (entry.InitCheck() != B_OK) continue;
+    
+                char nameBuf[B_FILE_NAME_LENGTH];
+                entry.GetName(nameBuf);
+                std::string appTitle(nameBuf);
+    
+                if (appTitle == "Deskbar") {
+                    continue;
+                }
+    
+                BPath path;
+                entry.GetPath(&path);
+    
+                // --- AUTOMATIC 3D SPIN LAUNCH DETECTION ---
+                bool isBrandNewApp = true;
+                for (const auto& oldWin : oldTaskbarWindows) {
+                    if (oldWin.teamId == id) {
+                        isBrandNewApp = false;
+                        break;
+                    }
+                }
+
+                // If this team ID wasn't present in the previous check, it just launched from anywhere!
+                if (isBrandNewApp && id != be_app->Team()) {
+                    fSpinningAppTeam = id;
+                    fSpinningAppName = "";
+                    fSpinAnimationStartTime = SDL_GetTicks();
+                }
+                // ------------------------------------------
+
+                TaskbarItem openApp;
+                openApp.title = appTitle;
+                openApp.icon = LoadIconFromNode(path.Path(), 128); 
+                openApp.teamId = id; 
+    
+                // --- FIXED STATE RESTORE LAYER WITH FOREGROUND CHECK ---
+                bool foundOldInstance = false;
+                for (const auto& oldWin : oldTaskbarWindows) {
+                    if (oldWin.teamId == id) {
+                        openApp.isMinimized = oldWin.isMinimized;
+                        foundOldInstance = true;
+                        break;
+                    }
+                }
+    
+                // CORRECTION: If it's a completely new application node or our dock app itself 
+                // currently holds stolen click focus, evaluate it cleanly via the roster information.
+                if (!foundOldInstance || activeTeamId == id) {
+                    // If it's the absolute front window, it is not minimized
+                    if (activeTeamId == id) {
+                        openApp.isMinimized = false;
+                    } 
+                    // If our dock app currently holds focus, fallback safely to its previous state 
+                    // or assume it's minimized if it wasn't tracked yet and isn't us
+                    else if (activeTeamId == be_app->Team()) {
+                        openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
+                    } 
+                    else {
+                        openApp.isMinimized = true;
+                    }
+                }
+    
+                static bool sAlwaysTrue = true;
+                openApp.openStateFlag = &sAlwaysTrue;
+                openApp.minimizeStateFlag = &openApp.isMinimized; 
+    
+                // Store signatures to maintain historical state tracking for the filtered targets
+                processedSignatures.push_back(appSignature);
+                fTaskbarWindows.push_back(openApp);
+            }
+        }
+    }
 
 
 
@@ -2454,6 +2478,8 @@ public:
 	    // Sync global mouse variables to match click coordinates
 	    fMouseX = x; 
 	    fMouseY = y;
+	    
+
 	
 	    // =========================================================================
 	    // DYNAMIC SYSTEM TRAY INTERCEPTOR & SERIALIZED PROPERTY INSPECTOR (NON-BLOCKING)
@@ -3406,7 +3432,11 @@ public:
 	                } else {
 	                    be_roster->ActivateApp(activeTaskWin.teamId);
 	                }
-	                
+	                // Trigger 3D spin on window focus/activation
+					fSpinningAppTeam = activeTaskWin.teamId;
+					fSpinningAppName = "";
+					fSpinAnimationStartTime = SDL_GetTicks();
+					
                     // FIX 2: Group Restore Force Pipeline.
                     // This explicitly flushes window tokens belonging to group-minimized layers 
                     // (like Pe or WebPositive) back onto the active workspace array.
@@ -4379,16 +4409,40 @@ void RenderFrame(float yOffset) {
                     glEnd();
                     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
                 }
-            } else {
+				} else {
                 size_t itemIdx = i - 1; auto& item = fDesktopItems[itemIdx];
                 if (item.texture.id != 0) {
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, item.texture.id);
-                    glBegin(GL_QUADS);
-                        glTexCoord2f(0.0f, 0.0f); glVertex2f(iconBounds.left, iconBounds.top);
-                        glTexCoord2f(1.0f, 0.0f); glVertex2f(iconBounds.right, iconBounds.top);
-                        glTexCoord2f(1.0f, 1.0f); glVertex2f(iconBounds.right, iconBounds.bottom);
-                        glTexCoord2f(0.0f, 1.0f); glVertex2f(iconBounds.left, iconBounds.bottom);
-                    glEnd();
+
+					// Bounce and Pop pass 1
+					glPushMatrix();
+					float centerX = iconBounds.left + (size / 2.0f);
+					float centerY = iconBounds.top + (size / 2.0f);
+					
+					float bounceOffset = 0.0f;
+					float popScale = 1.0f;
+					
+					if (!fSpinningAppName.empty() && item.name == fSpinningAppName && fSpinAnimationStartTime > 0) {
+					    uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
+					    if (elapsedTicks < kSpinDurationMs) {
+					        float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+					        bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
+					        popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+					    }
+					}
+					
+					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+					glScalef(popScale, popScale, 1.0f);
+					
+					glBegin(GL_QUADS);
+					    glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
+					    glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
+					    glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
+					    glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
+					glEnd();
+					
+					glPopMatrix();
+					//
                     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
                 }
                 if (scale > 1.4f && item.textTexture.id != 0) {
@@ -4504,34 +4558,59 @@ void RenderFrame(float yOffset) {
 		        }
 		    }
 	
-		    // 3. ZERO-LAG ASSIGNMENT 
+			// 3. ZERO-LAG ASSIGNMENT 
 		    if (isCurrentlyForeground) {
 		        activeTaskWin.isMinimized = false;
 		    } else {
 		        activeTaskWin.isMinimized = appIsGenuinelyMinimized;
 		    }
 		    
-	    // =========================================================================
-	    // STEP 4: DRAW WINDOW ICON THUMBNAIL CORES AND ACTIVE INDICATORS
-	    // =========================================================================
+		    // =========================================================================
+		    // STEP 4: DRAW WINDOW ICON THUMBNAIL CORES AND ACTIVE INDICATORS
+		    // =========================================================================
 	
-	    // A. Draw active task window application vector icon thumbnail
-	    if (activeTaskWin.icon.id != 0) {
-	        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
-	        if (activeTaskWin.isMinimized == true) {
-	            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); // 45% opacity soft focus ghosting
-	        } else {
-	            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Bright full opacity active focus
-	        }
-	
-	        glBegin(GL_QUADS);
-	            glTexCoord2f(0.0f, 0.0f); glVertex2f(iconBounds.left,  iconBounds.top);
-	            glTexCoord2f(1.0f, 0.0f); glVertex2f(iconBounds.right, iconBounds.top);
-	            glTexCoord2f(1.0f, 1.0f); glVertex2f(iconBounds.right, iconBounds.bottom);
-	            glTexCoord2f(0.0f, 1.0f); glVertex2f(iconBounds.left,  iconBounds.bottom);
-	        glEnd();
-	        glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-	    }
+		    // A. Draw active task window application vector icon thumbnail with 3D spin support
+		    if (activeTaskWin.icon.id != 0) {
+		        glEnable(GL_TEXTURE_2D); 
+		        glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
+		        
+		        if (activeTaskWin.isMinimized == true) {
+		            glColor4f(1.0f, 1.0f, 1.0f, 0.45f); 
+		        } else {
+		            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+		        }
+				// Bounce and Pop pass 2	
+				glPushMatrix();
+				float centerX = iconBounds.left + (size / 2.0f);
+				float centerY = iconBounds.top + (size / 2.0f);
+				
+				float bounceOffset = 0.0f;
+				float popScale = 1.0f;
+				
+				if (fSpinningAppTeam != -1 && activeTaskWin.teamId == fSpinningAppTeam && fSpinAnimationStartTime > 0) {
+				    uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
+				    if (elapsedTicks < kSpinDurationMs) {
+				        float progress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+				        bounceOffset = std::sin(progress * 3.14159f * 3.0f) * (1.0f - progress) * 30.0f; 
+				        popScale = 1.0f + std::sin(progress * 3.14159f) * 0.4f; 
+				    }
+				}
+				
+				glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+				glScalef(popScale, popScale, 1.0f);
+				
+				glBegin(GL_QUADS);
+				    glTexCoord2f(0.0f, 0.0f); glVertex2f(-size/2.0f, -size/2.0f);
+				    glTexCoord2f(1.0f, 0.0f); glVertex2f(size/2.0f, -size/2.0f);
+				    glTexCoord2f(1.0f, 1.0f); glVertex2f(size/2.0f, size/2.0f);
+				    glTexCoord2f(0.0f, 1.0f); glVertex2f(-size/2.0f, size/2.0f);
+				glEnd();
+				
+				glPopMatrix();
+				//	
+		        glBindTexture(GL_TEXTURE_2D, 0); 
+		        glDisable(GL_TEXTURE_2D);
+		    }
 	    
 
 			//@here titles
@@ -6352,6 +6431,11 @@ int main(int argc, char* argv[]) {
         // =========================================================================
         // CPU-OPTIMIZED RENDER INJECTION
         // =========================================================================
+        
+        if (desktopEngine.fSpinAnimationStartTime > 0) {
+            needsRender = true;
+        }
+        
         static int lastSentX = -1;
         static int lastSentY = -1;
         static uint32 lastSentButtons = 0;
