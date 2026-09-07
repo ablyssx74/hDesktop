@@ -66,7 +66,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.39"
+#define APP_LOCAL_VERSION "v1.0.40"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -1375,6 +1375,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Open App Effects:", BPoint(35.0f, 224.0f));
         DrawString("Close App Effects:", BPoint(35.0f, 257.0f));
         
+        /*
         // Draw smaller, italicized "(Experimental)" tag underneath the Close App Effects dropdown
         BFont expFont(be_plain_font);
         expFont.SetSize(9.0f);
@@ -1382,6 +1383,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         SetFont(&expFont);
         SetHighColor(rgb_color{140, 150, 170, 255});
         DrawString("(Experimental)", BPoint(145.0f, 278.0f));
+		*/
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -3740,24 +3742,24 @@ void SyncDockWithRunningDeskbarApps() {
 	            // =========================================================================
 	            // FIX: Removed !isTracker condition to let the middle click target Tracker
 	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
-fEffectAppTeam = -1;
-    fEffectAnimationStartTime = 0;
-
-    bool anyCloseEffectEnabled = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || 
-                                 fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || 
-                                 fEffectCloseExplodeEnabled;
-
-    if (anyCloseEffectEnabled) {
-        // Trigger close animation sequence with delay
-        fClosingAppTeam = activeTaskWin.teamId;
-        fClosingAppName = activeTaskWin.title;
-        fCloseAnimationStartTime = SDL_GetTicks();
-    } else {
-        // Close instantly with zero delay
-        fClosingAppTeam = -1;
-        fClosingAppName = "";
-        fCloseAnimationStartTime = 0;
-    }
+					fEffectAppTeam = -1;
+					    fEffectAnimationStartTime = 0;
+					
+					    bool anyCloseEffectEnabled = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || 
+					                                 fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || 
+					                                 fEffectCloseExplodeEnabled;
+					
+					    if (anyCloseEffectEnabled) {
+					        // Trigger close animation sequence with delay
+					        fClosingAppTeam = activeTaskWin.teamId;
+					        fClosingAppName = activeTaskWin.title;
+					        fCloseAnimationStartTime = SDL_GetTicks();
+					    } else {
+					        // Close instantly with zero delay
+					        fClosingAppTeam = -1;
+					        fClosingAppName = "";
+					        fCloseAnimationStartTime = 0;
+					    }
 	             	if (isTracker) {
 	                    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 	                    if (trackerMessenger.IsValid()) {
@@ -4557,7 +4559,7 @@ fEffectAppTeam = -1;
 
 
 
-void RenderFrame(float yOffset) {
+	void RenderFrame(float yOffset) {
 	    // =========================================================================
 	    // 1. STEP POSIX TIMING ENGINES AND KERNEL RECORD SAMPLES
 	    // =========================================================================
@@ -5306,7 +5308,7 @@ void RenderFrame(float yOffset) {
 		        }
 		    }
 	
-		// 3. ZERO-LAG ASSIGNMENT 
+			// 3. ZERO-LAG ASSIGNMENT 
 		    if (activeTaskWin.teamId == fClosingAppTeam) {
 		        // Force lock the closing app's visual state so it doesn't flash or dim mid-animation
 		        activeTaskWin.isMinimized = false;
@@ -5315,7 +5317,7 @@ void RenderFrame(float yOffset) {
 		    } else {
 		        activeTaskWin.isMinimized = appIsGenuinelyMinimized;
 		    }
-				    // =========================================================================
+			// =========================================================================
 		    // STEP 4: DRAW WINDOW ICON THUMBNAIL CORES AND ACTIVE INDICATORS
 		    // =========================================================================
 	
@@ -5334,7 +5336,7 @@ void RenderFrame(float yOffset) {
 				float centerX = iconBounds.left + (size / 2.0f);
 				float centerY = iconBounds.top + (size / 2.0f);
 				
-float bounceOffset = 0.0f;
+				float bounceOffset = 0.0f;
                 float popScale = 1.0f;
                 float rotationAngle = 0.0f;
                 float scaleX = 1.0f;
@@ -5377,7 +5379,7 @@ float bounceOffset = 0.0f;
                     uint32 elapsedTicks = SDL_GetTicks() - fCloseAnimationStartTime;
                     if (elapsedTicks < fSpinDurationMs) {
                         animProgress = (static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs)) * 1.8f;
-if (animProgress > 1.0f) animProgress = 1.0f; // Clamp to finish cleanly
+						if (animProgress > 1.0f) animProgress = 1.0f; // Clamp to finish cleanly
                         
                         if (fEffectCloseBounceEnabled) {
                             bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
@@ -5402,46 +5404,19 @@ if (animProgress > 1.0f) animProgress = 1.0f; // Clamp to finish cleanly
                             isExploding = true;
                         }
                     } else {
-                        // Animation finished — NOW execute the actual application closure sequence
-                        if (fClosingAppTeam != -1) {
-                            if (isTracker) {
-                                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
-                                if (trackerMessenger.IsValid()) {
-                                    BMessage countRequest(B_COUNT_PROPERTIES);
-                                    countRequest.AddSpecifier("Window");
-                                    BMessage reply;
-                                    if (trackerMessenger.SendMessage(&countRequest, &reply) == B_OK) {
-                                        int32 totalWindows = 0;
-                                        if (reply.FindInt32("result", &totalWindows) == B_OK) {
-                                            for (int32 wIdx = totalWindows - 1; wIdx > 0; --wIdx) {
-                                                BMessage quitWindowMessage(B_QUIT_REQUESTED);
-                                                quitWindowMessage.AddSpecifier("Window", wIdx);
-                                                trackerMessenger.SendMessage(&quitWindowMessage);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                BMessenger targetAppMessenger(NULL, fClosingAppTeam);
-                                if (targetAppMessenger.IsValid()) {
-                                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
-                                } else {
-                                    kill_team(fClosingAppTeam);
-                                }
-                            }
-                        }
-
                         // Hard reset state variables so they never linger
                         fClosingAppTeam = -1;
                         fClosingAppName = "";
                         fCloseAnimationStartTime = 0;
                     }
                 }
-					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
-                    if (rotationAngle != 0.0f) {
-                        glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
-                    }
-                    glScalef(scaleX, scaleY, 1.0f);
+                
+				glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+	                if (rotationAngle != 0.0f) {
+	                    glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
+	                }
+	                glScalef(scaleX, scaleY, 1.0f);
+                    
 				if (isExploding && animProgress > 0.0f) {
                         // Shatter into a 5x5 grid of flying pieces with gravity drop
                         int cols = 5;
@@ -7441,9 +7416,9 @@ int main(int argc, char* argv[]) {
         // CPU-OPTIMIZED RENDER INJECTION
         // =========================================================================
         
-        if (desktopEngine.fEffectAnimationStartTime > 0) {
-            needsRender = true;
-        }
+		if (desktopEngine.fEffectAnimationStartTime > 0 || desktopEngine.fCloseAnimationStartTime > 0) {
+		    needsRender = true;
+		}
         
         static int lastSentX = -1;
         static int lastSentY = -1;
