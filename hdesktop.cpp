@@ -66,29 +66,39 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.38"
+#define APP_LOCAL_VERSION "v1.0.39"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
 HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
 BWindow* gActiveConfigInstance = nullptr; 
 std::set<std::string> gFavoritePaths; 
+
 bool autoHideEnabled; 
 bool showSystemTray; 
 bool dockAlwaysOnTop;
-bool fShowTitleOverlays;
+bool fShowTitleOverlays = true;
+
 bool fEffectBounceEnabled = true;
 bool fEffectSpinEnabled = false;
 bool fEffectIllusionEnabled = false;
 bool fEffectWobbleEnabled = false;
 bool fEffectExplodeEnabled = false;
+
+bool fEffectCloseBounceEnabled = false;
+bool fEffectCloseSpinEnabled = false;
+bool fEffectCloseIllusionEnabled = false;
+bool fEffectCloseWobbleEnabled = false;
+bool fEffectCloseExplodeEnabled = false;
+
 void SaveConfiguration(); 
 float fBaseIconSize = 48.0f;
 float maxDockHeight = 160.0f;
-float fDockAlpha = 0.40f; 
+float fDockAlpha = 0.40f;
+uint32 fSpinDurationMs = 750;
 const char* const kSettingsIconSizeKey = "base_icon_size";
 const char* const kSettingsAlphaKey = "dock_alpha";
-
+const char* const kSettingsSpinDurationKey = "spin_duration";
  
 
 
@@ -118,7 +128,6 @@ rgb_color GetLiveSystemBackgroundColor() {
     return color;
 }
 
-
 enum {
 	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
     MSG_AUTOHIDE_TOGGLED   = 'ahtg',
@@ -126,14 +135,23 @@ enum {
     MSG_TEXTOVERLAYS_TOGGLED = 'totg',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
     MSG_AUTORAISE_TOGGLED  = 'srdt',
+    MSG_EFFECT_SPEED_SLIDER_CHANGED = 'efsc',
     MSG_ALPHA_SLIDER_CHANGED = 'alsc',
     MSG_ICON_SIZE_CHANGED = 'isic',
+    MSG_EFFECT_OPEN_NONE_TOGGLED = 'efon',
     MSG_EFFECT_BOUNCE_TOGGLED = 'efbn',
     MSG_EFFECT_SPIN_TOGGLED = 'efsp',
     MSG_EFFECT_ILLUSION_TOGGLED = 'efil',
     MSG_EFFECT_WOBBLE_TOGGLED = 'efwb',
-    MSG_EFFECT_EXPLODE_TOGGLED = 'efex'
-};;
+    MSG_EFFECT_EXPLODE_TOGGLED = 'efex',
+    MSG_EFFECT_CLOSE_NONE_TOGGLED = 'efcn',
+    MSG_EFFECT_CLOSE_BOUNCE_TOGGLED = 'efcb',
+    MSG_EFFECT_CLOSE_SPIN_TOGGLED = 'efcs',
+    MSG_EFFECT_CLOSE_ILLUSION_TOGGLED = 'efci',
+    MSG_EFFECT_CLOSE_WOBBLE_TOGGLED = 'efcw',
+    MSG_EFFECT_CLOSE_EXPLODE_TOGGLED = 'efcx'
+};
+
 
 
 struct TrackedWindowInfo {
@@ -1087,6 +1105,32 @@ void SyncDynamicSystrayTextures() {
     }
 }
 
+class ColoredMenuField : public BMenuField {
+public:
+    ColoredMenuField(BRect frame, const char* name, const char* label, BMenu* menu)
+        : BMenuField(frame, name, label, menu) {}
+
+    virtual void Draw(BRect updateRect) override {
+        // Always use light text since the settings window background is hardcoded dark
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        BMenuField::Draw(updateRect);
+    }
+};
+
+class ColoredCheckBox : public BCheckBox {
+public:
+    ColoredCheckBox(BRect frame, const char* name, const char* label, BMessage* message)
+        : BCheckBox(frame, name, label, message) {
+        SetViewColor(rgb_color{24, 24, 28, 255}); // Solid background matching the window
+        SetHighColor(rgb_color{220, 225, 235, 255});
+    }
+
+    virtual void Draw(BRect updateRect) override {
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        BCheckBox::Draw(updateRect);
+    }
+};
+
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
@@ -1094,50 +1138,57 @@ private:
     BCheckBox* fAutoRaiseCheckbox;
     BCheckBox* fTextOverlaysCheckbox;
     BMenuField* fEffectsMenuField;
+    BMenuField* fCloseEffectsMenuField;
+    BSlider*   fEffectSpeedSlider;
     BSlider*   fAlphaSlider; 
     BSlider*   fIconSizeSlider; 
     BButton*   fAboutButton; 
 
 public:
 
-    ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
+ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(rgb_color{24, 24, 28, 255});
 
-        // Row 1: 
-        BRect checkboxRect(35.0f, 135.0f, frame.Width() - 35.0f, 150.0f);
-        fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", "Enable Auto-Hide", 
+		// Row 1: Auto-Hide (Compact rect for box only)
+        BRect checkboxRect(35.0f, 122.0f, 55.0f, 138.0f);
+        fAutoHideCheckbox = new BCheckBox(checkboxRect, "auto_hide_cb", nullptr, 
             new BMessage(MSG_AUTOHIDE_TOGGLED));
-        fAutoHideCheckbox->SetHighColor(rgb_color{240, 240, 240, 255}); 
+        fAutoHideCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fAutoHideCheckbox->SetValue(autoHideEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoHideCheckbox);
 
-        // Row 2
-        BRect trayCheckboxRect(35.0f, 155.0f, frame.Width() - 35.0f, 170.0f);
-        fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", "Enable System Tray", 
+        // Row 2: System Tray
+        BRect trayCheckboxRect(35.0f, 142.0f, 55.0f, 158.0f);
+        fSystemTrayCheckbox = new BCheckBox(trayCheckboxRect, "sys_tray_cb", nullptr, 
             new BMessage(MSG_SYSTEMTRAY_TOGGLED));
-        fSystemTrayCheckbox->SetHighColor(rgb_color{240, 240, 240, 255});
+        fSystemTrayCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fSystemTrayCheckbox->SetValue(showSystemTray ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSystemTrayCheckbox);
 
-        // Row 3
-        BRect autoRaiseRect(35.0f, 175.0f, frame.Width() - 35.0f, 190.0f);
-        fAutoRaiseCheckbox = new BCheckBox(autoRaiseRect, "auto_raise_cb", "Enable Auto-Raise", 
+        // Row 3: Auto-Raise
+        BRect autoRaiseRect(35.0f, 162.0f, 55.0f, 178.0f);
+        fAutoRaiseCheckbox = new BCheckBox(autoRaiseRect, "auto_raise_cb", nullptr, 
             new BMessage(MSG_AUTORAISE_TOGGLED));
-        fAutoRaiseCheckbox->SetHighColor(rgb_color{240, 240, 240, 255});
+        fAutoRaiseCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoRaiseCheckbox);
 
-        // Row 4
-        BRect textOverlaysRect(35.0f, 195.0f, frame.Width() - 35.0f, 210.0f);
-        fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", "Enable Application Title Overlays", 
+        // Row 4: Text Overlays
+        BRect textOverlaysRect(35.0f, 182.0f, 55.0f, 198.0f);
+        fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", nullptr, 
             new BMessage(MSG_TEXTOVERLAYS_TOGGLED));
-        fTextOverlaysCheckbox->SetHighColor(rgb_color{220, 225, 235, 255}); 
+        fTextOverlaysCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fTextOverlaysCheckbox->SetValue(fShowTitleOverlays ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysCheckbox);
 
-        // Consolidated Effects Dropdown Menu (Replacing the 5 individual effect checkboxes)
-        BPopUpMenu* effectsPopup = new BPopUpMenu("Effects");
-        
+        // Open App Effects Dropdown Menu
+        BPopUpMenu* effectsPopup = new BPopUpMenu("Open Effects");
+        bool openNone = !fEffectBounceEnabled && !fEffectSpinEnabled && !fEffectIllusionEnabled && !fEffectWobbleEnabled && !fEffectExplodeEnabled;
+
+        BMenuItem* openNoneItem = new BMenuItem("No Effects", new BMessage(MSG_EFFECT_OPEN_NONE_TOGGLED));
+        openNoneItem->SetMarked(openNone);
+        effectsPopup->AddItem(openNoneItem);
+
         BMenuItem* bounceItem = new BMenuItem("Bounce", new BMessage(MSG_EFFECT_BOUNCE_TOGGLED));
         bounceItem->SetMarked(fEffectBounceEnabled);
         effectsPopup->AddItem(bounceItem);
@@ -1158,38 +1209,86 @@ public:
         explodeItem->SetMarked(fEffectExplodeEnabled);
         effectsPopup->AddItem(explodeItem);
 
-		BRect effectsMenuRect(35.0f, 220.0f, frame.Width() - 35.0f, 250.0f);
-		fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", "Effects:", effectsPopup);
-		fEffectsMenuField->SetHighColor(rgb_color{220, 225, 235, 255});
-		fEffectsMenuField->SetDivider(60.0f); // Explicitly allocate space for the "Effects:" label
-		AddChild(fEffectsMenuField);
+		// Open App Effects Dropdown (Label drawn manually in Draw())
+        BRect effectsMenuRect(145.0f, 207.0f, frame.Width() - 35.0f, 232.0f);
+        fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
+        fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
+        AddChild(fEffectsMenuField);
+
+        // Close App Effects Dropdown Menu
+        BPopUpMenu* closeEffectsPopup = new BPopUpMenu("Close Effects");
+        bool closeNone = !fEffectCloseBounceEnabled && !fEffectCloseSpinEnabled && !fEffectCloseIllusionEnabled && !fEffectCloseWobbleEnabled && !fEffectCloseExplodeEnabled;
+		
+        BMenuItem* closeNoneItem = new BMenuItem("No Effects", new BMessage(MSG_EFFECT_CLOSE_NONE_TOGGLED));
+        closeNoneItem->SetMarked(closeNone);
+        closeEffectsPopup->AddItem(closeNoneItem);
+
+        BMenuItem* closeBounceItem = new BMenuItem("Bounce", new BMessage(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED));
+        closeBounceItem->SetMarked(fEffectCloseBounceEnabled);
+        closeEffectsPopup->AddItem(closeBounceItem);
+
+        BMenuItem* closeSpinItem = new BMenuItem("Spin", new BMessage(MSG_EFFECT_CLOSE_SPIN_TOGGLED));
+        closeSpinItem->SetMarked(fEffectCloseSpinEnabled);
+        closeEffectsPopup->AddItem(closeSpinItem);
+
+        BMenuItem* closeIllusionItem = new BMenuItem("Illusion", new BMessage(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED));
+        closeIllusionItem->SetMarked(fEffectCloseIllusionEnabled);
+        closeEffectsPopup->AddItem(closeIllusionItem);
+
+        BMenuItem* closeWobbleItem = new BMenuItem("Wobble", new BMessage(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED));
+        closeWobbleItem->SetMarked(fEffectCloseWobbleEnabled);
+        closeEffectsPopup->AddItem(closeWobbleItem);
+
+        BMenuItem* closeExplodeItem = new BMenuItem("Explode", new BMessage(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED));
+        closeExplodeItem->SetMarked(fEffectCloseExplodeEnabled);
+        closeEffectsPopup->AddItem(closeExplodeItem);
+
+		// Close App Effects Dropdown (Label drawn manually in Draw())
+        BRect closeEffectsMenuRect(145.0f, 240.0f, frame.Width() - 35.0f, 265.0f);
+        fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
+        fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
+        AddChild(fCloseEffectsMenuField);
+        fCloseEffectsMenuField->Show();
         
-        // Transparency Slider Row
-        BRect sliderRect(35.0f, 270.0f, frame.Width() - 35.0f, 310.0f);
+		// Effect Speed Slider Row
+        BRect speedSliderRect(35.0f, 290.0f, frame.Width() - 35.0f, 340.0f);
+        fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed", 
+            new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
+        fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
+        fEffectSpeedSlider->SetLimitLabels("Fast", "Slow");
+        fEffectSpeedSlider->SetValue(static_cast<int32>(fSpinDurationMs));
+        AddChild(fEffectSpeedSlider);
+        fEffectSpeedSlider->Show();
+
+        // Transparency Slider Row (Shifted down)
+        BRect sliderRect(35.0f, 360.0f, frame.Width() - 35.0f, 410.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fAlphaSlider->SetLimitLabels("Transparent", "Opaque");
         fAlphaSlider->SetValue(static_cast<int32>(fDockAlpha * 100.0f));
         AddChild(fAlphaSlider);
+        fAlphaSlider->Show();
 
-        // Icon Size Slider Row
-        BRect sizeSliderRect(35.0f, 330.0f, frame.Width() - 35.0f, 370.0f);
+        // Icon Size Slider Row (Shifted down)
+        BRect sizeSliderRect(35.0f, 430.0f, frame.Width() - 35.0f, 480.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fIconSizeSlider->SetLimitLabels("Small", "Large");
         fIconSizeSlider->SetValue(static_cast<int32>(fBaseIconSize));
         AddChild(fIconSizeSlider);
+        fIconSizeSlider->Show();
     }
-
+    
 
 
 
 
     virtual void Draw(BRect updateRect) {
         float canvasWidth = Bounds().Width();
-
+		float canvasHeight = Bounds().Height();
+		
         // 1. Render Window Header Context Title
         SetFont(be_bold_font);
         SetFontSize(14.0f);
@@ -1244,26 +1343,53 @@ public:
             SetHighColor(rgb_color{90, 110, 210, 255});  // Standard medium blue
         }
         StrokeRect(aboutBtnRect);
-        
+                
+       
         // 5. Draw the Text centered inside the button
         SetFont(be_bold_font);
         SetFontSize(12.0f);
         BString aboutText("About hdesktop");
         float aboutTextW = StringWidth(aboutText.String());
-        // Baseline calculated at Y: 98.0f to center 12px font inside 82-106 bounds
-        DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - aboutTextW) / 2.0f, 98.0f));
-  
+        DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - aboutTextW) / 2.0f, 98.0f));  
 
-		// 6. BALANCED BACKING CONTAINER (REFINED HEIGHT)
-        SetHighColor(rgb_color{30, 31, 37, 255}); 
-        BRect checkboxTrayRect(20.0f, 120.0f, canvasWidth - 20.0f, 390.0f);
+		// 6. BALANCED BACKING CONTAINER
+        SetHighColor(rgb_color{24, 24, 28, 255}); 
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 495.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
+        
+		// Draw Checkbox Labels manually with guaranteed light text color
+        SetFont(be_plain_font);
+        SetFontSize(12.0f);
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        DrawString("Enable Auto-Hide", BPoint(62.0f, 134.0f));
+        DrawString("Enable System Tray", BPoint(62.0f, 154.0f));
+        DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
+        DrawString("Enable Application Title Overlays", BPoint(62.0f, 194.0f));
+        
+        // Draw Open and Close Effect labels manually with guaranteed light text color
+        SetFont(be_plain_font);
+        SetFontSize(12.0f);
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        DrawString("Open App Effects:", BPoint(35.0f, 224.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 257.0f));
+        
+        // Draw smaller, italicized "(Experimental)" tag underneath the Close App Effects dropdown
+        BFont expFont(be_plain_font);
+        expFont.SetSize(9.0f);
+        expFont.SetFace(B_ITALIC_FACE);
+        SetFont(&expFont);
+        SetHighColor(rgb_color{140, 150, 170, 255});
+        DrawString("(Experimental)", BPoint(145.0f, 278.0f));
 
-		// 7. Standard Window Control "Close" button tracking metrics at footer
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 405.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 430.0f);
+        // Reset font back to plain for buttons/other elements
+        SetFont(be_plain_font);
+        SetFontSize(12.0f);
+
+        // Close button at the bottom margin
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, canvasHeight - 45.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, canvasHeight - 18.0f);
         
         if (closeBtnRect.Contains(cursorPoint)) {
             SetHighColor(rgb_color{100, 120, 160, 45});
@@ -1293,13 +1419,12 @@ public:
 
 	virtual void MouseDown(BPoint point) {
         float canvasWidth = Bounds().Width();
+        float canvasHeight = Bounds().Height();
         
         BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
         BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
-
-        // Updated to match the Draw() position (Y: 405 to 430)
-        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, 405.0f, 
-                           (canvasWidth + 100.0f) / 2.0f, 430.0f);
+        BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, canvasHeight - 45.0f, 
+                           (canvasWidth + 100.0f) / 2.0f, canvasHeight - 18.0f);
 
         // Check if Shutdown button was clicked
         if (shutdownBtnRect.Contains(point)) {
@@ -1330,7 +1455,6 @@ public:
 
 
 
-
     
 	virtual void AttachedToWindow() {
         BView::AttachedToWindow();
@@ -1339,6 +1463,8 @@ public:
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
+        fCloseEffectsMenuField->Menu()->SetTargetForItems(this);
+        fEffectSpeedSlider->SetTarget(this);
         fAlphaSlider->SetTarget(this); 
         fIconSizeSlider->SetTarget(this); 
     }
@@ -1368,6 +1494,182 @@ public:
                 fShowTitleOverlays = (fTextOverlaysCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 Invalidate();
+                break;
+            }
+
+			case MSG_EFFECT_CLOSE_NONE_TOGGLED: {
+                fEffectCloseBounceEnabled = false;
+                fEffectCloseSpinEnabled = false;
+                fEffectCloseIllusionEnabled = false;
+                fEffectCloseWobbleEnabled = false;
+                fEffectCloseExplodeEnabled = false;
+
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_NONE_TOGGLED))
+                    item->SetMarked(true);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_SPIN_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED))
+                    item->SetMarked(false);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_CLOSE_BOUNCE_TOGGLED: {
+                fEffectCloseBounceEnabled = !fEffectCloseBounceEnabled;
+                if (fEffectCloseBounceEnabled) {
+                    fEffectCloseSpinEnabled = false;
+                    fEffectCloseIllusionEnabled = false;
+                    fEffectCloseWobbleEnabled = false;
+                    fEffectCloseExplodeEnabled = false;
+                }
+                bool anyActive = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || fEffectCloseExplodeEnabled;
+                
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_NONE_TOGGLED))
+                    item->SetMarked(!anyActive);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectCloseBounceEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_SPIN_TOGGLED))
+                    item->SetMarked(fEffectCloseSpinEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectCloseIllusionEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectCloseWobbleEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectCloseExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_CLOSE_SPIN_TOGGLED: {
+                fEffectCloseSpinEnabled = !fEffectCloseSpinEnabled;
+                if (fEffectCloseSpinEnabled) {
+                    fEffectCloseBounceEnabled = false;
+                    fEffectCloseIllusionEnabled = false;
+                    fEffectCloseWobbleEnabled = false;
+                    fEffectCloseExplodeEnabled = false;
+                }
+                bool anyActive = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || fEffectCloseExplodeEnabled;
+
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_NONE_TOGGLED))
+                    item->SetMarked(!anyActive);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_SPIN_TOGGLED))
+                    item->SetMarked(fEffectCloseSpinEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectCloseBounceEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectCloseIllusionEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectCloseWobbleEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectCloseExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_CLOSE_ILLUSION_TOGGLED: {
+                fEffectCloseIllusionEnabled = !fEffectCloseIllusionEnabled;
+                if (fEffectCloseIllusionEnabled) {
+                    fEffectCloseBounceEnabled = false;
+                    fEffectCloseSpinEnabled = false;
+                    fEffectCloseWobbleEnabled = false;
+                    fEffectCloseExplodeEnabled = false;
+                }
+                bool anyActive = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || fEffectCloseExplodeEnabled;
+
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_NONE_TOGGLED))
+                    item->SetMarked(!anyActive);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectCloseIllusionEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectCloseBounceEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_SPIN_TOGGLED))
+                    item->SetMarked(fEffectCloseSpinEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectCloseWobbleEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectCloseExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_CLOSE_WOBBLE_TOGGLED: {
+                fEffectCloseWobbleEnabled = !fEffectCloseWobbleEnabled;
+                if (fEffectCloseWobbleEnabled) {
+                    fEffectCloseBounceEnabled = false;
+                    fEffectCloseSpinEnabled = false;
+                    fEffectCloseIllusionEnabled = false;
+                    fEffectCloseExplodeEnabled = false;
+                }
+                bool anyActive = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || fEffectCloseExplodeEnabled;
+
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_NONE_TOGGLED))
+                    item->SetMarked(!anyActive);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectCloseWobbleEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectCloseBounceEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_SPIN_TOGGLED))
+                    item->SetMarked(fEffectCloseSpinEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectCloseIllusionEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectCloseExplodeEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_EFFECT_CLOSE_EXPLODE_TOGGLED: {
+                fEffectCloseExplodeEnabled = !fEffectCloseExplodeEnabled;
+                if (fEffectCloseExplodeEnabled) {
+                    fEffectCloseBounceEnabled = false;
+                    fEffectCloseSpinEnabled = false;
+                    fEffectCloseIllusionEnabled = false;
+                    fEffectCloseWobbleEnabled = false;
+                }
+                bool anyActive = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || fEffectCloseExplodeEnabled;
+
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_NONE_TOGGLED))
+                    item->SetMarked(!anyActive);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_EXPLODE_TOGGLED))
+                    item->SetMarked(fEffectCloseExplodeEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_BOUNCE_TOGGLED))
+                    item->SetMarked(fEffectCloseBounceEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_SPIN_TOGGLED))
+                    item->SetMarked(fEffectCloseSpinEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_ILLUSION_TOGGLED))
+                    item->SetMarked(fEffectCloseIllusionEnabled);
+                if (BMenuItem* item = fCloseEffectsMenuField->Menu()->FindItem(MSG_EFFECT_CLOSE_WOBBLE_TOGGLED))
+                    item->SetMarked(fEffectCloseWobbleEnabled);
+                SaveConfiguration();
+                break;
+            }
+
+			case MSG_EFFECT_OPEN_NONE_TOGGLED: {
+                fEffectBounceEnabled = false;
+                fEffectSpinEnabled = false;
+                fEffectIllusionEnabled = false;
+                fEffectWobbleEnabled = false;
+                fEffectExplodeEnabled = false;
+
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_OPEN_NONE_TOGGLED))
+                    item->SetMarked(true);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_BOUNCE_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_SPIN_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_ILLUSION_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_WOBBLE_TOGGLED))
+                    item->SetMarked(false);
+                if (BMenuItem* item = fEffectsMenuField->Menu()->FindItem(MSG_EFFECT_EXPLODE_TOGGLED))
+                    item->SetMarked(false);
+                SaveConfiguration();
                 break;
             }
 
@@ -1481,6 +1783,12 @@ public:
                 break;
             }
             
+            case MSG_EFFECT_SPEED_SLIDER_CHANGED: {
+                fSpinDurationMs = static_cast<uint32>(fEffectSpeedSlider->Value());
+                SaveConfiguration();
+                break;
+            }
+            
              case MSG_ALPHA_SLIDER_CHANGED: {
                 fDockAlpha = fAlphaSlider->Value() / 100.0f;
                 SaveConfiguration();                
@@ -1523,25 +1831,21 @@ public:
 // =========================================================================
 class HaikuConfigWindow : public BWindow {
 public:
-	HaikuConfigWindow(BRect centralAnchor)
-	    : BWindow(BRect(0, 0, 560, 540), "hdesktop Configuration",
-	              B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
-	              B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
-	    
-	    ResizeTo(560.0f, 540.0f);
-	    float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-	    float targetY = centralAnchor.top + (centralAnchor.Height() - 540.0f) / 2.0f;
-	    MoveTo(targetX, targetY);
-	    
-	    ConfigView* configView = new ConfigView(Bounds());
-	    AddChild(configView);
-	}
-
-    virtual ~HaikuConfigWindow() {
-        gActiveConfigInstance = nullptr; // Reset address register safely on destruction
+    HaikuConfigWindow(BRect centralAnchor)
+        : BWindow(BRect(0, 0, 560, 610), "hdesktop Configuration",
+                B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
+                B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
+        
+        ResizeTo(560.0f, 610.0f);
+        float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 610.0f) / 2.0f;
+        MoveTo(targetX, targetY);
+        
+        ConfigView* configView = new ConfigView(Bounds());
+        AddChild(configView);
     }
+   
 };
-
 
 // =========================================================================
 // NATIVE BVIEW CARD GRID HOLDER (FULL WIDTH PROFILE)
@@ -2311,11 +2615,15 @@ private:
 
 
 public:
-		// --- 3D Icon Spin Animation State ---
-	team_id fSpinningAppTeam = -1;      // Team ID or identifier of the launching app
-	std::string fSpinningAppName = ""; // Name/path backup for launchers
-	uint32 fSpinAnimationStartTime = 0;
-	const uint32 kSpinDurationMs = 1000; // Exactly 1 second
+	// --- 3D Icon Effect Animation State ---
+	team_id fEffectAppTeam = -1;      // Team ID or identifier of the launching app
+	std::string fEffectAppName = ""; // Name/path backup for launchers
+	uint32 fEffectAnimationStartTime = 0;
+	
+	// --- Close App Animation State ---
+	team_id fClosingAppTeam = -1;
+	std::string fClosingAppName = "";
+	uint32 fCloseAnimationStartTime = 0;
     HaikuGlDesktopEngine(int width, int height) : fWidth(width), fHeight(height) {
 
         fBgColorR = 0.20f; fBgColorG = 0.42f; fBgColorB = 0.58f;         
@@ -2409,136 +2717,191 @@ public:
 
 
 void SyncDockWithRunningDeskbarApps() {
-        // --- CRITICAL ORIGINAL LEAK RECLAIM: FREE EXISTING TRACKING ICONS ---
-        // =================================================================
-        for (size_t i = 0; i < fTaskbarWindows.size(); i++) {
-            // Look inside your existing TaskbarItem layout parameters
-            if (fTaskbarWindows[i].icon.id > 0) {
-                // Force OpenGL to instantly liberate the graphic texture memory allocations
-                glDeleteTextures(1, &fTaskbarWindows[i].icon.id);
-                fTaskbarWindows[i].icon.id = 0; // Reset flag to guarantee safety
-            }
-        }
+    // 1. Keep a local backup so we can preserve textures and states
+    std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
+    fTaskbarWindows.clear();
+
+    std::vector<std::string> processedSignatures;
+
+    app_info activeAppInfo;
+    team_id activeTeamId = -1;
+    if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
+        activeTeamId = activeAppInfo.team;
+    }
+
+    BList teamList;
+    be_roster->GetAppList(&teamList);
+
+    int32 count = teamList.CountItems();
+    for (int32 i = 0; i < count; ++i) {
+        team_id id = (team_id)(addr_t)teamList.ItemAt(i);
         
-        // 1. Keep a local backup so we don't blow away our click modifications
-        std::vector<TaskbarItem> oldTaskbarWindows = fTaskbarWindows;
-        fTaskbarWindows.clear();
-    
-        std::vector<std::string> processedSignatures;
-    
-        // Fetch the absolute active app info once up front to optimize the loop
-        app_info activeAppInfo;
-        team_id activeTeamId = -1;
-        if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-            activeTeamId = activeAppInfo.team;
-        }
-    
-        // 2. Query the global Haiku roster for all active running teams
-        BList teamList;
-        be_roster->GetAppList(&teamList);
-    
-        int32 count = teamList.CountItems();
-        for (int32 i = 0; i < count; ++i) {
-            team_id id = (team_id)(addr_t)teamList.ItemAt(i);
+        app_info info;
+        if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
+            if ((info.flags & B_BACKGROUND_APP) != 0) continue;
+            if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
+
+            std::string appSignature(info.signature);
             
-            app_info info;
-            // Hide background apps and/or other apps we don't want to see.
-            if (be_roster->GetRunningAppInfo(id, &info) == B_OK) {
-                if ((info.flags & B_BACKGROUND_APP) != 0) continue;
-                if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
-    
-                std::string appSignature(info.signature);
-                
-                // --- Duplicate Filter For Firefox and Other Clones ---
-                // =================================================================
-                bool isDuplicate = false;
-                if (appSignature == "application/x-vnd.iceweasel"    || 
-                    appSignature == "application/x-vnd.Mozilla-Firefox" || 
-                    appSignature == "application/x-vnd.waterfox"         || 
-                    appSignature == "application/x-vnd.floorp-browser") {
-                    for (const auto& sig : processedSignatures) {
-                        if (sig == appSignature) {
-                            isDuplicate = true; 
-                            break;
-                        }
-                    }
-                }
-                if (isDuplicate) continue; // Skip subsequent Iceweasel/Firefox teams, allow all other apps
-    
-                BEntry entry(&info.ref);
-                if (entry.InitCheck() != B_OK) continue;
-    
-                char nameBuf[B_FILE_NAME_LENGTH];
-                entry.GetName(nameBuf);
-                std::string appTitle(nameBuf);
-    
-                if (appTitle == "Deskbar") {
-                    continue;
-                }
-    
-                BPath path;
-                entry.GetPath(&path);
-    
-                // --- AUTOMATIC 3D SPIN LAUNCH DETECTION ---
-                bool isBrandNewApp = true;
-                for (const auto& oldWin : oldTaskbarWindows) {
-                    if (oldWin.teamId == id) {
-                        isBrandNewApp = false;
+            bool isDuplicate = false;
+            if (appSignature == "application/x-vnd.iceweasel"    || 
+                appSignature == "application/x-vnd.Mozilla-Firefox" || 
+                appSignature == "application/x-vnd.waterfox"         || 
+                appSignature == "application/x-vnd.floorp-browser") {
+                for (const auto& sig : processedSignatures) {
+                    if (sig == appSignature) {
+                        isDuplicate = true; 
                         break;
                     }
                 }
+            }
+            if (isDuplicate) continue;
 
-                // If this team ID wasn't present in the previous check, it just launched from anywhere!
-                if (isBrandNewApp && id != be_app->Team()) {
-                    fSpinningAppTeam = id;
-                    fSpinningAppName = "";
-                    fSpinAnimationStartTime = SDL_GetTicks();
+            BEntry entry(&info.ref);
+            if (entry.InitCheck() != B_OK) continue;
+
+            char nameBuf[B_FILE_NAME_LENGTH];
+            entry.GetName(nameBuf);
+            std::string appTitle(nameBuf);
+
+            if (appTitle == "Deskbar") {
+                continue;
+            }
+
+            BPath path;
+            entry.GetPath(&path);
+
+            // Detect brand new apps for launch animations
+            bool isBrandNewApp = true;
+            for (const auto& oldWin : oldTaskbarWindows) {
+                if (oldWin.teamId == id) {
+                    isBrandNewApp = false;
+                    break;
                 }
-                // ------------------------------------------
+            }
 
-                TaskbarItem openApp;
-                openApp.title = appTitle;
+            if (isBrandNewApp && id != be_app->Team()) {
+                fEffectAppTeam = id;
+                fEffectAppName = "";
+                fEffectAnimationStartTime = SDL_GetTicks();
+            }
+
+            TaskbarItem openApp;
+            openApp.title = appTitle;
+            openApp.teamId = id;
+
+            // --- TEXTURE CACHING (REUSE INSTEAD OF RELOAD) ---
+            bool reusedTexture = false;
+            for (const auto& oldWin : oldTaskbarWindows) {
+                if (oldWin.teamId == id && oldWin.icon.id > 0) {
+                    openApp.icon = oldWin.icon; 
+                    reusedTexture = true;
+                    break;
+                }
+            }
+            if (!reusedTexture) {
                 openApp.icon = LoadIconFromNode(path.Path(), 128); 
-                openApp.teamId = id; 
-    
-                // --- FIXED STATE RESTORE LAYER WITH FOREGROUND CHECK ---
-                bool foundOldInstance = false;
-                for (const auto& oldWin : oldTaskbarWindows) {
-                    if (oldWin.teamId == id) {
-                        openApp.isMinimized = oldWin.isMinimized;
-                        foundOldInstance = true;
-                        break;
-                    }
+            }
+            // ------------------------------------------------
+
+            bool foundOldInstance = false;
+            for (const auto& oldWin : oldTaskbarWindows) {
+                if (oldWin.teamId == id) {
+                    openApp.isMinimized = oldWin.isMinimized;
+                    foundOldInstance = true;
+                    break;
                 }
-    
-                // CORRECTION: If it's a completely new application node or our dock app itself 
-                // currently holds stolen click focus, evaluate it cleanly via the roster information.
-                if (!foundOldInstance || activeTeamId == id) {
-                    // If it's the absolute front window, it is not minimized
-                    if (activeTeamId == id) {
-                        openApp.isMinimized = false;
-                    } 
-                    // If our dock app currently holds focus, fallback safely to its previous state 
-                    // or assume it's minimized if it wasn't tracked yet and isn't us
-                    else if (activeTeamId == be_app->Team()) {
-                        openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
-                    } 
-                    else {
-                        openApp.isMinimized = true;
-                    }
+            }
+
+            if (!foundOldInstance || activeTeamId == id) {
+                if (activeTeamId == id) {
+                    openApp.isMinimized = false;
+                } else if (activeTeamId == be_app->Team()) {
+                    openApp.isMinimized = foundOldInstance ? openApp.isMinimized : true;
+                } else {
+                    openApp.isMinimized = true;
                 }
-    
-                static bool sAlwaysTrue = true;
-                openApp.openStateFlag = &sAlwaysTrue;
-                openApp.minimizeStateFlag = &openApp.isMinimized; 
-    
-                // Store signatures to maintain historical state tracking for the filtered targets
-                processedSignatures.push_back(appSignature);
-                fTaskbarWindows.push_back(openApp);
+            }
+
+            static bool sAlwaysTrue = true;
+            openApp.openStateFlag = &sAlwaysTrue;
+            openApp.minimizeStateFlag = &openApp.isMinimized; 
+
+            processedSignatures.push_back(appSignature);
+            fTaskbarWindows.push_back(openApp);
+        }
+    }
+
+    // --- DETECT NORMAL/EXTERNAL APP CLOSURES ---
+    if (fClosingAppTeam == -1) {
+        for (const auto& oldWin : oldTaskbarWindows) {
+            bool stillRunning = false;
+            for (const auto& newWin : fTaskbarWindows) {
+                if (newWin.teamId == oldWin.teamId) {
+                    stillRunning = true;
+                    break;
+                }
+            }
+
+            if (!stillRunning) {
+                bool anyCloseEffectEnabled = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || 
+                                             fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || 
+                                             fEffectCloseExplodeEnabled;
+
+                if (anyCloseEffectEnabled) {
+                    fClosingAppTeam = oldWin.teamId;
+                    fClosingAppName = oldWin.title;
+                    fCloseAnimationStartTime = SDL_GetTicks();
+                    
+                    fTaskbarWindows.push_back(oldWin);
+                    break; 
+                }
             }
         }
     }
 
+    // Retain closing app in dock during animation
+    if (fClosingAppTeam != -1) {
+        uint32 elapsedTicks = SDL_GetTicks() - fCloseAnimationStartTime;
+        if (elapsedTicks < fSpinDurationMs) {
+            bool foundInNewList = false;
+            for (const auto& win : fTaskbarWindows) {
+                if (win.teamId == fClosingAppTeam) {
+                    foundInNewList = true;
+                    break;
+                }
+            }
+            if (!foundInNewList) {
+                for (const auto& oldWin : oldTaskbarWindows) {
+                    if (oldWin.teamId == fClosingAppTeam) {
+                        fTaskbarWindows.push_back(oldWin);
+                        break;
+                    }
+                }
+            }
+        } else {
+            fClosingAppTeam = -1;
+            fClosingAppName = "";
+            fCloseAnimationStartTime = 0;
+        }
+    }
+
+    // Clean up textures for apps that are genuinely gone now
+    for (const auto& oldWin : oldTaskbarWindows) {
+        if (oldWin.teamId == fClosingAppTeam) continue; 
+        
+        bool stillExists = false;
+        for (const auto& newWin : fTaskbarWindows) {
+            if (newWin.teamId == oldWin.teamId) {
+                stillExists = true;
+                break;
+            }
+        }
+        if (!stillExists && oldWin.icon.id > 0) {
+            glDeleteTextures(1, &oldWin.icon.id);
+        }
+    }
+}
 
 
 	struct TrackerMenuArgs {
@@ -2615,9 +2978,9 @@ void SyncDockWithRunningDeskbarApps() {
                     if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
                         trackerTeam = trackerInfo.team;
                     }
-                    args->engine->fSpinningAppTeam = trackerTeam;
-                    args->engine->fSpinningAppName = "";
-                    args->engine->fSpinAnimationStartTime = SDL_GetTicks();
+                    args->engine->fEffectAppTeam = trackerTeam;
+                    args->engine->fEffectAppName = "";
+                    args->engine->fEffectAnimationStartTime = SDL_GetTicks();
                     // ------------------------------------------
                 }
             }
@@ -3287,7 +3650,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 450.0f; // Expanded to 450 pixels!
+									    float winHeight = 610.0f; 
 									
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
@@ -3332,9 +3695,9 @@ void SyncDockWithRunningDeskbarApps() {
                         gActiveDrawerInstance->Show();
                         
                         // --- TRIGGER BOUNCE/POP ANIMATION FOR LEAF ---
-                        fSpinningAppName = "LeafMenu";
-                        fSpinningAppTeam = -1;
-                        fSpinAnimationStartTime = SDL_GetTicks();
+                        fEffectAppName = "LeafMenu";
+                        fEffectAppTeam = -1;
+                        fEffectAnimationStartTime = SDL_GetTicks();
                         // ---------------------------------------------
                     }
                     
@@ -3376,8 +3739,25 @@ void SyncDockWithRunningDeskbarApps() {
 	            // MIDDLE MOUSE CLICK: NATIVE APPLICATION CLOSE PROTOCOL (FIXED BUTTONS)
 	            // =========================================================================
 	            // FIX: Removed !isTracker condition to let the middle click target Tracker
-	            	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
-	                
+	            if (button == SDL_BUTTON_MIDDLE && button != SDL_BUTTON_RIGHT) {
+fEffectAppTeam = -1;
+    fEffectAnimationStartTime = 0;
+
+    bool anyCloseEffectEnabled = fEffectCloseBounceEnabled || fEffectCloseSpinEnabled || 
+                                 fEffectCloseIllusionEnabled || fEffectCloseWobbleEnabled || 
+                                 fEffectCloseExplodeEnabled;
+
+    if (anyCloseEffectEnabled) {
+        // Trigger close animation sequence with delay
+        fClosingAppTeam = activeTaskWin.teamId;
+        fClosingAppName = activeTaskWin.title;
+        fCloseAnimationStartTime = SDL_GetTicks();
+    } else {
+        // Close instantly with zero delay
+        fClosingAppTeam = -1;
+        fClosingAppName = "";
+        fCloseAnimationStartTime = 0;
+    }
 	             	if (isTracker) {
 	                    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 	                    if (trackerMessenger.IsValid()) {
@@ -3589,9 +3969,9 @@ void SyncDockWithRunningDeskbarApps() {
 	                            if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
 	                                trackerTeam = trackerInfo.team;
 	                            }
-	                            fSpinningAppTeam = trackerTeam;
-	                            fSpinningAppName = "";
-	                            fSpinAnimationStartTime = SDL_GetTicks();
+	                            fEffectAppTeam = trackerTeam;
+	                            fEffectAppName = "";
+	                            fEffectAnimationStartTime = SDL_GetTicks();
 	                            // ----------------------------------------
                         }
                         
@@ -3607,10 +3987,10 @@ void SyncDockWithRunningDeskbarApps() {
 	                } else {
 	                    be_roster->ActivateApp(activeTaskWin.teamId);
 	                }
-	                // Trigger 3D spin on window focus/activation
-					fSpinningAppTeam = activeTaskWin.teamId;
-					fSpinningAppName = "";
-					fSpinAnimationStartTime = SDL_GetTicks();
+	                // Trigger 3D Effect on window focus/activation
+					fEffectAppTeam = activeTaskWin.teamId;
+					fEffectAppName = "";
+					fEffectAnimationStartTime = SDL_GetTicks();
 					
                     // FIX 2: Group Restore Force Pipeline.
                     // This explicitly flushes window tokens belonging to group-minimized layers 
@@ -3687,9 +4067,9 @@ void SyncDockWithRunningDeskbarApps() {
                 std::system("/boot/system/Tracker /boot/trash &");
                 
                 // --- TRIGGER BOUNCE/POP FOR TRASH BIN ---
-                fSpinningAppName = "TrashBin";
-                fSpinningAppTeam = -1;
-                fSpinAnimationStartTime = SDL_GetTicks();
+                fEffectAppName = "TrashBin";
+                fEffectAppTeam = -1;
+                fEffectAnimationStartTime = SDL_GetTicks();
                 // ----------------------------------------
                 
                 return;
@@ -3699,9 +4079,9 @@ void SyncDockWithRunningDeskbarApps() {
                 fLastTrashCheckTime = 0; 
                 
                 // --- TRIGGER BOUNCE/POP FOR TRASH BIN ---
-                fSpinningAppName = "TrashBin";
-                fSpinningAppTeam = -1;
-                fSpinAnimationStartTime = SDL_GetTicks();
+                fEffectAppName = "TrashBin";
+                fEffectAppTeam = -1;
+                fEffectAnimationStartTime = SDL_GetTicks();
                 // ----------------------------------------
                 
                 return;
@@ -3797,9 +4177,9 @@ void SyncDockWithRunningDeskbarApps() {
                                     trackerMessenger.SendMessage(&openMsg);
                                     
                                     // --- TRIGGER THE TRASH BIN BOUNCE/POP ANIMATION ---
-                                    threadArgs->engine->fSpinningAppTeam = -1;
-                                    threadArgs->engine->fSpinningAppName = "TrashBin";
-                                    threadArgs->engine->fSpinAnimationStartTime = SDL_GetTicks();
+                                    threadArgs->engine->fEffectAppTeam = -1;
+                                    threadArgs->engine->fEffectAppName = "TrashBin";
+                                    threadArgs->engine->fEffectAnimationStartTime = SDL_GetTicks();
                                     // ------------------------------------------------
                                 }
                             }
@@ -4610,12 +4990,17 @@ void RenderFrame(float yOffset) {
             		float animProgress = 0.0f;
             		bool isExploding = false;   
             		                  
-                    if (!fSpinningAppName.empty() && fSpinningAppName == "LeafMenu" && fSpinAnimationStartTime > 0) {
-                        uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-if (elapsedTicks < kSpinDurationMs) {
-                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                    if (!fEffectAppName.empty() && fEffectAppName == "LeafMenu" && fEffectAnimationStartTime > 0) {
+                        uint32 elapsedTicks = SDL_GetTicks() - fEffectAnimationStartTime;
+						if (elapsedTicks < fSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs);
                             
-                            if (fEffectSpinEnabled) {
+                            if (fEffectBounceEnabled) {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectSpinEnabled) {
                                 rotationAngle = animProgress * 360.0f;
                                 popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
                                 scaleX = popScale;
@@ -4632,10 +5017,7 @@ if (elapsedTicks < kSpinDurationMs) {
                             } else if (fEffectExplodeEnabled) {
                                 isExploding = true;
                             } else {
-                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
-                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
-                                scaleX = popScale;
-                                scaleY = popScale;
+                                // No Effects selected: keep default identities (no animation offset)
                             }
                         }
                     }
@@ -4719,12 +5101,17 @@ if (elapsedTicks < kSpinDurationMs) {
             		float animProgress = 0.0f;
             		bool isExploding = false;  
                     
-                    if (!fSpinningAppName.empty() && item.name == fSpinningAppName && fSpinAnimationStartTime > 0) {
-                        uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-						if (elapsedTicks < kSpinDurationMs) {
-                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+                    if (!fEffectAppName.empty() && item.name == fEffectAppName && fEffectAnimationStartTime > 0) {
+                        uint32 elapsedTicks = SDL_GetTicks() - fEffectAnimationStartTime;
+						if (elapsedTicks < fSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs);
                             
-                            if (fEffectSpinEnabled) {
+                            if (fEffectBounceEnabled) {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectSpinEnabled) {
                                 rotationAngle = animProgress * 360.0f;
                                 popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
                                 scaleX = popScale;
@@ -4741,10 +5128,7 @@ if (elapsedTicks < kSpinDurationMs) {
                             } else if (fEffectExplodeEnabled) {
                                 isExploding = true;
                             } else {
-                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
-                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
-                                scaleX = popScale;
-                                scaleY = popScale;
+                                // No Effects selected: keep default identities (no animation offset)
                             }
                         }
                     }
@@ -4922,18 +5306,20 @@ if (elapsedTicks < kSpinDurationMs) {
 		        }
 		    }
 	
-			// 3. ZERO-LAG ASSIGNMENT 
-		    if (isCurrentlyForeground) {
+		// 3. ZERO-LAG ASSIGNMENT 
+		    if (activeTaskWin.teamId == fClosingAppTeam) {
+		        // Force lock the closing app's visual state so it doesn't flash or dim mid-animation
+		        activeTaskWin.isMinimized = false;
+		    } else if (isCurrentlyForeground) {
 		        activeTaskWin.isMinimized = false;
 		    } else {
 		        activeTaskWin.isMinimized = appIsGenuinelyMinimized;
 		    }
-		    
-		    // =========================================================================
+				    // =========================================================================
 		    // STEP 4: DRAW WINDOW ICON THUMBNAIL CORES AND ACTIVE INDICATORS
 		    // =========================================================================
 	
-		    // A. Draw active task window application vector icon thumbnail with 3D spin support
+		    // A. Draw active task window application vector icon thumbnail with 3D effec support
 		    if (activeTaskWin.icon.id != 0) {
 		        glEnable(GL_TEXTURE_2D); 
 		        glBindTexture(GL_TEXTURE_2D, activeTaskWin.icon.id);
@@ -4948,43 +5334,109 @@ if (elapsedTicks < kSpinDurationMs) {
 				float centerX = iconBounds.left + (size / 2.0f);
 				float centerY = iconBounds.top + (size / 2.0f);
 				
-                float bounceOffset = 0.0f;
+float bounceOffset = 0.0f;
                 float popScale = 1.0f;
                 float rotationAngle = 0.0f;
                 float scaleX = 1.0f;
                 float scaleY = 1.0f;
-            	float animProgress = 0.0f;
-            	bool isExploding = false;  
+                float animProgress = 0.0f;
+                bool isExploding = false;  
                 
-				if (fSpinningAppTeam != -1 && activeTaskWin.teamId == fSpinningAppTeam && fSpinAnimationStartTime > 0) {
-				    uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-					if (elapsedTicks < kSpinDurationMs) {
-                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
-                            
-                            if (fEffectSpinEnabled) {
-                                rotationAngle = animProgress * 360.0f;
-                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
-                                scaleX = popScale;
-                                scaleY = popScale;
-                            } else if (fEffectIllusionEnabled) {
-                                scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
-                                scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
-                                rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
-                            } else if (fEffectWobbleEnabled) {
-                                rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
-                                popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
-                                scaleX = popScale;
-                                scaleY = popScale;
-                            } else if (fEffectExplodeEnabled) {
-                                isExploding = true;
+                if (fEffectAppTeam != -1 && activeTaskWin.teamId == fEffectAppTeam && fEffectAnimationStartTime > 0) {
+                    uint32 elapsedTicks = SDL_GetTicks() - fEffectAnimationStartTime;
+                    if (elapsedTicks < fSpinDurationMs) {
+                        animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs);
+                        
+                        if (fEffectBounceEnabled) {
+                            bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                            popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                            scaleX = popScale;
+                            scaleY = popScale;
+                        } else if (fEffectSpinEnabled) {
+                            rotationAngle = animProgress * 360.0f;
+                            popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
+                            scaleX = popScale;
+                            scaleY = popScale;
+                        } else if (fEffectIllusionEnabled) {
+                            scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                            scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                            rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
+                        } else if (fEffectWobbleEnabled) {
+                            rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
+                            popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
+                            scaleX = popScale;
+                            scaleY = popScale;
+                        } else if (fEffectExplodeEnabled) {
+                            isExploding = true;
+                        }
+                    } else {
+                        fEffectAppTeam = -1;
+                        fEffectAnimationStartTime = 0;
+                    } 
+                } else if (fClosingAppTeam != -1 && activeTaskWin.teamId == fClosingAppTeam && fCloseAnimationStartTime > 0) {
+                    uint32 elapsedTicks = SDL_GetTicks() - fCloseAnimationStartTime;
+                    if (elapsedTicks < fSpinDurationMs) {
+                        animProgress = (static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs)) * 1.8f;
+if (animProgress > 1.0f) animProgress = 1.0f; // Clamp to finish cleanly
+                        
+                        if (fEffectCloseBounceEnabled) {
+                            bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                            popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                            scaleX = popScale;
+                            scaleY = popScale;
+                        } else if (fEffectCloseSpinEnabled) {
+                            rotationAngle = animProgress * 360.0f;
+                            popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
+                            scaleX = popScale;
+                            scaleY = popScale;
+                        } else if (fEffectCloseIllusionEnabled) {
+                            scaleX = 1.0f + std::sin(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                            scaleY = 1.0f + std::cos(animProgress * 3.14159f * 4.0f) * 0.4f * (1.0f - animProgress);
+                            rotationAngle = std::sin(animProgress * 3.14159f * 2.0f) * 15.0f;
+                        } else if (fEffectCloseWobbleEnabled) {
+                            rotationAngle = std::sin(animProgress * 3.14159f * 8.0f) * 22.0f * (1.0f - animProgress);
+                            popScale = 1.0f + std::sin(animProgress * 3.14159f * 2.0f) * 0.2f * (1.0f - animProgress);
+                            scaleX = popScale;
+                            scaleY = popScale;
+                        } else if (fEffectCloseExplodeEnabled) {
+                            isExploding = true;
+                        }
+                    } else {
+                        // Animation finished — NOW execute the actual application closure sequence
+                        if (fClosingAppTeam != -1) {
+                            if (isTracker) {
+                                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
+                                if (trackerMessenger.IsValid()) {
+                                    BMessage countRequest(B_COUNT_PROPERTIES);
+                                    countRequest.AddSpecifier("Window");
+                                    BMessage reply;
+                                    if (trackerMessenger.SendMessage(&countRequest, &reply) == B_OK) {
+                                        int32 totalWindows = 0;
+                                        if (reply.FindInt32("result", &totalWindows) == B_OK) {
+                                            for (int32 wIdx = totalWindows - 1; wIdx > 0; --wIdx) {
+                                                BMessage quitWindowMessage(B_QUIT_REQUESTED);
+                                                quitWindowMessage.AddSpecifier("Window", wIdx);
+                                                trackerMessenger.SendMessage(&quitWindowMessage);
+                                            }
+                                        }
+                                    }
+                                }
                             } else {
-                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
-                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
-                                scaleX = popScale;
-                                scaleY = popScale;
+                                BMessenger targetAppMessenger(NULL, fClosingAppTeam);
+                                if (targetAppMessenger.IsValid()) {
+                                    targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+                                } else {
+                                    kill_team(fClosingAppTeam);
+                                }
                             }
                         }
+
+                        // Hard reset state variables so they never linger
+                        fClosingAppTeam = -1;
+                        fClosingAppName = "";
+                        fCloseAnimationStartTime = 0;
                     }
+                }
 					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
                     if (rotationAngle != 0.0f) {
                         glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
@@ -5162,12 +5614,17 @@ if (elapsedTicks < kSpinDurationMs) {
             float animProgress = 0.0f;
             bool isExploding = false;  
                   
-            if (!fSpinningAppName.empty() && fSpinningAppName == "TrashBin" && fSpinAnimationStartTime > 0) {
-                uint32 elapsedTicks = SDL_GetTicks() - fSpinAnimationStartTime;
-					if (elapsedTicks < kSpinDurationMs) {
-                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(kSpinDurationMs);
+            if (!fEffectAppName.empty() && fEffectAppName == "TrashBin" && fEffectAnimationStartTime > 0) {
+                uint32 elapsedTicks = SDL_GetTicks() - fEffectAnimationStartTime;
+					if (elapsedTicks < fSpinDurationMs) {
+                            animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs);
                             
-                            if (fEffectSpinEnabled) {
+                            if (fEffectBounceEnabled) {
+                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
+                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
+                                scaleX = popScale;
+                                scaleY = popScale;
+                            } else if (fEffectSpinEnabled) {
                                 rotationAngle = animProgress * 360.0f;
                                 popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.2f;
                                 scaleX = popScale;
@@ -5184,10 +5641,7 @@ if (elapsedTicks < kSpinDurationMs) {
                             } else if (fEffectExplodeEnabled) {
                                 isExploding = true;
                             } else {
-                                bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
-                                popScale = 1.0f + std::sin(animProgress * 3.14159f) * 0.4f; 
-                                scaleX = popScale;
-                                scaleY = popScale;
+                                // No Effects selected: keep default identities (no animation offset)
                             }
                         }
                     }
@@ -6225,76 +6679,96 @@ public:
 
 void SaveConfiguration() {
     BPath path;
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
-    path.Append("hdesktop_settings");
-    
-    BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-    if (file.InitCheck() != B_OK) return;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+        path.Append("hdesktop_settings");
+        BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+        if (file.InitCheck() == B_OK) {
+            BMessage settingsMsg;
+            settingsMsg.AddBool("auto_hide", autoHideEnabled);
+            settingsMsg.AddBool("system_tray", showSystemTray);
+            settingsMsg.AddBool("auto_raise", dockAlwaysOnTop);
+            settingsMsg.AddBool("text_overlays", fShowTitleOverlays);
+            
+			settingsMsg.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
+            settingsMsg.AddFloat(kSettingsAlphaKey, fDockAlpha);
+            settingsMsg.AddInt32(kSettingsSpinDurationKey, static_cast<int32>(fSpinDurationMs));
 
-    BMessage settings;
-    
-    settings.SetBool("auto_hide",     autoHideEnabled);
-    settings.SetBool("sys_tray",      showSystemTray);
-    settings.SetBool("auto_raise",    dockAlwaysOnTop);
-    settings.SetBool("text_overlays", fShowTitleOverlays);
-    settings.SetBool("effect_bounce", fEffectBounceEnabled);
-    settings.SetBool("effect_spin",   fEffectSpinEnabled);
-    settings.SetBool("effect_illusion", fEffectIllusionEnabled);
-    settings.SetBool("effect_wobble", fEffectWobbleEnabled);
-    settings.SetBool("effect_explode", fEffectExplodeEnabled);
-    settings.SetFloat(kSettingsIconSizeKey, fBaseIconSize);
-    settings.SetFloat(kSettingsAlphaKey, fDockAlpha);
-    
-    settings.RemoveName("favorite_apps");
-    for (const auto& favPath : gFavoritePaths) {
-        settings.AddString("favorite_apps", favPath.c_str());
+            // Open effects
+            settingsMsg.AddBool("effect_bounce", fEffectBounceEnabled);
+            settingsMsg.AddBool("effect_spin", fEffectSpinEnabled);
+            settingsMsg.AddBool("effect_illusion", fEffectIllusionEnabled);
+            settingsMsg.AddBool("effect_wobble", fEffectWobbleEnabled);
+            settingsMsg.AddBool("effect_explode", fEffectExplodeEnabled);
+
+            // Close effects
+            settingsMsg.AddBool("effect_close_bounce", fEffectCloseBounceEnabled);
+            settingsMsg.AddBool("effect_close_spin", fEffectCloseSpinEnabled);
+            settingsMsg.AddBool("effect_close_illusion", fEffectCloseIllusionEnabled);
+            settingsMsg.AddBool("effect_close_wobble", fEffectCloseWobbleEnabled);
+            settingsMsg.AddBool("effect_close_explode", fEffectCloseExplodeEnabled);
+
+            // Save favorite paths
+            for (const auto& fav : gFavoritePaths) {
+                settingsMsg.AddString("favorite_path", fav.c_str());
+            }
+
+            ssize_t size = settingsMsg.FlattenedSize();
+            char* buffer = new(std::nothrow) char[size];
+            if (buffer != nullptr) {
+                if (settingsMsg.Flatten(buffer, size) == B_OK) {
+                    file.Write(buffer, size);
+                }
+                delete[] buffer;
+            }
+        }
     }
-    
-    settings.Flatten(&file); 
 }
 
 void LoadConfiguration() {
-    fDockAlpha = 0.50f;
-    fBaseIconSize = 48.0f; 
-    autoHideEnabled = false;
-    showSystemTray = false;
-    dockAlwaysOnTop = false;
-    fShowTitleOverlays = true;
-    fEffectBounceEnabled = false;
-    fEffectSpinEnabled = false;
-    fEffectIllusionEnabled = false;
-    fEffectWobbleEnabled = false;
-    fEffectExplodeEnabled = false;
-
     BPath path;
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
-    path.Append("hdesktop_settings");
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+        path.Append("hdesktop_settings");
+        BFile file(path.Path(), B_READ_ONLY);
+        if (file.InitCheck() == B_OK) {
+            BMessage settingsMsg;
+            if (settingsMsg.Unflatten(&file) == B_OK) {
+                bool valBool;
+                float valFloat;
+				int32 valInt32;
+				
+                if (settingsMsg.FindBool("auto_hide", &valBool) == B_OK) autoHideEnabled = valBool;
+                if (settingsMsg.FindBool("system_tray", &valBool) == B_OK) showSystemTray = valBool;
+                if (settingsMsg.FindBool("auto_raise", &valBool) == B_OK) dockAlwaysOnTop = valBool;
+                if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlays = valBool;
 
-    BFile file(path.Path(), B_READ_ONLY);
-    if (file.InitCheck() != B_OK) return;
+                if (settingsMsg.FindFloat(kSettingsIconSizeKey, &valFloat) == B_OK) fBaseIconSize = valFloat;
+                if (settingsMsg.FindFloat(kSettingsAlphaKey, &valFloat) == B_OK) fDockAlpha = valFloat;
+                if (settingsMsg.FindInt32(kSettingsSpinDurationKey, &valInt32) == B_OK) fSpinDurationMs = static_cast<uint32>(valInt32); 
 
-    BMessage settings;
-    if (settings.Unflatten(&file) == B_OK) {
-        settings.FindBool("auto_hide", &autoHideEnabled);
-        settings.FindBool("sys_tray", &showSystemTray);
-        settings.FindBool("auto_raise", &dockAlwaysOnTop);
-        settings.FindBool("text_overlays", &fShowTitleOverlays);
-        settings.FindBool("effect_bounce", &fEffectBounceEnabled);
-        settings.FindBool("effect_spin", &fEffectSpinEnabled);
-        settings.FindBool("effect_illusion", &fEffectIllusionEnabled);
-        settings.FindBool("effect_wobble", &fEffectWobbleEnabled);
-        settings.FindBool("effect_explode", &fEffectExplodeEnabled);
-        settings.FindFloat(kSettingsAlphaKey, &fDockAlpha);
-        settings.FindFloat(kSettingsIconSizeKey, &fBaseIconSize);
-        
-        const char* favPath = nullptr;
-        int32 i = 0;
-        while (settings.FindString("favorite_apps", i, &favPath) == B_OK) {
-            if (favPath != nullptr) {
-                gFavoritePaths.insert(favPath);
+                // Open effects
+                if (settingsMsg.FindBool("effect_bounce", &valBool) == B_OK) fEffectBounceEnabled = valBool;
+                if (settingsMsg.FindBool("effect_spin", &valBool) == B_OK) fEffectSpinEnabled = valBool;
+                if (settingsMsg.FindBool("effect_illusion", &valBool) == B_OK) fEffectIllusionEnabled = valBool;
+                if (settingsMsg.FindBool("effect_wobble", &valBool) == B_OK) fEffectWobbleEnabled = valBool;
+                if (settingsMsg.FindBool("effect_explode", &valBool) == B_OK) fEffectExplodeEnabled = valBool;
+
+                // Close effects
+                if (settingsMsg.FindBool("effect_close_bounce", &valBool) == B_OK) fEffectCloseBounceEnabled = valBool;
+                if (settingsMsg.FindBool("effect_close_spin", &valBool) == B_OK) fEffectCloseSpinEnabled = valBool;
+                if (settingsMsg.FindBool("effect_close_illusion", &valBool) == B_OK) fEffectCloseIllusionEnabled = valBool;
+                if (settingsMsg.FindBool("effect_close_wobble", &valBool) == B_OK) fEffectCloseWobbleEnabled = valBool;
+                if (settingsMsg.FindBool("effect_close_explode", &valBool) == B_OK) fEffectCloseExplodeEnabled = valBool;
+
+                // Load favorite paths
+                const char* favPath;
+                int32 i = 0;
+                gFavoritePaths.clear();
+                while (settingsMsg.FindString("favorite_path", i, &favPath) == B_OK) {
+                    gFavoritePaths.insert(favPath);
+                    i++;
+                }
             }
-            i++;
-        }     
+        }
     }
 }
 
@@ -6967,7 +7441,7 @@ int main(int argc, char* argv[]) {
         // CPU-OPTIMIZED RENDER INJECTION
         // =========================================================================
         
-        if (desktopEngine.fSpinAnimationStartTime > 0) {
+        if (desktopEngine.fEffectAnimationStartTime > 0) {
             needsRender = true;
         }
         
