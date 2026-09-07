@@ -66,7 +66,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.40"
+#define APP_LOCAL_VERSION "v1.0.41"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -2643,6 +2643,7 @@ public:
 		fTrashTooltipH = 0;
 		fLastTrackerMenuCloseTime = 0;
 
+		
         fHaikuMenuIcon = LoadIconFromNode("/boot/system/apps/AboutSystem", 128);
         fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
 
@@ -5480,28 +5481,27 @@ void SyncDockWithRunningDeskbarApps() {
 		    // =========================================================================
 		    // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
 		    // =========================================================================
-		    const float BASE_ICON_SIZE_THRESHOLD = 48.0f; 
-		    if (size > BASE_ICON_SIZE_THRESHOLD && fShowTitleOverlays) {
-		        
-		        // Check if the current layout window match represents the item under active hover
-		        // FIX: Allow fMouseY to go ABOVE the icon into the text overlay area (e.g., 40 pixels higher)
-		        if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right &&
-		            fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom) {
-		            
-		            listBaseX = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
-		            listBaseY = iconBounds.top - 12.0f;
-		            
-		            if (fHoveredTeam != activeTaskWin.teamId) {
-		                fHoveredTeam = activeTaskWin.teamId;
-		                GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
-		            }
-		            
-		            fShouldDrawList = true;
-		            mouseIsOverAnyIcon = true; 
-		            mouseLeftTime = 0;         
-		        }
-		    }
-		    
+			if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right &&
+			    fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom) {
+			    
+			    listBaseX = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
+			    listBaseY = iconBounds.top - 12.0f;
+			    
+			    bigtime_t nowTime = system_time();
+			    bool teamChanged = (fHoveredTeam != activeTaskWin.teamId);
+			    bool refreshDue = (nowTime - fLastHoverListRefreshTime) >= 300000; // 300ms
+			    
+			    if (teamChanged || refreshDue) {
+			        fHoveredTeam = activeTaskWin.teamId;
+			        GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
+			        fLastHoverListRefreshTime = nowTime;
+			    }
+			    
+			    fShouldDrawList = true;
+			    mouseIsOverAnyIcon = true; 
+			    mouseLeftTime = 0;         
+			}
+					    
 		    currentX += size + padding;
 		    renderingSlotIdx++;
 		} 
@@ -6577,15 +6577,16 @@ private:
     int          fTrashTooltipH = 0;
     bool         fTrashTextGenerated = false;
     
-    float fCurrentVolumeLevel = 0.5f; // Active volume state mapping cache (0.0f to 1.0f)
+    float fCurrentVolumeLevel = 0.5f; 
 	uint32 fLastVolumeCheckTime = 0;
-	bool fIsDraggingVolumeSlider = false; // Persistent drag flag
-	float fCachedVolLeft = 0.0f;          // Saved screen positions
+	bool fIsDraggingVolumeSlider = false; 
+	float fCachedVolLeft = 0.0f;         
 	float fCachedVolTop = 0.0f;
 	float fCachedVolWidth = 0.0f;
 	float fCachedVolHeight = 0.0f;
 	float fPreMuteVolumeLevel = 0.5f; 
 	uint32 fLastTrackerMenuCloseTime; 
+	uint32 fLastHoverListRefreshTime;
 	bool fTrackerMenuIsActive = false;
 	
 //@private    
