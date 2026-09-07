@@ -66,7 +66,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.41"
+#define APP_LOCAL_VERSION "v1.0.42"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -4571,19 +4571,24 @@ void SyncDockWithRunningDeskbarApps() {
 		static bigtime_t mouseLeftTime = 0; 
 		bool mouseIsOverAnyIcon = false;   
 		    
-	    // KEEP THIS: You still need to read the live color from disk!
+	    // Read the live color from disk!
 	    rgb_color systemBg = GetLiveSystemBackgroundColor();
 	
-	    // KEEP THIS: Keep updating your global class floats dynamically
+	    // Update global class floats dynamically
 	    fBgColorR = systemBg.red   / 255.0f;
 	    fBgColorG = systemBg.green / 255.0f;
 	    fBgColorB = systemBg.blue  / 255.0f;
 	
-	    // CHANGE THIS: Clear the canvas with transparency (0.0f alpha) 
-	    // This allows your desktop wallpaper to show through properly!
+	    // Clear the canvas with transparency (0.0f alpha) 
+	    // This allows wallpaper to show through properly!
 	    glClearColor(0.0f, 0.0f, 0.0f, 0.0f); 
 	    glClear(GL_COLOR_BUFFER_BIT);
 		
+		
+		// Keep exploding shards from flying above the actual SDL window's visible bounds
+		float fExplosionWindowTopBoundary = fHeight - std::ceil(fBaseIconSize * 2.0f + 50.0f);
+		float fExplosionMinY = fExplosionWindowTopBoundary + 8.0f; // small safety margin
+	
         // =========================================================================
         // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED) - STATIONARY
         // =========================================================================
@@ -5058,8 +5063,16 @@ void SyncDockWithRunningDeskbarApps() {
                                 
 								float pLeft = -size/2.0f + x * subSize + offsetX;
                                 float pRight = pLeft + subSize;
-                                float pTop = -size/2.0f + y * subSize + offsetY;
-                                float pBottom = pTop + subSize;
+								float pTop = -size/2.0f + y * subSize + offsetY;
+								float pBottom = pTop + subSize;
+								
+								// Push the shard back down if it would fly above the window's visible area
+								float absoluteTop = (centerY - bounceOffset) + pTop;
+								if (absoluteTop < fExplosionMinY) {
+								    float correction = fExplosionMinY - absoluteTop;
+								    pTop += correction;
+								    pBottom += correction;
+								}
                                 
                                 float u1 = static_cast<float>(x) / cols;
                                 float u2 = static_cast<float>(x + 1) / cols;
@@ -5168,9 +5181,17 @@ void SyncDockWithRunningDeskbarApps() {
                                 
 								float pLeft = -size/2.0f + x * subSize + offsetX;
                                 float pRight = pLeft + subSize;
-                                float pTop = -size/2.0f + y * subSize + offsetY;
-                                float pBottom = pTop + subSize;
-                                
+								float pTop = -size/2.0f + y * subSize + offsetY;
+								float pBottom = pTop + subSize;
+								
+								// Push the shard back down if it would fly above the window's visible area
+								float absoluteTop = (centerY - bounceOffset) + pTop;
+								if (absoluteTop < fExplosionMinY) {
+								    float correction = fExplosionMinY - absoluteTop;
+								    pTop += correction;
+								    pBottom += correction;
+								}
+								                                
                                 float u1 = static_cast<float>(x) / cols;
                                 float u2 = static_cast<float>(x + 1) / cols;
                                 float v1 = static_cast<float>(y) / rows;
@@ -5379,8 +5400,8 @@ void SyncDockWithRunningDeskbarApps() {
                 } else if (fClosingAppTeam != -1 && activeTaskWin.teamId == fClosingAppTeam && fCloseAnimationStartTime > 0) {
                     uint32 elapsedTicks = SDL_GetTicks() - fCloseAnimationStartTime;
                     if (elapsedTicks < fSpinDurationMs) {
-                        animProgress = (static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs)) * 1.8f;
-						if (animProgress > 1.0f) animProgress = 1.0f; // Clamp to finish cleanly
+						animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs);
+						if (animProgress > 1.0f) animProgress = 1.0f;
                         
                         if (fEffectCloseBounceEnabled) {
                             bounceOffset = std::sin(animProgress * 3.14159f * 3.0f) * (1.0f - animProgress) * 30.0f; 
@@ -5446,8 +5467,18 @@ void SyncDockWithRunningDeskbarApps() {
                                 
 								float pLeft = -size/2.0f + x * subSize + offsetX;
                                 float pRight = pLeft + subSize;
-                                float pTop = -size/2.0f + y * subSize + offsetY;
-                                float pBottom = pTop + subSize;
+  								float pTop = -size/2.0f + y * subSize + offsetY;
+								float pBottom = pTop + subSize;
+								
+								// Push the shard back down if it would fly above the window's visible area
+								float absoluteTop = (centerY - bounceOffset) + pTop;
+								if (absoluteTop < fExplosionMinY) {
+								    float correction = fExplosionMinY - absoluteTop;
+								    pTop += correction;
+								    pBottom += correction;
+								}
+								                                
+
                                 
                                 float u1 = static_cast<float>(x) / cols;
                                 float u2 = static_cast<float>(x + 1) / cols;
@@ -5653,8 +5684,18 @@ void SyncDockWithRunningDeskbarApps() {
                                 
                                 float pLeft = -renderingTrashSize/2.0f + x * subSize + offsetX;
                                 float pRight = pLeft + subSize;
-                                float pTop = -renderingTrashSize/2.0f + y * subSize + offsetY;
-                                float pBottom = pTop + subSize;
+								float pTop = -renderingTrashSize/2.0f + y * subSize + offsetY;
+								float pBottom = pTop + subSize;
+								
+								// Push the shard back down if it would fly above the window's visible area
+								float absoluteTop = (centerY - bounceOffset) + pTop;
+								if (absoluteTop < fExplosionMinY) {
+								    float correction = fExplosionMinY - absoluteTop;
+								    pTop += correction;
+								    pBottom += correction;
+								}
+								                                
+
                                 
                                 float u1 = static_cast<float>(x) / cols;
                                 float u2 = static_cast<float>(x + 1) / cols;
