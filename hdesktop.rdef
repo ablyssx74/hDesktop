@@ -12,6 +12,8 @@ resource app_version {
 };
 
 resource app_flags B_SINGLE_LAUNCH | B_BACKGROUND_APP;
+//resource app_flags B_BACKGROUND_APP;
+
 
 resource vector_icon {
 	$"6E6369660A0500040064020016023BA4CA3BBF52BC04343BEBDB4AE81C48B96C"

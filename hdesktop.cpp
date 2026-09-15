@@ -66,7 +66,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.42"
+#define APP_LOCAL_VERSION "v1.0.43"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -79,8 +79,8 @@ bool showSystemTray;
 bool dockAlwaysOnTop;
 bool fShowTitleOverlays = true;
 
-bool fEffectBounceEnabled = true;
-bool fEffectSpinEnabled = false;
+bool fEffectBounceEnabled = false;
+bool fEffectSpinEnabled = true;
 bool fEffectIllusionEnabled = false;
 bool fEffectWobbleEnabled = false;
 bool fEffectExplodeEnabled = false;
@@ -5512,6 +5512,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    // =========================================================================
 		    // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
 		    // =========================================================================
+		  if (fShowTitleOverlays) {
 			if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right &&
 			    fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom) {
 			    
@@ -5532,7 +5533,7 @@ void SyncDockWithRunningDeskbarApps() {
 			    mouseIsOverAnyIcon = true; 
 			    mouseLeftTime = 0;         
 			}
-					    
+		  }	    
 		    currentX += size + padding;
 		    renderingSlotIdx++;
 		} 
