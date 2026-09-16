@@ -13,8 +13,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib> 
+#include <cstdarg>
 #include <cstring>
 #include <ctime>
+#include <curl/curl.h>
 #include <Deskbar.h>
 #include <Directory.h>
 #include <Entry.h>
@@ -39,6 +41,7 @@
 #include <Node.h>
 #include <NodeInfo.h>
 #include <NodeMonitor.h>
+#include <Notification.h>
 #include <OS.h>
 #include <ParameterWeb.h>
 #include <Path.h>
@@ -66,13 +69,24 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.44"
+#define APP_LOCAL_VERSION "v1.0.45"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
-HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr; 
-BWindow* gActiveConfigInstance = nullptr; 
-std::set<std::string> gFavoritePaths; 
+HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr;
+BWindow* gActiveConfigInstance = nullptr;
+std::set<std::string> gFavoritePaths;
+bool gDebugEnabled = false; // Set by -d / --debug on the command line
+
+// Prints only when hdesktop was launched with -d / --debug; a no-op otherwise.
+static void DebugLog(const char* fmt, ...) {
+    if (!gDebugEnabled) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fflush(stderr);
+}
 
 bool autoHideEnabled;
 bool showSystemTray;
@@ -7393,9 +7407,126 @@ enum AutoHideState {
 
 
 // =========================================================================
+// NATIVE ASYNCHRONOUS UPDATE ENGINE (libcurl, ported from HaikuSuperMusicThingy)
+// =========================================================================
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+static int32 BackgroundUpdateChecker(void* data) {
+    DebugLog("[hdesktop update] checker thread started, local version = '%s'\n", APP_LOCAL_VERSION);
+
+    // Wait a brief moment after boot to let the dock finish rendering first.
+    snooze(5000000);
+
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
+    DebugLog("[hdesktop update] fetching '%s'\n", targetUrl);
+    DebugLog("[hdesktop update] libcurl version: %s\n", curl_version());
+
+    std::string buffer;
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        DebugLog("[hdesktop update] curl_easy_init() failed -- aborting\n");
+        return B_ERROR;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, targetUrl);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hdesktop/1.0");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    CURLcode curlResult = curl_easy_perform(curl);
+    if (curlResult != CURLE_OK) {
+        DebugLog("[hdesktop update] curl_easy_perform() failed: %s\n", curl_easy_strerror(curlResult));
+    } else {
+        long httpStatus = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+        DebugLog("[hdesktop update] curl_easy_perform() OK, HTTP status = %ld, %zu bytes received\n",
+            httpStatus, buffer.size());
+    }
+    // WORKAROUND: curl_easy_cleanup() reproducibly hangs/crashes this thread on the
+    // current Haiku libcurl build (confirmed via debug logging -- everything up to
+    // and including a successful curl_easy_perform() runs fine, but no code after
+    // this cleanup call ever executes). This runs once per launch, so intentionally
+    // leaking the single CURL handle (reclaimed at process exit) is a fine tradeoff
+    // versus losing the update check entirely. Revisit if a Haiku curl update fixes it.
+    // curl_easy_cleanup(curl);
+    DebugLog("[hdesktop update] skipping curl_easy_cleanup() (known Haiku libcurl issue)\n");
+
+    DebugLog("[hdesktop update] raw response body: '%s'\n", buffer.c_str());
+
+    BString remoteVersionStr = buffer.c_str();
+    remoteVersionStr.Trim();
+    DebugLog("[hdesktop update] trimmed remote version string: '%s'\n", remoteVersionStr.String());
+
+    if (remoteVersionStr.Length() == 0) {
+        DebugLog("[hdesktop update] remote version string is empty -- aborting\n");
+        return B_OK;
+    }
+
+    int32 curMajor = 0, curMinor = 0, curRevision = 0;
+    int32 remMajor = 0, remMinor = 0, remRevision = 0;
+
+    // --- Bulletproof sscanf Pattern Matching ---
+    // Looks for a 'v' immediately followed by a number, so surrounding words don't matter.
+    if (sscanf(APP_LOCAL_VERSION, "%*[^v]v%d.%d.%d", &curMajor, &curMinor, &curRevision) != 3) {
+        // Fallback: search for raw dot-separated numbers anywhere if 'v' isn't found
+        sscanf(APP_LOCAL_VERSION, "%*[^0-9]%d.%d.%d", &curMajor, &curMinor, &curRevision);
+    }
+
+    if (sscanf(remoteVersionStr.String(), "%*[^v]v%d.%d.%d", &remMajor, &remMinor, &remRevision) != 3) {
+        sscanf(remoteVersionStr.String(), "%*[^0-9]%d.%d.%d", &remMajor, &remMinor, &remRevision);
+    }
+
+    int32 currentFlattened = (curMajor * 10000) + (curMinor * 100) + curRevision;
+    int32 remoteFlattened  = (remMajor * 10000) + (remMinor * 100) + remRevision;
+
+    DebugLog("[hdesktop update] parsed local %d.%d.%d (%d) vs remote %d.%d.%d (%d)\n",
+        (int)curMajor, (int)curMinor, (int)curRevision, (int)currentFlattened,
+        (int)remMajor, (int)remMinor, (int)remRevision, (int)remoteFlattened);
+
+    if (remoteFlattened > currentFlattened) {
+        DebugLog("[hdesktop update] update available -- sending notification\n");
+
+        BNotification updateAlert(B_INFORMATION_NOTIFICATION);
+        updateAlert.SetGroup("hDesktop");
+        updateAlert.SetTitle("Update Available");
+
+        BString alertContent;
+        alertContent << "A newer version of hDesktop is available! (" << remoteVersionStr << ")";
+        updateAlert.SetContent(alertContent.String());
+
+        status_t sendResult = updateAlert.Send();
+        DebugLog("[hdesktop update] BNotification::Send() returned %s (%d)\n",
+            strerror(sendResult), (int)sendResult);
+    } else {
+        DebugLog("[hdesktop update] already up to date, no notification sent\n");
+    }
+
+    DebugLog("[hdesktop update] checker thread finished\n");
+    return B_OK;
+}
+
+// =========================================================================
 // MAIN SDL2 SYSTEM WRAPPER CONTAINER PIPELINE ENTRYPOINT
 // =========================================================================
 int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0) {
+            gDebugEnabled = true;
+            break;
+        }
+    }
+
+    // libcurl's global init is NOT thread-safe against other concurrently running
+    // threads in the process. Doing it once here, from the main thread, before any
+    // background thread ever calls curl_easy_init(), avoids the implicit lazy
+    // global init racing with the dock's other background threads later.
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL Subsystem initialization failure: " << SDL_GetError() << std::endl;
         return -1;
@@ -7494,21 +7625,11 @@ int main(int argc, char* argv[]) {
     
 	// Update Checker
 	{
-	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
-	    char updateCmd[1024];
-	    snprintf(updateCmd, sizeof(updateCmd),
-	        #ifndef IS_HAIKU_32BIT
-	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-	        #else
-	        "(REMOTE_V=$(curl-x86 -sL \"%s\" | tr -d '\\r\\n'); "
-	        #endif
-	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-	        "notify --title \"Update Available\" --group \"hDesktop\" "
-	        "\"A newer version of hDesktop is available! ($REMOTE_V)\"; fi) &",
-	        targetUrl, APP_LOCAL_VERSION);    
-	    system(updateCmd);
+	    thread_id updateThread = spawn_thread(BackgroundUpdateChecker, "hdesktop_update_checker", B_LOW_PRIORITY, nullptr);
+	    if (updateThread >= B_OK) {
+	        resume_thread(updateThread);
+	    }
 	}
-	
 
 
 
@@ -7942,5 +8063,6 @@ int main(int argc, char* argv[]) {
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    curl_global_cleanup();
     return 0;
 }

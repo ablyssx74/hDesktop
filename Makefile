@@ -5,7 +5,7 @@ CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/d
 
 # Target binary definitions
 GUI_TARGET = hdesktop
-VERSION = 1.0.44
+VERSION = 1.0.45
 PACKAGE_DIR := build/package
 REVISION = 1
 
@@ -34,7 +34,7 @@ GUI_RSRCS = hdesktop.rsrc
 
 
 # Shared linking assets
-LIBS = -L./lib -lbe -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -llocalestub
+LIBS = -L./lib -lbe -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -llocalestub -lcurl
 
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
