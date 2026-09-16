@@ -7491,7 +7491,7 @@ int main(int argc, char* argv[]) {
     bool appExecuting = true;
     SDL_Event incomingEventPackage;
     
-    /*
+    
 	// Update Checker
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hdesktop/refs/heads/main/VERSION";
@@ -7508,7 +7508,7 @@ int main(int argc, char* argv[]) {
 	        targetUrl, APP_LOCAL_VERSION);    
 	    system(updateCmd);
 	}
-	*/
+	
 
 
 
