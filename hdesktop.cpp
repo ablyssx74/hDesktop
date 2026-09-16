@@ -129,24 +129,16 @@ rgb_color GetLiveSystemBackgroundColor() {
     return color;
 }
 
-// The dock's own chrome (and the color it fills around a Center/Manual wallpaper's
-// edges) is themed off this same color. Push it to be the real Haiku Desktop
-// background color too, so the strip our SDL window covers matches the rest of
-// the screen instead of showing a visible seam between two different colors.
-void SyncHaikuDesktopBackgroundColor(rgb_color color) {
-    static rgb_color lastPushedColor = { 0, 0, 0, 0 };
-    static bool havePushed = false;
-
-    if (havePushed && color.red == lastPushedColor.red && color.green == lastPushedColor.green
-        && color.blue == lastPushedColor.blue && color.alpha == lastPushedColor.alpha) {
-        return;
-    }
-
+// The real, authoritative desktop background color for a workspace -- whatever
+// Haiku is actually showing behind a missing/undersized wallpaper on it, whether
+// that color came from the Backgrounds preflet's per-workspace picker or from
+// Haiku's own default. We read this rather than pushing our own guess at it, so
+// per-workspace customization in Backgrounds is never overwritten, and it works
+// the same regardless of whether the user last changed colors via Backgrounds or
+// via Appearance.
+rgb_color GetHaikuWorkspaceDesktopColor(int32 workspace) {
     BScreen screen(B_MAIN_SCREEN_ID);
-    screen.SetDesktopColor(color);
-
-    lastPushedColor = color;
-    havePushed = true;
+    return screen.DesktopColor(workspace);
 }
 
 enum {
@@ -4758,10 +4750,6 @@ void SyncDockWithRunningDeskbarApps() {
 	    // Read the live color from disk!
 	    rgb_color systemBg = GetLiveSystemBackgroundColor();
 
-	    // Keep the real Haiku Desktop background color in step with it (no-ops once
-	    // they already match, so this is cheap outside of an actual color change).
-	    SyncHaikuDesktopBackgroundColor(systemBg);
-
 	    // Update global class floats dynamically
 	    fBgColorR = systemBg.red   / 255.0f;
 	    fBgColorG = systemBg.green / 255.0f;
@@ -4789,10 +4777,11 @@ void SyncDockWithRunningDeskbarApps() {
             float screenH = static_cast<float>(fHeight);
 
             // Centered / Manual placement don't necessarily cover the whole screen --
-            // fill with the live desktop background color first, same as Haiku's own
-            // Desktop window does around an undersized or offset image.
+            // fill with this workspace's real desktop background color first, same
+            // as Haiku's own Desktop window does around an undersized or offset image.
             if (fWallpaperMode == kWallpaperCentered || fWallpaperMode == kWallpaperAtOffset) {
-                glColor4f(fBgColorR, fBgColorG, fBgColorB, 1.0f);
+                rgb_color gapColor = GetHaikuWorkspaceDesktopColor(current_workspace());
+                glColor4f(gapColor.red / 255.0f, gapColor.green / 255.0f, gapColor.blue / 255.0f, 1.0f);
                 glBegin(GL_QUADS);
                     glVertex2f(0.0f, 0.0f);
                     glVertex2f(screenW, 0.0f);
@@ -4905,9 +4894,10 @@ void SyncDockWithRunningDeskbarApps() {
             glDisable(GL_TEXTURE_2D);
         } else {
             // No image at all for this workspace ("Image: None" in Backgrounds) --
-            // fill with the live desktop background color instead of leaving the
-            // transparent clear showing through as flat black.
-            glColor4f(fBgColorR, fBgColorG, fBgColorB, 1.0f);
+            // fill with this workspace's real desktop background color instead of
+            // leaving the transparent clear showing through as flat black.
+            rgb_color noImageColor = GetHaikuWorkspaceDesktopColor(current_workspace());
+            glColor4f(noImageColor.red / 255.0f, noImageColor.green / 255.0f, noImageColor.blue / 255.0f, 1.0f);
             glBegin(GL_QUADS);
                 glVertex2f(0.0f, 0.0f);
                 glVertex2f(static_cast<float>(fWidth), 0.0f);
