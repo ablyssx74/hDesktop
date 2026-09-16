@@ -74,10 +74,11 @@ HaikuAppDrawerWindow* gActiveDrawerInstance = nullptr;
 BWindow* gActiveConfigInstance = nullptr; 
 std::set<std::string> gFavoritePaths; 
 
-bool autoHideEnabled; 
-bool showSystemTray; 
+bool autoHideEnabled;
+bool showSystemTray;
 bool dockAlwaysOnTop;
 bool fShowTitleOverlays = true;
+bool fShowWorkspaceSwitcher = false;
 
 bool fEffectBounceEnabled = false;
 bool fEffectSpinEnabled = true;
@@ -128,11 +129,32 @@ rgb_color GetLiveSystemBackgroundColor() {
     return color;
 }
 
+// The dock's own chrome (and the color it fills around a Center/Manual wallpaper's
+// edges) is themed off this same color. Push it to be the real Haiku Desktop
+// background color too, so the strip our SDL window covers matches the rest of
+// the screen instead of showing a visible seam between two different colors.
+void SyncHaikuDesktopBackgroundColor(rgb_color color) {
+    static rgb_color lastPushedColor = { 0, 0, 0, 0 };
+    static bool havePushed = false;
+
+    if (havePushed && color.red == lastPushedColor.red && color.green == lastPushedColor.green
+        && color.blue == lastPushedColor.blue && color.alpha == lastPushedColor.alpha) {
+        return;
+    }
+
+    BScreen screen(B_MAIN_SCREEN_ID);
+    screen.SetDesktopColor(color);
+
+    lastPushedColor = color;
+    havePushed = true;
+}
+
 enum {
 	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
     MSG_AUTOHIDE_TOGGLED   = 'ahtg',
     MSG_SYSTEMTRAY_TOGGLED = 'sttg',
     MSG_TEXTOVERLAYS_TOGGLED = 'totg',
+    MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
     MSG_AUTORAISE_TOGGLED  = 'srdt',
     MSG_EFFECT_SPEED_SLIDER_CHANGED = 'efsc',
@@ -207,8 +229,11 @@ struct HaikuRect {
     bool Contains(float x, float y) const {
         return (x >= left && x <= right && y >= top && y <= bottom);
     }    
-    float Width() const { 
-        return right - left; 
+    float Width() const {
+        return right - left;
+    }
+    float Height() const {
+        return bottom - top;
     }
 };
 
@@ -221,6 +246,21 @@ struct HaikuTexture {
     GLuint id = 0;
     int width = 0;
     int height = 0;
+};
+
+// Mirrors BPrivate::BackgroundImage::Mode (tracker/BackgroundImage.h) -- the numeric
+// values are what Tracker actually writes into the "be:bgndimginfomode" attribute.
+enum HaikuWallpaperMode {
+    kWallpaperAtOffset    = 0, // "Manual" placement in Backgrounds prefs
+    kWallpaperCentered    = 1,
+    kWallpaperScaledToFit = 2,
+    kWallpaperTiled       = 3
+};
+
+struct HaikuWallpaperInfo {
+    BString path;
+    int32   mode = kWallpaperScaledToFit;
+    BPoint  offset = BPoint(0.0f, 0.0f);
 };
 
 struct BrowserFileItem {
@@ -1137,6 +1177,7 @@ private:
     BCheckBox* fSystemTrayCheckbox;
     BCheckBox* fAutoRaiseCheckbox;
     BCheckBox* fTextOverlaysCheckbox;
+    BCheckBox* fWorkspaceSwitcherCheckbox;
     BMenuField* fEffectsMenuField;
     BMenuField* fCloseEffectsMenuField;
     BSlider*   fEffectSpeedSlider;
@@ -1181,6 +1222,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fTextOverlaysCheckbox->SetValue(fShowTitleOverlays ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysCheckbox);
 
+        // Row 5: Workspace Switcher
+        BRect workspaceSwitcherRect(35.0f, 202.0f, 55.0f, 218.0f);
+        fWorkspaceSwitcherCheckbox = new BCheckBox(workspaceSwitcherRect, "workspace_switcher_cb", nullptr,
+            new BMessage(MSG_WORKSPACESWITCHER_TOGGLED));
+        fWorkspaceSwitcherCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fWorkspaceSwitcherCheckbox->SetValue(fShowWorkspaceSwitcher ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fWorkspaceSwitcherCheckbox);
+
         // Open App Effects Dropdown Menu
         BPopUpMenu* effectsPopup = new BPopUpMenu("Open Effects");
         bool openNone = !fEffectBounceEnabled && !fEffectSpinEnabled && !fEffectIllusionEnabled && !fEffectWobbleEnabled && !fEffectExplodeEnabled;
@@ -1210,7 +1259,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 207.0f, frame.Width() - 35.0f, 232.0f);
+        BRect effectsMenuRect(145.0f, 231.0f, frame.Width() - 35.0f, 256.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -1244,14 +1293,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 240.0f, frame.Width() - 35.0f, 265.0f);
+        BRect closeEffectsMenuRect(145.0f, 264.0f, frame.Width() - 35.0f, 289.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
         
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 290.0f, frame.Width() - 35.0f, 340.0f);
+        BRect speedSliderRect(35.0f, 314.0f, frame.Width() - 35.0f, 364.0f);
         fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed", 
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1261,7 +1310,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 360.0f, frame.Width() - 35.0f, 410.0f);
+        BRect sliderRect(35.0f, 384.0f, frame.Width() - 35.0f, 434.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1271,7 +1320,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 430.0f, frame.Width() - 35.0f, 480.0f);
+        BRect sizeSliderRect(35.0f, 454.0f, frame.Width() - 35.0f, 504.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1353,8 +1402,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - aboutTextW) / 2.0f, 98.0f));  
 
 		// 6. BALANCED BACKING CONTAINER
-        SetHighColor(rgb_color{24, 24, 28, 255}); 
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 495.0f);
+        SetHighColor(rgb_color{24, 24, 28, 255});
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 519.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -1367,14 +1416,15 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Enable System Tray", BPoint(62.0f, 154.0f));
         DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
         DrawString("Enable Application Title Overlays", BPoint(62.0f, 194.0f));
-        
+        DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
+
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 224.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 257.0f));
-        
+        DrawString("Open App Effects:", BPoint(35.0f, 248.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 281.0f));
+
         /*
         // Draw smaller, italicized "(Experimental)" tag underneath the Close App Effects dropdown
         BFont expFont(be_plain_font);
@@ -1382,7 +1432,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         expFont.SetFace(B_ITALIC_FACE);
         SetFont(&expFont);
         SetHighColor(rgb_color{140, 150, 170, 255});
-        DrawString("(Experimental)", BPoint(145.0f, 278.0f));
+        DrawString("(Experimental)", BPoint(145.0f, 302.0f));
 		*/
 
         // Reset font back to plain for buttons/other elements
@@ -1464,6 +1514,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSystemTrayCheckbox->SetTarget(this);
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
+        fWorkspaceSwitcherCheckbox->SetTarget(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
         fCloseEffectsMenuField->Menu()->SetTargetForItems(this);
         fEffectSpeedSlider->SetTarget(this);
@@ -1494,6 +1545,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
             case MSG_TEXTOVERLAYS_TOGGLED: {
                 fShowTitleOverlays = (fTextOverlaysCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_WORKSPACESWITCHER_TOGGLED: {
+                fShowWorkspaceSwitcher = (fWorkspaceSwitcherCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 Invalidate();
                 break;
@@ -1834,13 +1892,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 class HaikuConfigWindow : public BWindow {
 public:
     HaikuConfigWindow(BRect centralAnchor)
-        : BWindow(BRect(0, 0, 560, 610), "hdesktop Configuration",
-                B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL, 
+        : BWindow(BRect(0, 0, 560, 634), "hdesktop Configuration",
+                B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
-        
-        ResizeTo(560.0f, 610.0f);
+
+        ResizeTo(560.0f, 634.0f);
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 610.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 634.0f) / 2.0f;
         MoveTo(targetX, targetY);
         
         ConfigView* configView = new ConfigView(Bounds());
@@ -2535,8 +2593,8 @@ public:
 
 
 
-BString GetActiveHaikuWallpaperPath() {
-    BString targetWallpaperPath = "";
+HaikuWallpaperInfo GetActiveHaikuWallpaperInfo() {
+    HaikuWallpaperInfo result;
     BPath desktopPath;
 
     // 1. Get the current active workspace index (0-indexed) and convert to a bitmask
@@ -2548,51 +2606,75 @@ BString GetActiveHaikuWallpaperPath() {
         BNode desktopNode(desktopPath.Path());
         attr_info info;
 
-        if (desktopNode.InitCheck() == B_OK && 
+        if (desktopNode.InitCheck() == B_OK &&
             desktopNode.GetAttrInfo("be:bgndimginfo", &info) == B_OK && info.size > 0) {
-            
+
             char* buffer = new(std::nothrow) char[info.size];
             if (buffer != nullptr) {
                 if (desktopNode.ReadAttr("be:bgndimginfo", info.type, 0, buffer, info.size) == info.size) {
                     BMessage container;
                     if (container.Unflatten(buffer) == B_OK) {
-                        
-                        BString fallbackPath = "";
+
+                        HaikuWallpaperInfo fallback;
+                        bool haveFallback = false;
+                        bool haveMatch = false;
 
                         // 3. Loop through the array to find the match for our current workspace
                         for (int32 index = 0; ; index++) {
                             int32 workspaceMask = 0;
-                            
+
                             // Check if we reached the end of the data matrix
                             if (container.FindInt32("be:bgndimginfoworkspaces", index, &workspaceMask) != B_OK) {
                                 break;
                             }
 
-                            const char* extractedPath = nullptr;
-                            if (container.FindString("be:bgndimginfopath", index, &extractedPath) == B_OK) {
-                                if (extractedPath != nullptr && extractedPath[0] != '\0') {
-                                    
-                                    BEntry imageFile(extractedPath);
-                                    if (imageFile.Exists() && !imageFile.IsDirectory()) {
-                                        
-                                        // If this entry explicitly targets our current workspace bit, choose it immediately
-                                        if ((workspaceMask & currentWorkspaceMask) != 0) {
-                                            targetWallpaperPath = extractedPath;
-                                            break; 
-                                        }
+                            bool matchesCurrentWorkspace =
+                                (static_cast<uint32>(workspaceMask) & currentWorkspaceMask) != 0;
 
-                                        // Fallback if no specific workspace match is found later
-                                        if (fallbackPath.IsEmpty()) {
-                                            fallbackPath = extractedPath;
-                                        }
-                                    }
+                            HaikuWallpaperInfo entry;
+                            bool hasValidPath = false;
+
+                            const char* extractedPath = nullptr;
+                            if (container.FindString("be:bgndimginfopath", index, &extractedPath) == B_OK
+                                && extractedPath != nullptr && extractedPath[0] != '\0') {
+
+                                BEntry imageFile(extractedPath);
+                                if (imageFile.Exists() && !imageFile.IsDirectory()) {
+                                    hasValidPath = true;
+                                    entry.path = extractedPath;
+
+                                    // Placement mode and (for "Manual" placement) the offset,
+                                    // both stored at the same array index as the path/workspaces.
+                                    int32 mode = kWallpaperScaledToFit;
+                                    container.FindInt32("be:bgndimginfomode", index, &mode);
+                                    entry.mode = mode;
+
+                                    BPoint offset(0.0f, 0.0f);
+                                    container.FindPoint("be:bgndimginfooffset", index, &offset);
+                                    entry.offset = offset;
                                 }
+                            }
+
+                            // This array entry explicitly owns our current workspace -- whether
+                            // or not it actually has an image assigned -- so it's authoritative
+                            // either way. We never fall back to a different workspace's picture
+                            // just because this one was set to "None".
+                            if (matchesCurrentWorkspace) {
+                                result = entry; // stays empty (no path) when hasValidPath is false
+                                haveMatch = true;
+                                break;
+                            }
+
+                            // Fallback if no specific workspace match is found later
+                            if (hasValidPath && !haveFallback) {
+                                fallback = entry;
+                                haveFallback = true;
                             }
                         }
 
                         // If no specific workspace rule matched, fall back to the first valid image found
-                        if (targetWallpaperPath.IsEmpty()) {
-                            targetWallpaperPath = fallbackPath;
+                        if (!haveMatch) {
+                            result = fallback;
                         }
                     }
                 }
@@ -2601,7 +2683,7 @@ BString GetActiveHaikuWallpaperPath() {
         }
     }
 
-    return targetWallpaperPath;
+    return result;
 }
 
 
@@ -2647,11 +2729,13 @@ public:
         fHaikuMenuIcon = LoadIconFromNode("/boot/system/apps/AboutSystem", 128);
         fHaikuTrashIcon = LoadIconFromNode("/boot/trash", 128);
 
-        BString capturedWallpaper = GetActiveHaikuWallpaperPath();
-        fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
+        HaikuWallpaperInfo capturedWallpaper = GetActiveHaikuWallpaperInfo();
+        fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.path.String());
+        fWallpaperMode = capturedWallpaper.mode;
+        fWallpaperOffset = capturedWallpaper.offset;
 
         // =========================================================================
-        // INITIALIZE SYSTEM MONITOR 
+        // INITIALIZE SYSTEM MONITOR
         // =========================================================================
 
         fLastCpuPulseTime = SDL_GetTicks();
@@ -2683,8 +2767,10 @@ public:
 	        fWallpaperTexture.id = 0;
 	    }
 	
-	    BString capturedWallpaper = GetActiveHaikuWallpaperPath();
-	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.String());
+	    HaikuWallpaperInfo capturedWallpaper = GetActiveHaikuWallpaperInfo();
+	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.path.String());
+	    fWallpaperMode = capturedWallpaper.mode;
+	    fWallpaperOffset = capturedWallpaper.offset;
 	}
 
 
@@ -2996,9 +3082,20 @@ void SyncDockWithRunningDeskbarApps() {
 	}
 
 
-   
+
+	// Shared by RenderFrame() and HandleMouseClick() so the drawn tile grid and the
+	// click hit-testing always agree on how many rows/columns the switcher has.
+	void GetWorkspaceGridLayout(int& outCols, int& outRows, int& outCount) {
+		outCount = static_cast<int>(count_workspaces());
+		if (outCount < 1) outCount = 1;
+		outCols = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(outCount))));
+		if (outCols < 1) outCols = 1;
+		outRows = static_cast<int>(std::ceil(static_cast<float>(outCount) / outCols));
+		if (outRows < 1) outRows = 1;
+	}
+
 	void HandleMouseClick(int x, int y, int button) {
-		
+
 	    // Sync global mouse variables to match click coordinates
 	    fMouseX = x; 
 	    fMouseY = y;
@@ -3284,6 +3381,7 @@ void SyncDockWithRunningDeskbarApps() {
         // Configuration variables for the status widgets (Now scales dynamically relative to icon size changes!)
         float clockSectionPadding = 24.0f;
         float cpuGraphWidth       = 60.0f;
+        float workspaceGraphWidth = 60.0f;
         float separatorGapPadding = 16.0f;
         
         // FIXED SIZING: The trash bin launcher now scales uniformly alongside your application icons
@@ -3509,6 +3607,35 @@ void SyncDockWithRunningDeskbarApps() {
             dynamicScales.push_back(cpuScale);
             progressiveX += finalCpuWidth;
 
+            // =========================================================================
+            // PROCESS WORKSPACE SWITCHER METRICS (2D SMOOTH FIX)
+            // =========================================================================
+            if (fShowWorkspaceSwitcher) {
+                progressiveX += (clockSectionPadding * layoutSizeRatio);
+
+                float scaledWorkspaceWidth = workspaceGraphWidth * layoutSizeRatio;
+                float approxWorkspaceCenterX = progressiveX + (scaledWorkspaceWidth / 2.0f);
+                float approxWorkspaceCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+
+                float distanceWorkspaceX = std::abs(fMouseX - approxWorkspaceCenterX);
+                float distanceWorkspaceY = std::abs(fMouseY - approxWorkspaceCenterY);
+                float distanceWorkspace2D = std::sqrt(distanceWorkspaceX * distanceWorkspaceX + distanceWorkspaceY * distanceWorkspaceY);
+
+                float workspaceScale = 1.0f;
+                if (fCursorIsInsideHitbox && distanceWorkspace2D < 180.0f) {
+                    float ratio = distanceWorkspace2D / 180.0f;
+                    workspaceScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+
+                float finalWorkspaceWidth = scaledWorkspaceWidth * workspaceScale;
+                dynamicWidths.push_back(finalWorkspaceWidth);
+                dynamicScales.push_back(workspaceScale);
+                progressiveX += finalWorkspaceWidth;
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
+            }
+
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
         }
@@ -3524,6 +3651,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    size_t clockSlotIdx   = totalIconsCount + 2;
 	    size_t volumeSlotIdx  = totalIconsCount + 3;
 	    size_t cpuSlotIdx     = totalIconsCount + 4;
+	    size_t workspaceSlotIdx = totalIconsCount + 5;
 	    
 	    float dockMarginBottom = 15.0f;
 	    HaikuRect dockPlate;
@@ -3653,7 +3781,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 610.0f; 
+									    float winHeight = 634.0f;
 									
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
@@ -3725,7 +3853,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
 	        auto& activeTaskWin = fTaskbarWindows[w];
 	        if (*activeTaskWin.openStateFlag == false) continue;
-	
+
 	        float size = dynamicWidths[evaluationSlotIdx];
 	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 	        
@@ -4432,6 +4560,62 @@ void SyncDockWithRunningDeskbarApps() {
 
 	    currentX += dynamicGraphWidth;
 
+	    // -------------------------------------------------------------------------
+	    // Evaluate Click Bounds for Workspace Switcher Grid Component
+	    // -------------------------------------------------------------------------
+	    if (fShowWorkspaceSwitcher) {
+	        currentX += clockSectionPadding;
+
+	        float dynamicWorkspaceWidth = dynamicWidths[workspaceSlotIdx];
+
+	        HaikuRect workspaceBounds = {
+	            currentX,
+	            dockPlate.top,
+	            currentX + dynamicWorkspaceWidth,
+	            dockPlate.bottom
+	        };
+
+	        if (x >= workspaceBounds.left && x <= workspaceBounds.right &&
+	            y >= workspaceBounds.top  && y <= workspaceBounds.bottom) {
+
+	            if (button == SDL_BUTTON_LEFT) {
+	                // Recompute the exact tile grid drawn in RenderFrame so a click always
+	                // lands on the tile the user sees under the cursor.
+	                float workspaceScale = dynamicScales[workspaceSlotIdx];
+	                float dynamicWorkspaceHeight = 28.0f * workspaceScale * sizeRatio;
+	                float workspaceTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicWorkspaceHeight / 2.0f));
+
+	                int gridCols = 0, gridRows = 0, wsCount = 0;
+	                GetWorkspaceGridLayout(gridCols, gridRows, wsCount);
+
+	                float tileGap = 3.0f * sizeRatio;
+	                float tileAreaLeft   = workspaceBounds.left + tileGap;
+	                float tileAreaTop    = workspaceTop + tileGap;
+	                float tileAreaWidth  = dynamicWorkspaceWidth  - (tileGap * (gridCols + 1));
+	                float tileAreaHeight = dynamicWorkspaceHeight - (tileGap * (gridRows + 1));
+	                float tileW = (gridCols > 0) ? (tileAreaWidth / gridCols) : 0.0f;
+	                float tileH = (gridRows > 0) ? (tileAreaHeight / gridRows) : 0.0f;
+
+	                for (int ws = 0; ws < wsCount; ++ws) {
+	                    int col = ws % gridCols;
+	                    int row = ws / gridCols;
+
+	                    float tileLeft = tileAreaLeft + col * (tileW + tileGap);
+	                    float tileTop  = tileAreaTop  + row * (tileH + tileGap);
+	                    HaikuRect tileRect = { tileLeft, tileTop, tileLeft + tileW, tileTop + tileH };
+
+	                    if (x >= tileRect.left && x <= tileRect.right && y >= tileRect.top && y <= tileRect.bottom) {
+	                        activate_workspace(ws);
+	                        break;
+	                    }
+	                }
+	            }
+	            return;
+	        }
+
+	        currentX += dynamicWorkspaceWidth;
+	    }
+
 	} // HandleMouseClick end closing brace
 
 
@@ -4573,7 +4757,11 @@ void SyncDockWithRunningDeskbarApps() {
 		    
 	    // Read the live color from disk!
 	    rgb_color systemBg = GetLiveSystemBackgroundColor();
-	
+
+	    // Keep the real Haiku Desktop background color in step with it (no-ops once
+	    // they already match, so this is cheap outside of an actual color change).
+	    SyncHaikuDesktopBackgroundColor(systemBg);
+
 	    // Update global class floats dynamically
 	    fBgColorR = systemBg.red   / 255.0f;
 	    fBgColorG = systemBg.green / 255.0f;
@@ -4590,48 +4778,145 @@ void SyncDockWithRunningDeskbarApps() {
 		float fExplosionMinY = fExplosionWindowTopBoundary + 8.0f; // small safety margin
 	
         // =========================================================================
-        // 2. FULLSCREEN WALLPAPER DRAW PASS (ASPECT-ALIGNED) - STATIONARY
+        // 2. FULLSCREEN WALLPAPER DRAW PASS (MODE-AWARE) - STATIONARY
+        // Mirrors BPrivate::BackgroundImage::Show()'s four placement modes:
+        // kCentered / kAtOffset (Manual) / kScaledToFit / kTiled
         // =========================================================================
         if (fWallpaperTexture.id != 0) {
+            float texW    = static_cast<float>(fWallpaperTexture.width);
+            float texH    = static_cast<float>(fWallpaperTexture.height);
+            float screenW = static_cast<float>(fWidth);
+            float screenH = static_cast<float>(fHeight);
+
+            // Centered / Manual placement don't necessarily cover the whole screen --
+            // fill with the live desktop background color first, same as Haiku's own
+            // Desktop window does around an undersized or offset image.
+            if (fWallpaperMode == kWallpaperCentered || fWallpaperMode == kWallpaperAtOffset) {
+                glColor4f(fBgColorR, fBgColorG, fBgColorB, 1.0f);
+                glBegin(GL_QUADS);
+                    glVertex2f(0.0f, 0.0f);
+                    glVertex2f(screenW, 0.0f);
+                    glVertex2f(screenW, screenH);
+                    glVertex2f(0.0f, screenH);
+                glEnd();
+            }
+
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, fWallpaperTexture.id);
             glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-            // 1. Calculate aspect ratios
-            float screenAspect = static_cast<float>(fWidth) / static_cast<float>(fHeight);
-            float imageAspect  = static_cast<float>(fWallpaperTexture.width) / static_cast<float>(fWallpaperTexture.height);
+            switch (fWallpaperMode) {
+                case kWallpaperCentered: {
+                    // Unscaled, centered on screen.
+                    float destX = (screenW - texW) / 2.0f;
+                    float destY = (screenH - texH) / 2.0f;
+                    glBegin(GL_QUADS);
+                        glTexCoord2f(0.0f, 0.0f); glVertex2f(destX, destY);
+                        glTexCoord2f(1.0f, 0.0f); glVertex2f(destX + texW, destY);
+                        glTexCoord2f(1.0f, 1.0f); glVertex2f(destX + texW, destY + texH);
+                        glTexCoord2f(0.0f, 1.0f); glVertex2f(destX, destY + texH);
+                    glEnd();
+                    break;
+                }
 
-            // Default to full texture boundaries
-            float uMin = 0.0f, uMax = 1.0f;
-            float vMin = 0.0f, vMax = 1.0f;
+                case kWallpaperAtOffset: {
+                    // Unscaled, placed at the "Manual" position saved by Backgrounds.
+                    float destX = fWallpaperOffset.x;
+                    float destY = fWallpaperOffset.y;
+                    glBegin(GL_QUADS);
+                        glTexCoord2f(0.0f, 0.0f); glVertex2f(destX, destY);
+                        glTexCoord2f(1.0f, 0.0f); glVertex2f(destX + texW, destY);
+                        glTexCoord2f(1.0f, 1.0f); glVertex2f(destX + texW, destY + texH);
+                        glTexCoord2f(0.0f, 1.0f); glVertex2f(destX, destY + texH);
+                    glEnd();
+                    break;
+                }
 
-            // 2. Replicate Tracker's center-cropped scaling logic
-            if (imageAspect > screenAspect) {
-                // Image is wider than your screen aspect: crop left/right sides
-                float cropWidth = static_cast<float>(fWallpaperTexture.height) * screenAspect;
-                float horizontalDiff = (static_cast<float>(fWallpaperTexture.width) - cropWidth) / static_cast<float>(fWallpaperTexture.width);
-                uMin = horizontalDiff / 2.0f;
-                uMax = 1.0f - uMin;
-            } else if (imageAspect < screenAspect) {
-                // Image is taller than your screen aspect: crop top/bottom sides
-                float cropHeight = static_cast<float>(fWallpaperTexture.width) / screenAspect;
-                float verticalDiff = (static_cast<float>(fWallpaperTexture.height) - cropHeight) / static_cast<float>(fWallpaperTexture.height);
-                vMin = verticalDiff / 2.0f;
-                vMax = 1.0f - vMin;
+                case kWallpaperTiled: {
+                    // Repeat the bitmap across the whole screen, phase-centered exactly
+                    // like BackgroundImage::Show()'s kTiled anchor calculation.
+                    if (texW > 0.0f && texH > 0.0f) {
+                        float anchorX = (screenW - texW) / 2.0f;
+                        float anchorY = (screenH - texH) / 2.0f;
+                        float startX = anchorX - texW * std::floor(anchorX / texW) - texW;
+                        float startY = anchorY - texH * std::floor(anchorY / texH) - texH;
+
+                        // Safety cap: bail out to a single tile rather than looping
+                        // thousands of times if a pathologically tiny image is set to Tile.
+                        double estimatedTiles = (static_cast<double>(screenW) / texW + 2.0)
+                            * (static_cast<double>(screenH) / texH + 2.0);
+                        if (estimatedTiles > 20000.0) {
+                            glBegin(GL_QUADS);
+                                glTexCoord2f(0.0f, 0.0f); glVertex2f(startX, startY);
+                                glTexCoord2f(1.0f, 0.0f); glVertex2f(startX + texW, startY);
+                                glTexCoord2f(1.0f, 1.0f); glVertex2f(startX + texW, startY + texH);
+                                glTexCoord2f(0.0f, 1.0f); glVertex2f(startX, startY + texH);
+                            glEnd();
+                        } else {
+                            for (float y = startY; y < screenH; y += texH) {
+                                for (float x = startX; x < screenW; x += texW) {
+                                    glBegin(GL_QUADS);
+                                        glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);
+                                        glTexCoord2f(1.0f, 0.0f); glVertex2f(x + texW, y);
+                                        glTexCoord2f(1.0f, 1.0f); glVertex2f(x + texW, y + texH);
+                                        glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + texH);
+                                    glEnd();
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                case kWallpaperScaledToFit:
+                default: {
+                    // Center-cropped scale-to-fill (Tracker's "Scale to fit" placement).
+                    float screenAspect = screenW / screenH;
+                    float imageAspect  = texW / texH;
+
+                    float uMin = 0.0f, uMax = 1.0f;
+                    float vMin = 0.0f, vMax = 1.0f;
+
+                    if (imageAspect > screenAspect) {
+                        // Image is wider than your screen aspect: crop left/right sides
+                        float cropWidth = texH * screenAspect;
+                        float horizontalDiff = (texW - cropWidth) / texW;
+                        uMin = horizontalDiff / 2.0f;
+                        uMax = 1.0f - uMin;
+                    } else if (imageAspect < screenAspect) {
+                        // Image is taller than your screen aspect: crop top/bottom sides
+                        float cropHeight = texW / screenAspect;
+                        float verticalDiff = (texH - cropHeight) / texH;
+                        vMin = verticalDiff / 2.0f;
+                        vMax = 1.0f - vMin;
+                    }
+
+                    glBegin(GL_QUADS);
+                        glTexCoord2f(uMin, vMin); glVertex2f(0.0f, 0.0f);
+                        glTexCoord2f(uMax, vMin); glVertex2f(screenW, 0.0f);
+                        glTexCoord2f(uMax, vMax); glVertex2f(screenW, screenH);
+                        glTexCoord2f(uMin, vMax); glVertex2f(0.0f, screenH);
+                    glEnd();
+                    break;
+                }
             }
 
-            // 3. Render utilizing your original upright orientation vertices
-            glBegin(GL_QUADS);
-                glTexCoord2f(uMin, vMin); glVertex2f(0.0f, 0.0f);
-                glTexCoord2f(uMax, vMin); glVertex2f(static_cast<float>(fWidth), 0.0f);
-                glTexCoord2f(uMax, vMax); glVertex2f(static_cast<float>(fWidth), static_cast<float>(fHeight));
-                glTexCoord2f(uMin, vMax); glVertex2f(0.0f, static_cast<float>(fHeight));
-            glEnd();
-
-            glBindTexture(GL_TEXTURE_2D, 0); 
+            glBindTexture(GL_TEXTURE_2D, 0);
             glDisable(GL_TEXTURE_2D);
+        } else {
+            // No image at all for this workspace ("Image: None" in Backgrounds) --
+            // fill with the live desktop background color instead of leaving the
+            // transparent clear showing through as flat black.
+            glColor4f(fBgColorR, fBgColorG, fBgColorB, 1.0f);
+            glBegin(GL_QUADS);
+                glVertex2f(0.0f, 0.0f);
+                glVertex2f(static_cast<float>(fWidth), 0.0f);
+                glVertex2f(static_cast<float>(fWidth), static_cast<float>(fHeight));
+                glVertex2f(0.0f, static_cast<float>(fHeight));
+            glEnd();
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
         }
-			
+
         // =========================================================================
         // NEW MATRIX TRANSLATION FOR THE AUTOHIDE OVERLAY ELEMENTS
         // =========================================================================
@@ -4658,6 +4943,7 @@ void SyncDockWithRunningDeskbarApps() {
         // Configuration variables for the status widgets (Now scales dynamically relative to icon size changes!)
         float clockSectionPadding = 24.0f;
         float cpuGraphWidth       = 60.0f;
+        float workspaceGraphWidth = 60.0f;
         float separatorGapPadding = 16.0f;        
         
         // FIXED SIZING: The trash bin launcher now scales uniformly alongside your application icons
@@ -4883,6 +5169,35 @@ void SyncDockWithRunningDeskbarApps() {
             dynamicScales.push_back(cpuScale);
             progressiveX += finalCpuWidth;
 
+            // =========================================================================
+            // PROCESS WORKSPACE SWITCHER METRICS (2D SMOOTH FIX)
+            // =========================================================================
+            if (fShowWorkspaceSwitcher) {
+                progressiveX += (clockSectionPadding * layoutSizeRatio);
+
+                float scaledWorkspaceWidth = workspaceGraphWidth * layoutSizeRatio;
+                float approxWorkspaceCenterX = progressiveX + (scaledWorkspaceWidth / 2.0f);
+                float approxWorkspaceCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+
+                float distanceWorkspaceX = std::abs(fMouseX - approxWorkspaceCenterX);
+                float distanceWorkspaceY = std::abs(fMouseY - approxWorkspaceCenterY);
+                float distanceWorkspace2D = std::sqrt(distanceWorkspaceX * distanceWorkspaceX + distanceWorkspaceY * distanceWorkspaceY);
+
+                float workspaceScale = 1.0f;
+                if (fCursorIsInsideHitbox && distanceWorkspace2D < 180.0f) {
+                    float ratio = distanceWorkspace2D / 180.0f;
+                    workspaceScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+
+                float finalWorkspaceWidth = scaledWorkspaceWidth * workspaceScale;
+                dynamicWidths.push_back(finalWorkspaceWidth);
+                dynamicScales.push_back(workspaceScale);
+                progressiveX += finalWorkspaceWidth;
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
+            }
+
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
         }
@@ -4901,6 +5216,7 @@ void SyncDockWithRunningDeskbarApps() {
         size_t clockSlotIdx  = totalIconsCount + 2;
         size_t volumeSlotIdx = totalIconsCount + 3;
         size_t cpuSlotIdx    = totalIconsCount + 4;
+        size_t workspaceSlotIdx = totalIconsCount + 5;
         
         // Calculate our dynamic size ratio multiplier based on your slider baseline
         float layoutSizeRatio = baseSize / 48.0f;
@@ -5265,7 +5581,7 @@ void SyncDockWithRunningDeskbarApps() {
 		BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
 	
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
-		    auto& activeTaskWin = fTaskbarWindows[w];		
+		    auto& activeTaskWin = fTaskbarWindows[w];
 		    float size = dynamicWidths[renderingSlotIdx];
 		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
 		
@@ -6055,9 +6371,64 @@ void SyncDockWithRunningDeskbarApps() {
 
    
         // 4. Update the tracker pointer past the cpu monitor graph layout bounds area cleanly
-        currentX += dynamicGraphWidth;
         currentX += clockSectionPadding;
-        
+
+        // =========================================================================
+        // 6C. DRAW WORKSPACE SWITCHER GRID (BLACK BACKPLATE, PER-WORKSPACE TILES)
+        // =========================================================================
+        if (fShowWorkspaceSwitcher) {
+            float workspaceScale = dynamicScales[workspaceSlotIdx];
+            float dynamicWorkspaceWidth  = dynamicWidths[workspaceSlotIdx];
+            float dynamicWorkspaceHeight = 28.0f * workspaceScale * sizeRatio;
+
+            float workspaceTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicWorkspaceHeight / 2.0f));
+            HaikuRect workspaceBounds = { currentX, workspaceTop, currentX + dynamicWorkspaceWidth, workspaceTop + dynamicWorkspaceHeight };
+
+            DrawGLRoundedRect(workspaceBounds, 4.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
+
+            int gridCols = 0, gridRows = 0, wsCount = 0;
+            GetWorkspaceGridLayout(gridCols, gridRows, wsCount);
+            int32 activeWorkspace = current_workspace();
+
+            float tileGap = 3.0f * sizeRatio;
+            float tileAreaLeft   = workspaceBounds.left + tileGap;
+            float tileAreaTop    = workspaceBounds.top + tileGap;
+            float tileAreaWidth  = workspaceBounds.Width()  - (tileGap * (gridCols + 1));
+            float tileAreaHeight = workspaceBounds.Height() - (tileGap * (gridRows + 1));
+            float tileW = (gridCols > 0) ? (tileAreaWidth / gridCols) : 0.0f;
+            float tileH = (gridRows > 0) ? (tileAreaHeight / gridRows) : 0.0f;
+
+            for (int ws = 0; ws < wsCount; ++ws) {
+                int col = ws % gridCols;
+                int row = ws / gridCols;
+
+                float tileLeft = tileAreaLeft + col * (tileW + tileGap);
+                float tileTop  = tileAreaTop  + row * (tileH + tileGap);
+                HaikuRect tileRect = { tileLeft, tileTop, tileLeft + tileW, tileTop + tileH };
+
+                bool isActive = (ws == activeWorkspace);
+                bool isHovered = tileRect.Contains(fMouseX, fMouseY);
+
+                if (isActive) {
+                    glColor4f(0.57f, 0.12f, 0.99f, 0.95f); // matches the CPU widget's neon purple accent
+                } else if (isHovered) {
+                    glColor4f(0.45f, 0.45f, 0.50f, 0.90f);
+                } else {
+                    glColor4f(0.22f, 0.22f, 0.26f, 0.90f);
+                }
+
+                glBegin(GL_QUADS);
+                    glVertex2f(tileRect.left,  tileRect.top);
+                    glVertex2f(tileRect.right, tileRect.top);
+                    glVertex2f(tileRect.right, tileRect.bottom);
+                    glVertex2f(tileRect.left,  tileRect.bottom);
+                glEnd();
+            }
+
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+            currentX += dynamicWorkspaceWidth;
+        }
+
         fLastCalculatedWidth = totalCalculatedWidth;
 
         // =========================================================================
@@ -6576,6 +6947,8 @@ private:
     std::string  fLastClockTimeString = "";
     
     HaikuTexture fWallpaperTexture;
+    int32        fWallpaperMode = kWallpaperScaledToFit;
+    BPoint       fWallpaperOffset = BPoint(0.0f, 0.0f);
     HaikuTexture fHaikuMenuIcon;
     HaikuTexture fHaikuTrashIcon;
     
@@ -6706,7 +7079,8 @@ void SaveConfiguration() {
             settingsMsg.AddBool("system_tray", showSystemTray);
             settingsMsg.AddBool("auto_raise", dockAlwaysOnTop);
             settingsMsg.AddBool("text_overlays", fShowTitleOverlays);
-            
+            settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
+
 			settingsMsg.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
             settingsMsg.AddFloat(kSettingsAlphaKey, fDockAlpha);
             settingsMsg.AddInt32(kSettingsSpinDurationKey, static_cast<int32>(fSpinDurationMs));
@@ -6758,6 +7132,7 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("system_tray", &valBool) == B_OK) showSystemTray = valBool;
                 if (settingsMsg.FindBool("auto_raise", &valBool) == B_OK) dockAlwaysOnTop = valBool;
                 if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlays = valBool;
+                if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
 
                 if (settingsMsg.FindFloat(kSettingsIconSizeKey, &valFloat) == B_OK) fBaseIconSize = valFloat;
                 if (settingsMsg.FindFloat(kSettingsAlphaKey, &valFloat) == B_OK) fDockAlpha = valFloat;
@@ -7088,6 +7463,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    // FIX: Pin the dock to every workspace (mirrors Haiku's DesktopWindow.cpp),
+    // otherwise the overlay only shows on whichever workspace it was launched on.
+    if (be_app && be_app->Lock()) {
+        BWindow* nativeWin = be_app->WindowAt(0);
+        if (nativeWin != nullptr) {
+            nativeWin->SetWorkspaces(B_ALL_WORKSPACES);
+        }
+        be_app->Unlock();
+    }
 
     SDL_GLContext glContext = SDL_GL_CreateContext(window);
 
@@ -7143,6 +7527,7 @@ int main(int argc, char* argv[]) {
     uint32 lastRosterScanTime = 0;
     uint32 lastMetricsUpdateTime = 0;
     bool needsRender = true;
+    int32 lastKnownWorkspace = current_workspace();
     
         // --- TIMING ENGINES FOR SMOOTH ANIMATION ---
     Uint64 lastPerfTime = SDL_GetPerformanceCounter();
@@ -7491,6 +7876,21 @@ int main(int argc, char* argv[]) {
         }
 
         uint32 currentTime = SDL_GetTicks();
+
+        // =========================================================================
+        // NATIVE WORKSPACE SWITCH DETECTION (per-desktop wallpapers)
+        // =========================================================================
+        int32 activeWorkspace = current_workspace();
+        if (activeWorkspace != lastKnownWorkspace) {
+            lastKnownWorkspace = activeWorkspace;
+
+            // Route through the same handler the attribute-change watcher uses,
+            // so the rescan (and dependent dock refresh) stays in one place.
+            SDL_Event workspaceSwitchEvent;
+            SDL_zero(workspaceSwitchEvent);
+            workspaceSwitchEvent.type = SDL_EVENT_WALLPAPER_CHANGED;
+            SDL_PushEvent(&workspaceSwitchEvent);
+        }
 
         if (currentTime - lastMetricsUpdateTime >= 1000 || lastMetricsUpdateTime == 0) {
             lastMetricsUpdateTime = currentTime;
