@@ -69,7 +69,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.45"
+#define APP_LOCAL_VERSION "v1.0.46"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -7447,14 +7447,8 @@ static int32 BackgroundUpdateChecker(void* data) {
         DebugLog("[hdesktop update] curl_easy_perform() OK, HTTP status = %ld, %zu bytes received\n",
             httpStatus, buffer.size());
     }
-    // WORKAROUND: curl_easy_cleanup() reproducibly hangs/crashes this thread on the
-    // current Haiku libcurl build (confirmed via debug logging -- everything up to
-    // and including a successful curl_easy_perform() runs fine, but no code after
-    // this cleanup call ever executes). This runs once per launch, so intentionally
-    // leaking the single CURL handle (reclaimed at process exit) is a fine tradeoff
-    // versus losing the update check entirely. Revisit if a Haiku curl update fixes it.
-    // curl_easy_cleanup(curl);
-    DebugLog("[hdesktop update] skipping curl_easy_cleanup() (known Haiku libcurl issue)\n");
+    curl_easy_cleanup(curl);
+    DebugLog("[hdesktop update] curl_easy_cleanup() done\n");
 
     DebugLog("[hdesktop update] raw response body: '%s'\n", buffer.c_str());
 
