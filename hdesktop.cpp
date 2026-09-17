@@ -69,7 +69,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.46"
+#define APP_LOCAL_VERSION "v1.0.47"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -93,6 +93,16 @@ bool showSystemTray;
 bool dockAlwaysOnTop;
 bool fShowTitleOverlays = true;
 bool fShowWorkspaceSwitcher = false;
+
+// Which screen edge the dock is pinned to. Left/Right are intentionally not
+// offered in the settings UI yet -- the dock's layout, hit-testing, and
+// drag/drop are all built around a horizontal strip, so supporting a
+// vertical (left/right) dock needs a follow-up pass of its own.
+enum DockLocation {
+    kDockLocationBottom = 0,
+    kDockLocationTop    = 1
+};
+int32 gDockLocation = kDockLocationBottom;
 
 bool fEffectBounceEnabled = false;
 bool fEffectSpinEnabled = true;
@@ -161,6 +171,8 @@ enum {
     MSG_SYSTEMTRAY_TOGGLED = 'sttg',
     MSG_TEXTOVERLAYS_TOGGLED = 'totg',
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
+    MSG_DOCKLOCATION_BOTTOM_TOGGLED = 'dlbt',
+    MSG_DOCKLOCATION_TOP_TOGGLED = 'dltp',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
     MSG_AUTORAISE_TOGGLED  = 'srdt',
     MSG_EFFECT_SPEED_SLIDER_CHANGED = 'efsc',
@@ -1184,6 +1196,7 @@ private:
     BCheckBox* fAutoRaiseCheckbox;
     BCheckBox* fTextOverlaysCheckbox;
     BCheckBox* fWorkspaceSwitcherCheckbox;
+    BMenuField* fDockLocationMenuField;
     BMenuField* fEffectsMenuField;
     BMenuField* fCloseEffectsMenuField;
     BSlider*   fEffectSpeedSlider;
@@ -1236,6 +1249,23 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fWorkspaceSwitcherCheckbox->SetValue(fShowWorkspaceSwitcher ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fWorkspaceSwitcherCheckbox);
 
+        // Row 6: Dock Location Dropdown
+        BPopUpMenu* dockLocationPopup = new BPopUpMenu("Dock Location");
+
+        BMenuItem* dockBottomItem = new BMenuItem("Bottom", new BMessage(MSG_DOCKLOCATION_BOTTOM_TOGGLED));
+        dockBottomItem->SetMarked(gDockLocation == kDockLocationBottom);
+        dockLocationPopup->AddItem(dockBottomItem);
+
+        BMenuItem* dockTopItem = new BMenuItem("Top", new BMessage(MSG_DOCKLOCATION_TOP_TOGGLED));
+        dockTopItem->SetMarked(gDockLocation == kDockLocationTop);
+        dockLocationPopup->AddItem(dockTopItem);
+
+        // Dock Location Dropdown (Label drawn manually in Draw())
+        BRect dockLocationMenuRect(145.0f, 222.0f, frame.Width() - 35.0f, 247.0f);
+        fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
+        fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
+        AddChild(fDockLocationMenuField);
+
         // Open App Effects Dropdown Menu
         BPopUpMenu* effectsPopup = new BPopUpMenu("Open Effects");
         bool openNone = !fEffectBounceEnabled && !fEffectSpinEnabled && !fEffectIllusionEnabled && !fEffectWobbleEnabled && !fEffectExplodeEnabled;
@@ -1265,7 +1295,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 231.0f, frame.Width() - 35.0f, 256.0f);
+        BRect effectsMenuRect(145.0f, 264.0f, frame.Width() - 35.0f, 289.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -1299,14 +1329,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 264.0f, frame.Width() - 35.0f, 289.0f);
+        BRect closeEffectsMenuRect(145.0f, 297.0f, frame.Width() - 35.0f, 322.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
         
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 314.0f, frame.Width() - 35.0f, 364.0f);
+        BRect speedSliderRect(35.0f, 347.0f, frame.Width() - 35.0f, 397.0f);
         fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed", 
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1316,7 +1346,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 384.0f, frame.Width() - 35.0f, 434.0f);
+        BRect sliderRect(35.0f, 417.0f, frame.Width() - 35.0f, 467.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1326,7 +1356,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 454.0f, frame.Width() - 35.0f, 504.0f);
+        BRect sizeSliderRect(35.0f, 487.0f, frame.Width() - 35.0f, 537.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1409,7 +1439,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
 		// 6. BALANCED BACKING CONTAINER
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 519.0f);
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 552.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -1423,13 +1453,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
         DrawString("Enable Application Title Overlays", BPoint(62.0f, 194.0f));
         DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
+        DrawString("Dock Location:", BPoint(35.0f, 239.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 248.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 281.0f));
+        DrawString("Open App Effects:", BPoint(35.0f, 281.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 314.0f));
 
         /*
         // Draw smaller, italicized "(Experimental)" tag underneath the Close App Effects dropdown
@@ -1521,6 +1552,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
+        fDockLocationMenuField->Menu()->SetTargetForItems(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
         fCloseEffectsMenuField->Menu()->SetTargetForItems(this);
         fEffectSpeedSlider->SetTarget(this);
@@ -1560,6 +1592,18 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 fShowWorkspaceSwitcher = (fWorkspaceSwitcherCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 Invalidate();
+                break;
+            }
+
+            case MSG_DOCKLOCATION_BOTTOM_TOGGLED: {
+                gDockLocation = kDockLocationBottom;
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_DOCKLOCATION_TOP_TOGGLED: {
+                gDockLocation = kDockLocationTop;
+                SaveConfiguration();
                 break;
             }
 
@@ -1902,9 +1946,9 @@ public:
                 B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 
-        ResizeTo(560.0f, 634.0f);
+        ResizeTo(560.0f, 667.0f);
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 634.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 667.0f) / 2.0f;
         MoveTo(targetX, targetY);
         
         ConfigView* configView = new ConfigView(Bounds());
@@ -2526,7 +2570,10 @@ public:
         float targetPanelWidth = screenFrame.Width() - (horizontalMarginGap * 2.0f);
         float targetPanelHeight = screenH - 200.0f;
 
-        MoveTo(horizontalMarginGap, 30.0f);
+        // Leave room for the dock on whichever edge it's pinned to: a small
+        // 30px gap on the free edge, a larger 170px gap on the dock's edge.
+        float topY = (gDockLocation == kDockLocationTop) ? 170.0f : 30.0f;
+        MoveTo(horizontalMarginGap, topY);
         ResizeTo(targetPanelWidth, targetPanelHeight);
 
         BRect bounds = Bounds();
@@ -2572,8 +2619,11 @@ public:
                         BRect screenFrame = screen.Frame();
                         
                         // Protects the dock area from triggering an auto-close
-                        if (screenMousePos.y >= (screenFrame.bottom - 100.0f)) {
-                            break; 
+                        bool mouseNearDock = (gDockLocation == kDockLocationTop)
+                            ? (screenMousePos.y <= (screenFrame.top + 100.0f))
+                            : (screenMousePos.y >= (screenFrame.bottom - 100.0f));
+                        if (mouseNearDock) {
+                            break;
                         }
 
                         if (fMouseHasEntered) {
@@ -2764,7 +2814,12 @@ public:
 
     } // End of complete class constructor
 
-
+    // Maps a distance inset from the dock's anchored screen edge into an
+    // absolute world-space Y coordinate, so the same icon/tray layout math
+    // works whether the dock is pinned to the bottom or the top of the screen.
+    float DockEdgeY(float insetFromEdge) {
+        return (gDockLocation == kDockLocationTop) ? insetFromEdge : (fHeight - insetFromEdge);
+    }
 
 	void ReloadWallpaperBackground() {
 	    // Use the inner integer identifier field for the OpenGL cleanup
@@ -3417,7 +3472,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxCenterX = progressiveX + (baseSize / 2.0f);
                 
                 // Calculate the visual center point of the icon on the Y axis
-                float approxCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                float approxCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
                 
                 // Compute independent delta vectors
                 float distanceX = std::abs(fMouseX - approxCenterX);
@@ -3460,7 +3515,7 @@ void SyncDockWithRunningDeskbarApps() {
             float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
             
             // Calculate the spatial center point of the Trash Can icon on the Y axis
-            float approxTrashCenterY = fHeight - 10.0f - (baseTrashSize / 2.0f);
+            float approxTrashCenterY = DockEdgeY(10.0f + (baseTrashSize / 2.0f));
             
             // Compute separate directional delta vectors
             float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
@@ -3505,7 +3560,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        float approxTrayCenterX = progressiveX + (baselineTrayWidth / 2.0f);
 	        
 	        // Calculate the standard spatial center point on the Y axis for the tray row
-	        float approxTrayCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+	        float approxTrayCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 	        
 	        // Compute independent delta vectors
 	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
@@ -3541,7 +3596,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
                 
                 // Calculate spatial center point on the Y axis for the text string element
-                float approxClockCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                float approxClockCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
                 
                 float distanceClockX = std::abs(fMouseX - approxClockCenterX);
                 float distanceClockY = std::abs(fMouseY - approxClockCenterY);
@@ -3572,7 +3627,7 @@ void SyncDockWithRunningDeskbarApps() {
             
             float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
             float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
-            float approxVolCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
             
             float distanceVolX = std::abs(fMouseX - approxVolCenterX);
             float distanceVolY = std::abs(fMouseY - approxVolCenterY);
@@ -3596,7 +3651,7 @@ void SyncDockWithRunningDeskbarApps() {
             
             float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
             float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
-            float approxCpuCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
             
             float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
             float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
@@ -3621,7 +3676,7 @@ void SyncDockWithRunningDeskbarApps() {
 
                 float scaledWorkspaceWidth = workspaceGraphWidth * layoutSizeRatio;
                 float approxWorkspaceCenterX = progressiveX + (scaledWorkspaceWidth / 2.0f);
-                float approxWorkspaceCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                float approxWorkspaceCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
                 float distanceWorkspaceX = std::abs(fMouseX - approxWorkspaceCenterX);
                 float distanceWorkspaceY = std::abs(fMouseY - approxWorkspaceCenterY);
@@ -3680,8 +3735,13 @@ void SyncDockWithRunningDeskbarApps() {
 	    // Balance the dock plate exactly how it is drawn on screen
 	    dockPlate.left   = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - internalSidePadding;
 	    dockPlate.right  = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + internalSidePadding;
-	    dockPlate.bottom = fHeight - dockMarginBottom;
-	    dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
+	    if (gDockLocation == kDockLocationTop) {
+	        dockPlate.top    = dockMarginBottom;
+	        dockPlate.bottom = dockPlate.top + maxDockHeight + 20.0f;
+	    } else {
+	        dockPlate.bottom = fHeight - dockMarginBottom;
+	        dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
+	    }
 	
 	    // Lock down definitive trash hitbox using converged data fields
 	    float renderingTrashSize = dynamicWidths[trashSlotIdx];
@@ -3705,8 +3765,13 @@ void SyncDockWithRunningDeskbarApps() {
 	    
 	    fTrashRect.left = layoutTrackerX;
 	    fTrashRect.right = fTrashRect.left + renderingTrashSize;
-	    fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
-	    fTrashRect.bottom = dockPlate.bottom - 10.0f;
+	    if (gDockLocation == kDockLocationTop) {
+	        fTrashRect.top = dockPlate.top + 10.0f;
+	        fTrashRect.bottom = dockPlate.top + 10.0f + renderingTrashSize;
+	    } else {
+	        fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
+	        fTrashRect.bottom = dockPlate.bottom - 10.0f;
+	    }
 	
 	    // =========================================================================
 	    // PROGRESSIVE STRUCTURAL ROUTING INTERCEPTOR (1:1 GEOMETRY MATCH)
@@ -3720,7 +3785,16 @@ void SyncDockWithRunningDeskbarApps() {
 	        float size = dynamicWidths[evaluationSlotIdx];
         
 	        // Correctly calculate visual height baseline boundary metrics
-	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	        HaikuRect realIconBounds;
+	        realIconBounds.left = currentX;
+	        realIconBounds.right = currentX + size;
+	        if (gDockLocation == kDockLocationTop) {
+	            realIconBounds.top = dockPlate.top + 10.0f;
+	            realIconBounds.bottom = dockPlate.top + 10.0f + size;
+	        } else {
+	            realIconBounds.top = dockPlate.bottom - 10.0f - size;
+	            realIconBounds.bottom = dockPlate.bottom - 10.0f;
+	        }
 	    
 	        if (x >= realIconBounds.left && x <= realIconBounds.right &&
 	            y >= realIconBounds.top  && y <= realIconBounds.bottom) {
@@ -3861,7 +3935,16 @@ void SyncDockWithRunningDeskbarApps() {
 	        if (*activeTaskWin.openStateFlag == false) continue;
 
 	        float size = dynamicWidths[evaluationSlotIdx];
-	        HaikuRect realIconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+	        HaikuRect realIconBounds;
+	        realIconBounds.left = currentX;
+	        realIconBounds.right = currentX + size;
+	        if (gDockLocation == kDockLocationTop) {
+	            realIconBounds.top = dockPlate.top + 10.0f;
+	            realIconBounds.bottom = dockPlate.top + 10.0f + size;
+	        } else {
+	            realIconBounds.top = dockPlate.bottom - 10.0f - size;
+	            realIconBounds.bottom = dockPlate.bottom - 10.0f;
+	        }
 	        
 	        // --- TRACKER SAFETY TOGGLE PIPELINES ---
 	        bool isTracker = false;
@@ -4184,7 +4267,16 @@ void SyncDockWithRunningDeskbarApps() {
 
 	    currentX += clockSectionPadding;
 	    float dynamicTrashSize = dynamicWidths[trashSlotIdx];
-	    HaikuRect trashBounds = { currentX, dockPlate.bottom - 10.0f - dynamicTrashSize, currentX + dynamicTrashSize, dockPlate.bottom - 10.0f };
+	    HaikuRect trashBounds;
+	    trashBounds.left = currentX;
+	    trashBounds.right = currentX + dynamicTrashSize;
+	    if (gDockLocation == kDockLocationTop) {
+	        trashBounds.top = dockPlate.top + 10.0f;
+	        trashBounds.bottom = dockPlate.top + 10.0f + dynamicTrashSize;
+	    } else {
+	        trashBounds.top = dockPlate.bottom - 10.0f - dynamicTrashSize;
+	        trashBounds.bottom = dockPlate.bottom - 10.0f;
+	    }
 	    
 	    if (x >= trashBounds.left && x <= trashBounds.right &&
 	        y >= trashBounds.top  && y <= trashBounds.bottom) {
@@ -4357,12 +4449,16 @@ void SyncDockWithRunningDeskbarApps() {
 	        currentX += clockSectionPadding;
 	        
 	        // Match the 16px high tray vertical position bounds used in RenderFrame
-	        HaikuRect trayHitbox = { 
-	            currentX, 
-	            dockPlate.bottom - 10.0f - (32.0f * trayScaleFactor), 
-	            currentX + dynamicTrayWidth, 
-	            dockPlate.bottom - 10.0f 
-	        };
+	        HaikuRect trayHitbox;
+	        trayHitbox.left = currentX;
+	        trayHitbox.right = currentX + dynamicTrayWidth;
+	        if (gDockLocation == kDockLocationTop) {
+	            trayHitbox.top = dockPlate.top + 10.0f;
+	            trayHitbox.bottom = dockPlate.top + 10.0f + (32.0f * trayScaleFactor);
+	        } else {
+	            trayHitbox.top = dockPlate.bottom - 10.0f - (32.0f * trayScaleFactor);
+	            trayHitbox.bottom = dockPlate.bottom - 10.0f;
+	        }
 	
 	        if (x >= trayHitbox.left && x <= trayHitbox.right && y >= trayHitbox.top && y <= trayHitbox.bottom) {
 	            float localTrayTrackerX = currentX;
@@ -4703,21 +4799,24 @@ void SyncDockWithRunningDeskbarApps() {
 
 
 	
-	void DrawNativeSystemText(const char* text, float centerX, float baselineY) {
+	void DrawNativeSystemText(const char* text, float centerX, float baselineY, bool anchorAbove = true) {
 	    if (text == nullptr || text[0] == '\0') return;
-	
+
 	    int textWidth = 0;
 	    int textHeight = 0;
-	    
+
 	    // Generate the bold, rounded-capsule texture matrix
 	    HaikuTexture textTex = RenderWhiteTextToTexture(text, &textWidth, &textHeight, 11.0f);
 	    if (textTex.id == 0) return;
-	
-	    // Direct mapping alignment bounding coordinates relative to icon centerline
+
+	    // Direct mapping alignment bounding coordinates relative to icon centerline.
+	    // anchorAbove hangs the text above baselineY (bottom-anchored dock, where the
+	    // hover title floats above the icon); when false it hangs below baselineY
+	    // instead (top-anchored dock, where there's no room above the icon).
 	    float left = centerX - (textWidth / 2.0f);
 	    float right = centerX + (textWidth / 2.0f);
-	    float top = baselineY - textHeight;
-	    float bottom = baselineY;
+	    float top = anchorAbove ? (baselineY - textHeight) : baselineY;
+	    float bottom = anchorAbove ? baselineY : (baselineY + textHeight);
 	
 	    // State attribute protection sandbox
 	    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT);
@@ -4777,7 +4876,9 @@ void SyncDockWithRunningDeskbarApps() {
 		
 		// Keep exploding shards from flying above the actual SDL window's visible bounds
 		float fExplosionWindowTopBoundary = fHeight - std::ceil(fBaseIconSize * 2.0f + 50.0f);
-		float fExplosionMinY = fExplosionWindowTopBoundary + 8.0f; // small safety margin
+		float fExplosionMinY = fExplosionWindowTopBoundary + 8.0f; // small safety margin (bottom-anchored dock)
+		float fExplosionWindowBottomBoundary = std::ceil(fBaseIconSize * 2.0f + 50.0f);
+		float fExplosionMaxY = fExplosionWindowBottomBoundary - 8.0f; // small safety margin (top-anchored dock)
 	
         // =========================================================================
         // 2. FULLSCREEN WALLPAPER DRAW PASS (MODE-AWARE) - STATIONARY
@@ -4925,7 +5026,9 @@ void SyncDockWithRunningDeskbarApps() {
         // NEW MATRIX TRANSLATION FOR THE AUTOHIDE OVERLAY ELEMENTS
         // =========================================================================
         glPushMatrix();
-        glTranslatef(0.0f, yOffset, 0.0f);
+        // Bottom-anchored dock hides by sliding down off the screen's bottom edge;
+        // top-anchored dock hides by sliding up off the screen's top edge instead.
+        glTranslatef(0.0f, (gDockLocation == kDockLocationTop) ? -yOffset : yOffset, 0.0f);
 
         // =========================================================================
         // 3. TASKBAR-ENABLED DOCK WIDTH GEOMETRY CALCULATIONS (UNIFIED ZOOM PIPELINE)
@@ -4977,7 +5080,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxCenterX = progressiveX + (baseSize / 2.0f);
                 
                 // Calculate the visual center point of the icon on the Y axis
-                float approxCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                float approxCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
                 
                 // Compute independent delta vectors
                 float distanceX = std::abs(fMouseX - approxCenterX);
@@ -5020,7 +5123,7 @@ void SyncDockWithRunningDeskbarApps() {
             float approxTrashCenterX = progressiveX + (baseTrashSize / 2.0f);
             
             // Calculate the spatial center point of the Trash Can icon on the Y axis
-            float approxTrashCenterY = fHeight - 10.0f - (baseTrashSize / 2.0f);
+            float approxTrashCenterY = DockEdgeY(10.0f + (baseTrashSize / 2.0f));
             
             // Compute separate directional delta vectors
             float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
@@ -5065,7 +5168,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        float approxTrayCenterX = progressiveX + (baselineTrayWidth / 2.0f);
 	        
 	        // Calculate the standard spatial center point on the Y axis for the tray row
-	        float approxTrayCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+	        float approxTrayCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 	        
 	        // Compute independent delta vectors
 	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
@@ -5101,7 +5204,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxClockCenterX = progressiveX + (baselineClockLayoutWidth / 2.0f);
                 
                 // Calculate spatial center point on the Y axis for the text string element
-                float approxClockCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                float approxClockCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
                 
                 float distanceClockX = std::abs(fMouseX - approxClockCenterX);
                 float distanceClockY = std::abs(fMouseY - approxClockCenterY);
@@ -5132,7 +5235,7 @@ void SyncDockWithRunningDeskbarApps() {
             
             float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
             float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
-            float approxVolCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
             
             float distanceVolX = std::abs(fMouseX - approxVolCenterX);
             float distanceVolY = std::abs(fMouseY - approxVolCenterY);
@@ -5156,7 +5259,7 @@ void SyncDockWithRunningDeskbarApps() {
             
             float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
             float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
-            float approxCpuCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+            float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
             
             float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
             float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
@@ -5181,7 +5284,7 @@ void SyncDockWithRunningDeskbarApps() {
 
                 float scaledWorkspaceWidth = workspaceGraphWidth * layoutSizeRatio;
                 float approxWorkspaceCenterX = progressiveX + (scaledWorkspaceWidth / 2.0f);
-                float approxWorkspaceCenterY = fHeight - 10.0f - (baseSize / 2.0f);
+                float approxWorkspaceCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
                 float distanceWorkspaceX = std::abs(fMouseX - approxWorkspaceCenterX);
                 float distanceWorkspaceY = std::abs(fMouseY - approxWorkspaceCenterY);
@@ -5244,17 +5347,27 @@ void SyncDockWithRunningDeskbarApps() {
         // Balance the dock backplate relative to the dynamically scaled row footprint
         dockPlate.left   = (fWidth / 2.0f) - (adjustedTotalWidth / 2.0f) - internalSidePadding;
         dockPlate.right  = (fWidth / 2.0f) + (adjustedTotalWidth / 2.0f) + internalSidePadding;
-        dockPlate.bottom = fHeight - dockMarginBottom;
-        
+
         // DYNAMIC HEIGHT SCALE: Automatically adapts panel thickness to the icons
-        dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
+        if (gDockLocation == kDockLocationTop) {
+            dockPlate.top    = dockMarginBottom;
+            dockPlate.bottom = dockPlate.top + maxDockHeight + 20.0f;
+        } else {
+            dockPlate.bottom = fHeight - dockMarginBottom;
+            dockPlate.top    = dockPlate.bottom - maxDockHeight - 20.0f;
+        }
 
         // Lock down definitive trash hitbox using converged data fields
         float renderingTrashSize = dynamicWidths[trashSlotIdx];
 
         fTrashRect.right = fTrashRect.left + renderingTrashSize;
-        fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
-        fTrashRect.bottom = dockPlate.bottom - 10.0f;
+        if (gDockLocation == kDockLocationTop) {
+            fTrashRect.top = dockPlate.top + 10.0f;
+            fTrashRect.bottom = dockPlate.top + 10.0f + renderingTrashSize;
+        } else {
+            fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
+            fTrashRect.bottom = dockPlate.bottom - 10.0f;
+        }
 
      
         // =========================================================================
@@ -5299,7 +5412,16 @@ void SyncDockWithRunningDeskbarApps() {
         for (size_t i = 0; i < baselineLaunchersCount; ++i) {
             float size = dynamicWidths[renderingSlotIdx];
             float scale = dynamicScales[renderingSlotIdx];
-            HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+            HaikuRect iconBounds;
+            iconBounds.left = currentX;
+            iconBounds.right = currentX + size;
+            if (gDockLocation == kDockLocationTop) {
+                iconBounds.top = dockPlate.top + 10.0f;
+                iconBounds.bottom = dockPlate.top + 10.0f + size;
+            } else {
+                iconBounds.top = dockPlate.bottom - 10.0f - size;
+                iconBounds.bottom = dockPlate.bottom - 10.0f;
+            }
 
             if (i == 0) {
                 if (fHaikuMenuIcon.id != 0) {
@@ -5350,7 +5472,8 @@ void SyncDockWithRunningDeskbarApps() {
                         }
                     }
 				
-					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+					float directionalBounceOffset = (gDockLocation == kDockLocationTop) ? -bounceOffset : bounceOffset;
+				glTranslatef(centerX, centerY - directionalBounceOffset, 0.0f);
                     if (rotationAngle != 0.0f) {
                         glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
                     }
@@ -5386,12 +5509,22 @@ void SyncDockWithRunningDeskbarApps() {
 								float pTop = -size/2.0f + y * subSize + offsetY;
 								float pBottom = pTop + subSize;
 								
-								// Push the shard back down if it would fly above the window's visible area
-								float absoluteTop = (centerY - bounceOffset) + pTop;
-								if (absoluteTop < fExplosionMinY) {
-								    float correction = fExplosionMinY - absoluteTop;
-								    pTop += correction;
-								    pBottom += correction;
+								// Keep the shard within the dock window's visible bounds, whichever
+								// screen edge the dock (and its small SDL window) is anchored to.
+								if (gDockLocation == kDockLocationTop) {
+								    float absoluteBottom = (centerY - directionalBounceOffset) + pBottom;
+								    if (absoluteBottom > fExplosionMaxY) {
+								        float correction = absoluteBottom - fExplosionMaxY;
+								        pTop -= correction;
+								        pBottom -= correction;
+								    }
+								} else {
+								    float absoluteTop = (centerY - directionalBounceOffset) + pTop;
+								    if (absoluteTop < fExplosionMinY) {
+								        float correction = fExplosionMinY - absoluteTop;
+								        pTop += correction;
+								        pBottom += correction;
+								    }
 								}
                                 
                                 float u1 = static_cast<float>(x) / cols;
@@ -5468,7 +5601,8 @@ void SyncDockWithRunningDeskbarApps() {
                             }
                         }
                     }
-					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+					float directionalBounceOffset = (gDockLocation == kDockLocationTop) ? -bounceOffset : bounceOffset;
+				glTranslatef(centerX, centerY - directionalBounceOffset, 0.0f);
                     if (rotationAngle != 0.0f) {
                         glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
                     }
@@ -5504,12 +5638,22 @@ void SyncDockWithRunningDeskbarApps() {
 								float pTop = -size/2.0f + y * subSize + offsetY;
 								float pBottom = pTop + subSize;
 								
-								// Push the shard back down if it would fly above the window's visible area
-								float absoluteTop = (centerY - bounceOffset) + pTop;
-								if (absoluteTop < fExplosionMinY) {
-								    float correction = fExplosionMinY - absoluteTop;
-								    pTop += correction;
-								    pBottom += correction;
+								// Keep the shard within the dock window's visible bounds, whichever
+								// screen edge the dock (and its small SDL window) is anchored to.
+								if (gDockLocation == kDockLocationTop) {
+								    float absoluteBottom = (centerY - directionalBounceOffset) + pBottom;
+								    if (absoluteBottom > fExplosionMaxY) {
+								        float correction = absoluteBottom - fExplosionMaxY;
+								        pTop -= correction;
+								        pBottom -= correction;
+								    }
+								} else {
+								    float absoluteTop = (centerY - directionalBounceOffset) + pTop;
+								    if (absoluteTop < fExplosionMinY) {
+								        float correction = fExplosionMinY - absoluteTop;
+								        pTop += correction;
+								        pBottom += correction;
+								    }
 								}
 								                                
                                 float u1 = static_cast<float>(x) / cols;
@@ -5587,7 +5731,16 @@ void SyncDockWithRunningDeskbarApps() {
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
 		    auto& activeTaskWin = fTaskbarWindows[w];
 		    float size = dynamicWidths[renderingSlotIdx];
-		    HaikuRect iconBounds = { currentX, dockPlate.bottom - 10.0f - size, currentX + size, dockPlate.bottom - 10.0f };
+		    HaikuRect iconBounds;
+		    iconBounds.left = currentX;
+		    iconBounds.right = currentX + size;
+		    if (gDockLocation == kDockLocationTop) {
+		        iconBounds.top = dockPlate.top + 10.0f;
+		        iconBounds.bottom = dockPlate.top + 10.0f + size;
+		    } else {
+		        iconBounds.top = dockPlate.bottom - 10.0f - size;
+		        iconBounds.bottom = dockPlate.bottom - 10.0f;
+		    }
 		
 		    bool isTracker = (activeTaskWin.title == "Tracker");
 		    int32 normalVisibleWindows = 0;
@@ -5753,7 +5906,8 @@ void SyncDockWithRunningDeskbarApps() {
                     }
                 }
                 
-				glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+				float directionalBounceOffset = (gDockLocation == kDockLocationTop) ? -bounceOffset : bounceOffset;
+				glTranslatef(centerX, centerY - directionalBounceOffset, 0.0f);
 	                if (rotationAngle != 0.0f) {
 	                    glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
 	                }
@@ -5790,12 +5944,22 @@ void SyncDockWithRunningDeskbarApps() {
   								float pTop = -size/2.0f + y * subSize + offsetY;
 								float pBottom = pTop + subSize;
 								
-								// Push the shard back down if it would fly above the window's visible area
-								float absoluteTop = (centerY - bounceOffset) + pTop;
-								if (absoluteTop < fExplosionMinY) {
-								    float correction = fExplosionMinY - absoluteTop;
-								    pTop += correction;
-								    pBottom += correction;
+								// Keep the shard within the dock window's visible bounds, whichever
+								// screen edge the dock (and its small SDL window) is anchored to.
+								if (gDockLocation == kDockLocationTop) {
+								    float absoluteBottom = (centerY - directionalBounceOffset) + pBottom;
+								    if (absoluteBottom > fExplosionMaxY) {
+								        float correction = absoluteBottom - fExplosionMaxY;
+								        pTop -= correction;
+								        pBottom -= correction;
+								    }
+								} else {
+								    float absoluteTop = (centerY - directionalBounceOffset) + pTop;
+								    if (absoluteTop < fExplosionMinY) {
+								        float correction = fExplosionMinY - absoluteTop;
+								        pTop += correction;
+								        pBottom += correction;
+								    }
 								}
 								                                
 
@@ -5833,12 +5997,18 @@ void SyncDockWithRunningDeskbarApps() {
 		    // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
 		    // =========================================================================
 		  if (fShowTitleOverlays) {
-			if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right &&
-			    fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom) {
-			    
+			bool cursorNearIcon = (gDockLocation == kDockLocationTop)
+			    ? (fMouseY >= iconBounds.top && fMouseY <= (iconBounds.bottom + 40.0f))
+			    : (fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom);
+			if (fMouseX >= iconBounds.left && fMouseX <= iconBounds.right && cursorNearIcon) {
+
 			    listBaseX = iconBounds.left + ((iconBounds.right - iconBounds.left) / 2.0f);
-			    listBaseY = iconBounds.top - 12.0f;
-			    
+			    // Bottom-anchored dock: hang the title above the icon. Top-anchored
+			    // dock: there's no room above, so hang it below instead.
+			    listBaseY = (gDockLocation == kDockLocationTop)
+			        ? (iconBounds.bottom + 12.0f)
+			        : (iconBounds.top - 12.0f);
+
 			    bigtime_t nowTime = system_time();
 			    bool teamChanged = (fHoveredTeam != activeTaskWin.teamId);
 			    bool refreshDue = (nowTime - fLastHoverListRefreshTime) >= 300000; // 300ms
@@ -5921,8 +6091,13 @@ void SyncDockWithRunningDeskbarApps() {
         // Pin hitbox geometry directly to our current track pointer
         fTrashRect.left   = currentX;
         fTrashRect.right  = fTrashRect.left + renderingTrashSize;
-        fTrashRect.top    = dockPlate.bottom - 10.0f - renderingTrashSize;
-        fTrashRect.bottom = dockPlate.bottom - 10.0f;
+        if (gDockLocation == kDockLocationTop) {
+            fTrashRect.top = dockPlate.top + 10.0f;
+            fTrashRect.bottom = dockPlate.top + 10.0f + renderingTrashSize;
+        } else {
+            fTrashRect.top = dockPlate.bottom - 10.0f - renderingTrashSize;
+            fTrashRect.bottom = dockPlate.bottom - 10.0f;
+        }
 
         if (fHaikuTrashIcon.id != 0) {
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fHaikuTrashIcon.id);
@@ -5972,7 +6147,8 @@ void SyncDockWithRunningDeskbarApps() {
                             }
                         }
                     }
-					glTranslatef(centerX, centerY - bounceOffset, 0.0f);
+					float directionalBounceOffset = (gDockLocation == kDockLocationTop) ? -bounceOffset : bounceOffset;
+				glTranslatef(centerX, centerY - directionalBounceOffset, 0.0f);
                     if (rotationAngle != 0.0f) {
                         glRotatef(rotationAngle, 0.0f, 0.0f, 1.0f);
                     }
@@ -6008,12 +6184,22 @@ void SyncDockWithRunningDeskbarApps() {
 								float pTop = -renderingTrashSize/2.0f + y * subSize + offsetY;
 								float pBottom = pTop + subSize;
 								
-								// Push the shard back down if it would fly above the window's visible area
-								float absoluteTop = (centerY - bounceOffset) + pTop;
-								if (absoluteTop < fExplosionMinY) {
-								    float correction = fExplosionMinY - absoluteTop;
-								    pTop += correction;
-								    pBottom += correction;
+								// Keep the shard within the dock window's visible bounds, whichever
+								// screen edge the dock (and its small SDL window) is anchored to.
+								if (gDockLocation == kDockLocationTop) {
+								    float absoluteBottom = (centerY - directionalBounceOffset) + pBottom;
+								    if (absoluteBottom > fExplosionMaxY) {
+								        float correction = absoluteBottom - fExplosionMaxY;
+								        pTop -= correction;
+								        pBottom -= correction;
+								    }
+								} else {
+								    float absoluteTop = (centerY - directionalBounceOffset) + pTop;
+								    if (absoluteTop < fExplosionMinY) {
+								        float correction = fExplosionMinY - absoluteTop;
+								        pTop += correction;
+								        pBottom += correction;
+								    }
 								}
 								                                
 
@@ -6441,12 +6627,19 @@ void SyncDockWithRunningDeskbarApps() {
         if (fShouldDrawList && !fCurrentWindowsList.empty()) {
             BString displayTitle = fCurrentWindowsList[0].title;
             
-            float textEstimatedWidth = 240.0f; 
+            float textEstimatedWidth = 240.0f;
             BRect unifiedBox;
             unifiedBox.left   = listBaseX - (textEstimatedWidth / 2.0f);
             unifiedBox.right  = listBaseX + (textEstimatedWidth / 2.0f);
-            unifiedBox.top    = listBaseY - 14.0f;
-            unifiedBox.bottom = listBaseY + 4.0f;
+            // Mirrors DrawNativeSystemText's anchorAbove flip below: the text sits
+            // above listBaseY for a bottom-anchored dock, below it for a top-anchored one.
+            if (gDockLocation == kDockLocationTop) {
+                unifiedBox.top    = listBaseY - 4.0f;
+                unifiedBox.bottom = listBaseY + 14.0f;
+            } else {
+                unifiedBox.top    = listBaseY - 14.0f;
+                unifiedBox.bottom = listBaseY + 4.0f;
+            }
 
             // Tracking registers to compute the elapsed hover duration safely across draw frames
             static team_id lastCheckedTeam = -1;
@@ -6511,7 +6704,7 @@ void SyncDockWithRunningDeskbarApps() {
                 hoverStartTime = 0;
             }
             
-            DrawNativeSystemText(displayTitle.String(), listBaseX, listBaseY);
+            DrawNativeSystemText(displayTitle.String(), listBaseX, listBaseY, gDockLocation != kDockLocationTop);
         } else if (!fShouldDrawList) {
             fHoveredTeam = -1;
             fCurrentWindowsList.clear();
@@ -7084,6 +7277,7 @@ void SaveConfiguration() {
             settingsMsg.AddBool("auto_raise", dockAlwaysOnTop);
             settingsMsg.AddBool("text_overlays", fShowTitleOverlays);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
+            settingsMsg.AddInt32("dock_location", gDockLocation);
 
 			settingsMsg.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
             settingsMsg.AddFloat(kSettingsAlphaKey, fDockAlpha);
@@ -7137,6 +7331,9 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("auto_raise", &valBool) == B_OK) dockAlwaysOnTop = valBool;
                 if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlays = valBool;
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
+                if (settingsMsg.FindInt32("dock_location", &valInt32) == B_OK) {
+                    gDockLocation = (valInt32 == kDockLocationTop) ? kDockLocationTop : kDockLocationBottom;
+                }
 
                 if (settingsMsg.FindFloat(kSettingsIconSizeKey, &valFloat) == B_OK) fBaseIconSize = valFloat;
                 if (settingsMsg.FindFloat(kSettingsAlphaKey, &valFloat) == B_OK) fDockAlpha = valFloat;
@@ -7548,21 +7745,31 @@ int main(int argc, char* argv[]) {
     
     // Choose a safe, sensible base height for the window to open with initially
     int dockPanelW = screenWidth;
-    int dockPanelH = 140; 
-    int sensorHeight = 4; 
+    int dockPanelH = 140;
+    int sensorHeight = 4;
 
-    // Use yExpanded to position the actual SDL window frame at the bottom
-    int yExpanded  = screenHeight - dockPanelH; 
+    // Load settings (including the dock's screen edge) before computing any
+    // geometry that depends on it.
+    LoadConfiguration();
+    WallpaperWatcher wallpaperWatcher;
 
-    // Animation tracking (0.0f means elements draw normally inside the bottom window)
+    // Converts a window-local Y coordinate into world/screen space, and gives
+    // the SDL window's own screen-space Y position -- 0 when the dock is
+    // pinned to the top edge, (screenHeight - panelH) when pinned to bottom.
+    auto HiddenScreenOffsetFor = [&](int panelH) -> int {
+        return (gDockLocation == kDockLocationTop) ? 0 : (screenHeight - panelH);
+    };
+
+    // Use yExpanded to position the actual SDL window frame at the dock's screen edge
+    int yExpanded  = HiddenScreenOffsetFor(dockPanelH);
+
+    // Animation tracking (0.0f means elements draw normally inside the dock window)
     float currentY = 0.0f;
     float targetY  = 0.0f;
     AutoHideState dockState = STATE_VISIBLE;
     bool hidingSettled = false;
-	LoadConfiguration(); 
-	WallpaperWatcher wallpaperWatcher;
-	
-    // FIX: Force the initial window creation down to the bottom using yExpanded!
+
+    // FIX: Force the initial window creation to the dock's anchored screen edge using yExpanded!
     SDL_Window* window = SDL_CreateWindow(
         "Haiku Desktop Taskbar Overlay Component",
         0, yExpanded,
@@ -7603,11 +7810,19 @@ int main(int argc, char* argv[]) {
     glLoadIdentity();
     
     // --- WALLPAPER RE-STITCH ALIGNMENT MATH ---
-    float panelTopY = static_cast<float>(screenHeight) - static_cast<float>(dockPanelH);
-   //float panelTopY    = static_cast<float>(screenHeight) - 140.0f;
-    float panelBottomY = static_cast<float>(screenHeight);
-    
-    gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
+    // Maps this small window onto whichever slice of the full-screen world
+    // coordinate space its anchored edge covers: [0, dockPanelH] at the top,
+    // or [screenHeight - dockPanelH, screenHeight] at the bottom.
+    float panelTopY, panelBottomY;
+    if (gDockLocation == kDockLocationTop) {
+        panelTopY = 0.0f;
+        panelBottomY = static_cast<float>(dockPanelH);
+    } else {
+        panelTopY = static_cast<float>(screenHeight) - static_cast<float>(dockPanelH);
+        panelBottomY = static_cast<float>(screenHeight);
+    }
+
+    gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();    
     HaikuGlDesktopEngine desktopEngine(screenWidth, screenHeight);
@@ -7707,7 +7922,7 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
                 
-                    int hiddenScreenOffset = screenHeight - dockPanelH;
+                    int hiddenScreenOffset = HiddenScreenOffsetFor(dockPanelH);
                     int adjustedMouseY = mouseY + hiddenScreenOffset;
                 
                     // Feed smooth radial zoom parameters
@@ -7752,11 +7967,15 @@ int main(int argc, char* argv[]) {
                         localMouseX = static_cast<int>(localPoint.x);
                         localMouseY = static_cast<int>(localPoint.y);
                         
-                        // If hidden, check if cursor hit the tiny sensor row at the bottom
+                        // If hidden, check if cursor hit the tiny sensor row on the dock's
+                        // anchored screen edge (window bottom if pinned to the bottom,
+                        // window top if pinned to the top).
                         // If visible or animating, check the entire active height of the window
                         if (dockState == STATE_HIDDEN) {
-                            cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW &&
-                                                  localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
+                            bool inSensorRow = (gDockLocation == kDockLocationTop)
+                                ? (localMouseY >= 0 && localMouseY < sensorHeight)
+                                : (localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
+                            cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW && inSensorRow);
                         } else {
                             cursorIsInsideDock = (localMouseX >= 0 && localMouseX < dockPanelW &&
                                                   localMouseY >= 0 && localMouseY < dockPanelH);
@@ -7790,9 +8009,17 @@ int main(int argc, char* argv[]) {
         int paddedRightX_Plate = (dockPanelW / 2) + (static_cast<int>(currentDynamicWidth) / 2) + horizontalPaddingPlate;
 
         // 3. TRACKER 1: Primary Dock Hitbox (Wide for Smooth Zooming Mechanics)
+        // Bottom-anchored dock: dynamic edge tracks down toward the window's fixed
+        // bottom edge while hiding. Top-anchored dock: mirrored, dynamic edge tracks
+        // up toward the window's fixed top edge instead.
         if (dockState == STATE_HIDDEN) {
+            bool inSensorRow = (gDockLocation == kDockLocationTop)
+                ? (localMouseY >= 0 && localMouseY < sensorHeight)
+                : (localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
+            cursorIsInsideDock = (localMouseX >= paddedLeftX_Zoom && localMouseX <= paddedRightX_Zoom && inSensorRow);
+        } else if (gDockLocation == kDockLocationTop) {
             cursorIsInsideDock = (localMouseX >= paddedLeftX_Zoom && localMouseX <= paddedRightX_Zoom &&
-                                  localMouseY >= (dockPanelH - sensorHeight) && localMouseY < dockPanelH);
+                                  localMouseY >= 0 && localMouseY < (dockPanelH - static_cast<int>(currentY) + verticalTopPadding));
         } else {
             cursorIsInsideDock = (localMouseX >= paddedLeftX_Zoom && localMouseX <= paddedRightX_Zoom &&
                                   localMouseY >= (static_cast<int>(currentY) - verticalTopPadding) && localMouseY < dockPanelH);
@@ -7800,15 +8027,20 @@ int main(int argc, char* argv[]) {
 
         // TRACKER 2: Physical Plate Check (Tight to prevent wide window-focus stealing)
         bool cursorIsOverPhysicalPlate = false;
-        
+
         // FIX: Only evaluate the physical plate if the dock is fully deployed or actively sliding out.
         // We include currentY in the calculation so the focus boundary follows the physical graphic asset!
         if (dockState == STATE_VISIBLE || dockState == STATE_SHOWING) {
             int visualDockHeight = static_cast<int>(fBaseIconSize + 80.0f); // Approximate height of the physical plate asset
-            int livePlateTopBound = (dockPanelH - visualDockHeight) + static_cast<int>(currentY);
-            
-            cursorIsOverPhysicalPlate = (localMouseX >= paddedLeftX_Plate && localMouseX <= paddedRightX_Plate &&
-                                         localMouseY >= (livePlateTopBound - verticalTopPadding) && localMouseY < dockPanelH);
+            if (gDockLocation == kDockLocationTop) {
+                int livePlateBottomBound = visualDockHeight - static_cast<int>(currentY);
+                cursorIsOverPhysicalPlate = (localMouseX >= paddedLeftX_Plate && localMouseX <= paddedRightX_Plate &&
+                                             localMouseY >= 0 && localMouseY < (livePlateBottomBound + verticalTopPadding));
+            } else {
+                int livePlateTopBound = (dockPanelH - visualDockHeight) + static_cast<int>(currentY);
+                cursorIsOverPhysicalPlate = (localMouseX >= paddedLeftX_Plate && localMouseX <= paddedRightX_Plate &&
+                                             localMouseY >= (livePlateTopBound - verticalTopPadding) && localMouseY < dockPanelH);
+            }
         }
 
 
@@ -7958,7 +8190,7 @@ int main(int argc, char* argv[]) {
         static int lastSentY = -1;
         static uint32 lastSentButtons = 0;
 
-        int hiddenScreenOffset = screenHeight - dockPanelH;
+        int hiddenScreenOffset = HiddenScreenOffsetFor(dockPanelH);
         int adjustedMouseY = localMouseY + hiddenScreenOffset;
 
         if (!cursorIsInsideDock) {
@@ -8018,9 +8250,9 @@ int main(int argc, char* argv[]) {
             if (liveIconSize <= 0.0f) liveIconSize = 48.0f; // Fail-safe default
 
             // Apply your dynamic scaling height equation
-            int targetWindowHeight = static_cast<int>(std::ceil(liveIconSize * 2.0f + 50.0f)); 
+            int targetWindowHeight = static_cast<int>(std::ceil(liveIconSize * 2.0f + 50.0f));
             int targetWindowWidth  = screenWidth;
-            int targetWindowY      = screenHeight - targetWindowHeight;
+            int targetWindowY      = HiddenScreenOffsetFor(targetWindowHeight);
 
             // Track the size across frames so we don't spam the OS window manager
             static int lastSetH = -1;
@@ -8029,14 +8261,20 @@ int main(int argc, char* argv[]) {
             if (targetWindowHeight != lastSetH || targetWindowY != lastSetY) {
                 SDL_SetWindowSize(window, targetWindowWidth, targetWindowHeight);
                 SDL_SetWindowPosition(window, 0, targetWindowY);
-                
+
                 glViewport(0, 0, targetWindowWidth, targetWindowHeight);
-                
+
                 glMatrixMode(GL_PROJECTION);
                 glLoadIdentity();
-                float panelTopY    = static_cast<float>(screenHeight - targetWindowHeight);
-                float panelBottomY = static_cast<float>(screenHeight);
-                gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);    
+                float panelTopY, panelBottomY;
+                if (gDockLocation == kDockLocationTop) {
+                    panelTopY = 0.0f;
+                    panelBottomY = static_cast<float>(targetWindowHeight);
+                } else {
+                    panelTopY = static_cast<float>(screenHeight - targetWindowHeight);
+                    panelBottomY = static_cast<float>(screenHeight);
+                }
+                gluOrtho2D(0.0, static_cast<float>(screenWidth), panelBottomY, panelTopY);
                 glMatrixMode(GL_MODELVIEW);
                 
                 dockPanelH = targetWindowHeight;
