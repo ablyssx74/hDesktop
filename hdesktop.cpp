@@ -69,7 +69,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.47"
+#define APP_LOCAL_VERSION "v1.0.48"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -6350,8 +6350,14 @@ void SyncDockWithRunningDeskbarApps() {
                 }
 
                 float textCenterX = clockB.left + (dynamicClockW / 2.0f);
-                // Offset the floating date height proportionally to stay clear of the larger text
-                DrawNativeSystemText(dateStr.String(), textCenterX, clockY - (16.0f * sizeRatio));
+                // Offset the floating date height proportionally to stay clear of the larger text.
+                // Bottom-anchored dock: float the date above the clock. Top-anchored dock:
+                // there's no room above, so drop it below the clock instead.
+                if (gDockLocation == kDockLocationTop) {
+                    DrawNativeSystemText(dateStr.String(), textCenterX, clockB.bottom + (16.0f * sizeRatio), false);
+                } else {
+                    DrawNativeSystemText(dateStr.String(), textCenterX, clockY - (16.0f * sizeRatio));
+                }
             }
 
             // Draw standard time texture matching your high-contrast logic
@@ -6519,14 +6525,21 @@ void SyncDockWithRunningDeskbarApps() {
                 fCpuTooltipTex = RenderTextToTexture(fLastCpuTooltipStr.c_str(), &fCpuTooltipW, &fCpuTooltipH);
             }                                 
 
-            float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f; 
+            float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f;
             float tooltipH = static_cast<float>(fCpuTooltipH) + 8.0f;
             float tooltipLeft = cpuGraphBounds.left + (cpuGraphBounds.Width() / 2.0f) - (tooltipW / 2.0f);
-            
-            // FIX: Brought the box lower down closer to the graph frame edge (changed from -8.0f to -1.0f)
-            float tooltipBottom = cpuGraphBounds.top - 1.0f; 
 
-            HaikuRect tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
+            // Bottom-anchored dock: pop the tooltip up above the graph. Top-anchored
+            // dock: there's no room above, so drop it below the graph instead.
+            HaikuRect tooltipBounds;
+            if (gDockLocation == kDockLocationTop) {
+                float tooltipTop = cpuGraphBounds.bottom + 1.0f;
+                tooltipBounds = { tooltipLeft, tooltipTop, tooltipLeft + tooltipW, tooltipTop + tooltipH };
+            } else {
+                // FIX: Brought the box lower down closer to the graph frame edge (changed from -8.0f to -1.0f)
+                float tooltipBottom = cpuGraphBounds.top - 1.0f;
+                tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
+            }
             DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
             
             glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
@@ -7849,6 +7862,17 @@ int main(int argc, char* argv[]) {
     uint32 lastMetricsUpdateTime = 0;
     bool needsRender = true;
     int32 lastKnownWorkspace = current_workspace();
+
+    // Tracks the window geometry we last actually applied via SDL_SetWindowSize/
+    // SDL_SetWindowPosition, so the resizing engine below can skip redundant OS
+    // calls -- but forced back to -1 on a workspace switch (see below), since
+    // Haiku can silently reset this pinned-to-all-workspaces window's on-screen
+    // position when it becomes visible on a workspace it wasn't drawn on before,
+    // which would otherwise leave the dock's real window position out of sync
+    // with gDockLocation (rendered content correct, physical window stuck at
+    // the old edge).
+    int lastSetH = -1;
+    int lastSetY = -1;
     
         // --- TIMING ENGINES FOR SMOOTH ANIMATION ---
     Uint64 lastPerfTime = SDL_GetPerformanceCounter();
@@ -8222,6 +8246,14 @@ int main(int argc, char* argv[]) {
         if (activeWorkspace != lastKnownWorkspace) {
             lastKnownWorkspace = activeWorkspace;
 
+            // Haiku can silently reset this window's on-screen position when a
+            // workspace it wasn't drawn on before becomes active (even though
+            // it's pinned to all workspaces), leaving it sitting at a stale edge
+            // while the rendered content still follows gDockLocation correctly.
+            // Force the resizing engine below to reassert the real position.
+            lastSetH = -1;
+            lastSetY = -1;
+
             // Route through the same handler the attribute-change watcher uses,
             // so the rescan (and dependent dock refresh) stays in one place.
             SDL_Event workspaceSwitchEvent;
@@ -8253,10 +8285,6 @@ int main(int argc, char* argv[]) {
             int targetWindowHeight = static_cast<int>(std::ceil(liveIconSize * 2.0f + 50.0f));
             int targetWindowWidth  = screenWidth;
             int targetWindowY      = HiddenScreenOffsetFor(targetWindowHeight);
-
-            // Track the size across frames so we don't spam the OS window manager
-            static int lastSetH = -1;
-            static int lastSetY = -1;
 
             if (targetWindowHeight != lastSetH || targetWindowY != lastSetY) {
                 SDL_SetWindowSize(window, targetWindowWidth, targetWindowHeight);
