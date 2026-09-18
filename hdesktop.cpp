@@ -2648,6 +2648,445 @@ public:
 
 };
 
+// =========================================================================
+// WORKSPACE PREVIEW / DRAG-TO-MOVE POPUP
+// Opened by right-clicking the dock's workspace switcher widget. Shows a
+// simple grid of workspace cells with a fixed-size labeled box per window
+// (not a live thumbnail, matching Haiku's own Workspaces app), and lets you
+// drag a box onto a different cell to move that window there.
+// =========================================================================
+class WorkspacePreviewWindow;
+WorkspacePreviewWindow* gActiveWorkspacePreview = nullptr;
+
+class WorkspacePreviewView : public BView {
+private:
+    struct WindowBox {
+        team_id teamId;
+        BString title;
+        int32 workspaceIndex;
+        BRect frame; // last-drawn box rect, cached here for hit-testing
+    };
+
+    std::vector<WindowBox> fBoxes;
+    std::vector<BRect> fCellRects;
+    int fGridCols;
+    int fGridRows;
+    int fWorkspaceCount;
+
+    bool fDragging;
+    int32 fDragBoxIndex;
+    BPoint fDragCurrentPoint;
+    int32 fDropTargetWorkspace;
+
+    BMessageRunner* fRefreshTicker;
+
+    // Icons load once per team and are reused across the twice-a-second window
+    // list refresh; a cached nullptr means "looked it up, nothing found" so we
+    // don't keep retrying a team with no extractable icon.
+    std::map<team_id, BBitmap*> fIconCache;
+
+public:
+    WorkspacePreviewView(BRect frame)
+        : BView(frame, "WorkspacePreviewView", B_FOLLOW_ALL, B_WILL_DRAW),
+          fGridCols(1), fGridRows(1), fWorkspaceCount(1),
+          fDragging(false), fDragBoxIndex(-1), fDropTargetWorkspace(-1),
+          fRefreshTicker(nullptr) {
+        SetViewColor(rgb_color{24, 24, 28, 255});
+        RefreshWindowList();
+    }
+
+    virtual ~WorkspacePreviewView() {
+        delete fRefreshTicker;
+        for (auto& entry : fIconCache) {
+            delete entry.second;
+        }
+    }
+
+    BBitmap* GetIconForTeam(team_id team) {
+        auto found = fIconCache.find(team);
+        if (found != fIconCache.end()) {
+            return found->second;
+        }
+
+        BBitmap* icon = nullptr;
+        image_info imgInfo;
+        int32 imgCookie = 0;
+        if (get_next_image_info(team, &imgCookie, &imgInfo) == B_OK) {
+            BEntry appEntry(imgInfo.name);
+            if (appEntry.Exists()) {
+                entry_ref ref;
+                if (appEntry.GetRef(&ref) == B_OK) {
+                    BBitmap* tempIcon = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32);
+                    if (BNodeInfo::GetTrackerIcon(&ref, tempIcon, B_MINI_ICON) == B_OK) {
+                        icon = tempIcon;
+                    } else {
+                        delete tempIcon;
+                    }
+                }
+            }
+        }
+
+        fIconCache[team] = icon; // cache even a miss (nullptr) to avoid retrying every refresh
+        return icon;
+    }
+
+    bool IsDragging() const { return fDragging; }
+
+    virtual void AttachedToWindow() {
+        BView::AttachedToWindow();
+        BMessage tickMsg('wtik');
+        fRefreshTicker = new BMessageRunner(BMessenger(this), &tickMsg, 500000); // 2x/sec
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        if (message->what == 'wtik') {
+            if (!fDragging) {
+                RefreshWindowList();
+                Invalidate();
+            }
+            return;
+        }
+        BView::MessageReceived(message);
+    }
+
+    void RefreshWindowList() {
+        fBoxes.clear();
+
+        int32 count = static_cast<int32>(count_workspaces());
+        if (count < 1) count = 1;
+        fWorkspaceCount = count;
+        fGridCols = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(count))));
+        if (fGridCols < 1) fGridCols = 1;
+        fGridRows = static_cast<int>(std::ceil(static_cast<float>(count) / fGridCols));
+        if (fGridRows < 1) fGridRows = 1;
+
+        team_id ownTeam = be_app ? be_app->Team() : -1;
+
+        for (int32 ws = 0; ws < count; ++ws) {
+            int32* tokens = nullptr;
+            int32 totalWindows = 0;
+            if (BPrivate::get_window_order(ws, &tokens, &totalWindows) == B_OK && tokens != nullptr) {
+                for (int32 i = 0; i < totalWindows; ++i) {
+                    client_window_info* info = get_window_info(tokens[i]);
+                    if (info == nullptr) continue;
+
+                    if (info->team != ownTeam && info->feel == B_NORMAL_WINDOW_FEEL && info->layer > 0) {
+                        BString title(info->name);
+                        if (title.Length() > 0 && title != "Desktop" && title != "Tracker status") {
+                            WindowBox box;
+                            box.teamId = info->team;
+                            box.title = title;
+                            box.workspaceIndex = ws;
+                            fBoxes.push_back(box);
+                        }
+                    }
+                    free(info);
+                }
+                free(tokens);
+            }
+        }
+    }
+
+    virtual void Draw(BRect updateRect) {
+        BRect bounds = Bounds();
+        SetHighColor(rgb_color{24, 24, 28, 255});
+        FillRect(bounds);
+
+        float gap = 10.0f;
+        float cellW = (bounds.Width()  - gap * (fGridCols + 1)) / fGridCols;
+        float cellH = (bounds.Height() - gap * (fGridRows + 1)) / fGridRows;
+
+        fCellRects.clear();
+        int32 activeWs = current_workspace();
+
+        for (int ws = 0; ws < fWorkspaceCount; ++ws) {
+            int col = ws % fGridCols;
+            int row = ws / fGridCols;
+            float left = gap + col * (cellW + gap);
+            float top  = gap + row * (cellH + gap);
+            BRect cellRect(left, top, left + cellW, top + cellH);
+            fCellRects.push_back(cellRect);
+
+            bool isActive = (ws == activeWs);
+            bool isDropTarget = (fDragging && fDropTargetWorkspace == ws);
+
+            if (isDropTarget) {
+                SetHighColor(rgb_color{80, 140, 255, 255});
+            } else if (isActive) {
+                SetHighColor(rgb_color{145, 30, 250, 255});
+            } else {
+                SetHighColor(rgb_color{60, 60, 68, 255});
+            }
+            FillRoundRect(cellRect, 6.0f, 6.0f);
+
+            SetHighColor(rgb_color{15, 15, 18, 255});
+            StrokeRoundRect(cellRect, 6.0f, 6.0f);
+
+            SetFont(be_bold_font);
+            SetFontSize(10.0f);
+            SetHighColor(rgb_color{230, 230, 235, 255});
+            BString wsLabel;
+            wsLabel << (ws + 1);
+            DrawString(wsLabel.String(), BPoint(cellRect.right - 14.0f, cellRect.bottom - 6.0f));
+        }
+
+        SetFont(be_plain_font);
+        SetFontSize(9.0f);
+        BFont font;
+        GetFont(&font);
+
+        float boxW = 70.0f, boxH = 42.0f, boxGap = 6.0f;
+        std::vector<int> boxesPerCellCount(fWorkspaceCount, 0);
+
+        for (size_t i = 0; i < fBoxes.size(); ++i) {
+            if (fDragging && static_cast<int32>(i) == fDragBoxIndex) continue; // drawn as the drag ghost instead
+
+            int ws = fBoxes[i].workspaceIndex;
+            if (ws < 0 || ws >= static_cast<int>(fCellRects.size())) continue;
+
+            BRect cell = fCellRects[ws];
+            int idxInCell = boxesPerCellCount[ws]++;
+
+            int colsInCell = static_cast<int>((cell.Width() - boxGap) / (boxW + boxGap));
+            if (colsInCell < 1) colsInCell = 1;
+            int col = idxInCell % colsInCell;
+            int row = idxInCell / colsInCell;
+
+            float bx = cell.left + boxGap + col * (boxW + boxGap);
+            float by = cell.top + boxGap + row * (boxH + boxGap);
+            BRect boxRect(bx, by, bx + boxW, by + boxH);
+
+            if (boxRect.bottom > cell.bottom - boxGap) continue; // out of room in this cell; simple scope skips overflow
+
+            fBoxes[i].frame = boxRect;
+
+            SetHighColor(rgb_color{235, 235, 240, 255});
+            FillRect(boxRect);
+            SetHighColor(rgb_color{120, 120, 130, 255});
+            StrokeRect(boxRect);
+
+            float textLeft = bx + 4.0f;
+            BBitmap* icon = GetIconForTeam(fBoxes[i].teamId);
+            if (icon != nullptr) {
+                // Respect the icon's own per-pixel alpha instead of copying its
+                // background in solid, which otherwise shows as an opaque box.
+                SetDrawingMode(B_OP_ALPHA);
+                SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+                DrawBitmap(icon, BPoint(bx + 4.0f, by + (boxH / 2.0f) - 8.0f));
+                SetDrawingMode(B_OP_COPY);
+                textLeft += 20.0f;
+            }
+
+            SetHighColor(rgb_color{20, 20, 24, 255});
+            BString truncTitle = fBoxes[i].title;
+            font.TruncateString(&truncTitle, B_TRUNCATE_END, (bx + boxW - 4.0f) - textLeft);
+            DrawString(truncTitle.String(), BPoint(textLeft, by + (boxH / 2.0f) + 4.0f));
+        }
+
+        if (fDragging && fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
+            BRect ghost(fDragCurrentPoint.x - (boxW / 2.0f), fDragCurrentPoint.y - (boxH / 2.0f),
+                        fDragCurrentPoint.x + (boxW / 2.0f), fDragCurrentPoint.y + (boxH / 2.0f));
+
+            SetDrawingMode(B_OP_ALPHA);
+            SetHighColor(rgb_color{235, 235, 240, 180});
+            FillRect(ghost);
+            SetHighColor(rgb_color{80, 140, 255, 220});
+            StrokeRect(ghost);
+            SetDrawingMode(B_OP_COPY);
+
+            float ghostTextLeft = ghost.left + 4.0f;
+            BBitmap* ghostIcon = GetIconForTeam(fBoxes[fDragBoxIndex].teamId);
+            if (ghostIcon != nullptr) {
+                SetDrawingMode(B_OP_ALPHA);
+                SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+                DrawBitmap(ghostIcon, BPoint(ghost.left + 4.0f, ghost.top + (boxH / 2.0f) - 8.0f));
+                SetDrawingMode(B_OP_COPY);
+                ghostTextLeft += 20.0f;
+            }
+
+            SetHighColor(rgb_color{20, 20, 24, 255});
+            BString truncTitle = fBoxes[fDragBoxIndex].title;
+            font.TruncateString(&truncTitle, B_TRUNCATE_END, (ghost.right - 4.0f) - ghostTextLeft);
+            DrawString(truncTitle.String(), BPoint(ghostTextLeft, ghost.top + (boxH / 2.0f) + 4.0f));
+        }
+    }
+
+    virtual void MouseDown(BPoint point) {
+        for (size_t i = 0; i < fBoxes.size(); ++i) {
+            if (fBoxes[i].frame.Contains(point)) {
+                fDragging = true;
+                fDragBoxIndex = static_cast<int32>(i);
+                fDragCurrentPoint = point;
+                fDropTargetWorkspace = fBoxes[i].workspaceIndex;
+                SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+                Invalidate();
+                return;
+            }
+        }
+
+        // Not on a box -- clicking empty cell space just switches to that workspace.
+        for (size_t ws = 0; ws < fCellRects.size(); ++ws) {
+            if (fCellRects[ws].Contains(point)) {
+                activate_workspace(static_cast<int32>(ws));
+                if (Window()) Window()->PostMessage(B_QUIT_REQUESTED);
+                return;
+            }
+        }
+    }
+
+    virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) {
+        if (!fDragging) return;
+
+        fDragCurrentPoint = point;
+        fDropTargetWorkspace = -1;
+        for (size_t ws = 0; ws < fCellRects.size(); ++ws) {
+            if (fCellRects[ws].Contains(point)) {
+                fDropTargetWorkspace = static_cast<int32>(ws);
+                break;
+            }
+        }
+        Invalidate();
+    }
+
+    virtual void MouseUp(BPoint point) {
+        if (!fDragging) return;
+        fDragging = false;
+
+        if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size()) &&
+            fDropTargetWorkspace >= 0 && fDropTargetWorkspace != fBoxes[fDragBoxIndex].workspaceIndex) {
+            MoveWindowToWorkspace(fBoxes[fDragBoxIndex].teamId, fBoxes[fDragBoxIndex].title, fDropTargetWorkspace);
+        }
+
+        fDragBoxIndex = -1;
+        fDropTargetWorkspace = -1;
+        RefreshWindowList();
+        Invalidate();
+    }
+
+private:
+    // Moves a window to a different workspace via Haiku's public scripting
+    // suite (the same "Window"-by-index specifier this codebase already uses
+    // to close a specific Tracker window), rather than any private app_server
+    // protocol message -- safer, since a bad index here just fails the
+    // request instead of risking a malformed low-level message.
+    void MoveWindowToWorkspace(team_id teamId, const BString& title, int32 destWorkspace) {
+        BMessenger appMessenger(NULL, teamId);
+        if (!appMessenger.IsValid()) return;
+
+        BMessage countRequest(B_COUNT_PROPERTIES);
+        countRequest.AddSpecifier("Window");
+        BMessage countReply;
+        if (appMessenger.SendMessage(&countRequest, &countReply) != B_OK) return;
+
+        int32 totalWindows = 0;
+        if (countReply.FindInt32("result", &totalWindows) != B_OK) return;
+
+        for (int32 idx = 0; idx < totalWindows; ++idx) {
+            BMessage titleRequest(B_GET_PROPERTY);
+            titleRequest.AddSpecifier("Title");
+            titleRequest.AddSpecifier("Window", idx);
+
+            BMessage titleReply;
+            if (appMessenger.SendMessage(&titleRequest, &titleReply) != B_OK) continue;
+
+            const char* windowTitle = nullptr;
+            if (titleReply.FindString("result", &windowTitle) == B_OK && windowTitle != nullptr && title == windowTitle) {
+                BMessage setWorkspaceMsg(B_SET_PROPERTY);
+                setWorkspaceMsg.AddSpecifier("Workspaces");
+                setWorkspaceMsg.AddSpecifier("Window", idx);
+                setWorkspaceMsg.AddInt32("data", 1 << destWorkspace);
+                appMessenger.SendMessage(&setWorkspaceMsg);
+                return;
+            }
+        }
+    }
+};
+
+class WorkspacePreviewWindow : public BWindow {
+private:
+    BMessageRunner* fHoverTicker;
+    bool fMouseHasEntered;
+    WorkspacePreviewView* fView;
+
+public:
+    WorkspacePreviewWindow(BPoint anchorScreenPoint)
+        : BWindow(BRect(0, 0, 100, 100), "Workspace Preview",
+                  B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE),
+          fHoverTicker(nullptr), fMouseHasEntered(false), fView(nullptr) {
+
+        int32 wsCount = static_cast<int32>(count_workspaces());
+        if (wsCount < 1) wsCount = 1;
+        int gridCols = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(wsCount))));
+        if (gridCols < 1) gridCols = 1;
+        int gridRows = static_cast<int>(std::ceil(static_cast<float>(wsCount) / gridCols));
+        if (gridRows < 1) gridRows = 1;
+
+        float cellW = 220.0f, cellH = 140.0f, gap = 10.0f;
+        float panelWidth  = gridCols * cellW + gap * (gridCols + 1);
+        float panelHeight = gridRows * cellH + gap * (gridRows + 1);
+
+        BScreen screen(this);
+        BRect screenFrame = screen.Frame();
+
+        float targetX = anchorScreenPoint.x - (panelWidth / 2.0f);
+        if (targetX < 10.0f) targetX = 10.0f;
+        if (targetX + panelWidth > screenFrame.right - 10.0f) targetX = screenFrame.right - 10.0f - panelWidth;
+
+        // Bottom dock: open upward above the widget. Top dock: open downward below it.
+        float targetY;
+        if (gDockLocation == kDockLocationTop) {
+            targetY = anchorScreenPoint.y + 20.0f;
+        } else {
+            targetY = anchorScreenPoint.y - panelHeight - 20.0f;
+        }
+        if (targetY < 10.0f) targetY = 10.0f;
+        if (targetY + panelHeight > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelHeight;
+
+        MoveTo(targetX, targetY);
+        ResizeTo(panelWidth, panelHeight);
+
+        fView = new WorkspacePreviewView(Bounds());
+        AddChild(fView);
+
+        BMessage tickMessage('tick');
+        fHoverTicker = new BMessageRunner(BMessenger(this), &tickMessage, 100000);
+    }
+
+    virtual ~WorkspacePreviewWindow() {
+        delete fHoverTicker;
+        gActiveWorkspacePreview = nullptr;
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        switch (message->what) {
+            case 'tick': {
+                if (IsHidden()) return;
+                if (fView != nullptr && fView->IsDragging()) return; // don't auto-close mid-drag
+
+                BPoint screenMousePos;
+                uint32 buttons;
+                if (ChildAt(0)) {
+                    ChildAt(0)->GetMouse(&screenMousePos, &buttons, false);
+                    ChildAt(0)->ConvertToScreen(&screenMousePos);
+
+                    bool isInsideFrame = Frame().Contains(screenMousePos);
+                    if (!fMouseHasEntered && isInsideFrame) {
+                        fMouseHasEntered = true;
+                    }
+                    if (!isInsideFrame && fMouseHasEntered) {
+                        PostMessage(B_QUIT_REQUESTED);
+                    }
+                }
+                break;
+            }
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+};
+
 
 
 
@@ -4763,6 +5202,19 @@ void SyncDockWithRunningDeskbarApps() {
 	                        activate_workspace(ws);
 	                        break;
 	                    }
+	                }
+	            } else if (button == SDL_BUTTON_RIGHT) {
+	                // Right-click opens the bigger drag-to-move-windows preview;
+	                // left-click keeps the quick-switch behavior above untouched.
+	                if (gActiveWorkspacePreview != nullptr) {
+	                    if (gActiveWorkspacePreview->Lock()) {
+	                        gActiveWorkspacePreview->Quit();
+	                    }
+	                } else {
+	                    BPoint anchorPoint((workspaceBounds.left + workspaceBounds.right) / 2.0f,
+	                                        (workspaceBounds.top + workspaceBounds.bottom) / 2.0f);
+	                    gActiveWorkspacePreview = new WorkspacePreviewWindow(anchorPoint);
+	                    gActiveWorkspacePreview->Show();
 	                }
 	            }
 	            return;
