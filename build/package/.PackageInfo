@@ -1,0 +1,24 @@
+name			hdesktop
+version			1.0.47-1
+architecture	x86_64
+summary 		"hdesktop"
+description 	"hdesktop - SDL2 OpenGL Hyrbid Desktop Manager"
+packager		"ablyss <hdesktop@epluribusunix.net>"
+vendor			"epluribusunix.net Project"
+licenses {
+	"MIT"
+}
+copyrights {
+	"2026 ablyss"
+}
+provides {
+	hdesktop = 1.0.47-1
+}
+requires {
+	haiku
+	libsdl2
+	curl
+}	
+urls {
+	"https://github.com/ablyssx74/hdesktop"
+}

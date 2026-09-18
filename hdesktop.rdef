@@ -3,16 +3,15 @@ resource app_signature "application/x-vnd.hdesktop";
 resource app_version {
     major  = 1,   
     minor  = 0,   
-    middle = 47,   
+    middle = 48,   
     variety = B_APPV_DEVELOPMENT, 
     internal = 0,
-    short_info = "hdesktop v1.0.47",
+    short_info = "hdesktop v1.0.48",
     long_info = "hdesktop - SDL2 OpenGL Hyrbid Desktop Manager"
 
 };
 
 resource app_flags B_SINGLE_LAUNCH | B_BACKGROUND_APP;
-//resource app_flags B_BACKGROUND_APP;
 
 
 resource vector_icon {
