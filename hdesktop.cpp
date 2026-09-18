@@ -209,8 +209,10 @@ struct LeafMenuArgs {
     HaikuGlDesktopEngine* engine;
     int32 winX;
     int32 winY;
+    int32 winBottom; // live screen-space bottom edge of the dock window, for top-anchored placement
     int32 mouseX;
     float currentDockH;
+    float popupCenterY; // icon's own vertical center in screen space, so the popup opens over the icon
 };
 
 
@@ -218,8 +220,9 @@ struct TrayItem {
     std::string name;
     int32 internalId;
     GLuint textureId;
-    float currentRenderX; 
+    float currentRenderX;
     float currentRenderWidth;
+    float currentRenderTop; // cached alongside X/width so click handling can hit-test and center popups on the real drawn icon (square, so height == currentRenderWidth)
 };
 std::vector<TrayItem> fLiveTrayItems;
 bigtime_t fLastTrayUpdateTime = 0;
@@ -230,7 +233,9 @@ struct SystrayMenuArgs {
     int32 winY;
     int32 mouseX;
     int32 mouseY;
-    std::string itemName; 
+    std::string itemName;
+    float popupCenterX; // icon's own screen-space center, so the popup opens right over the icon
+    float popupCenterY;
 };
 
 struct CpuMenuArgs {
@@ -1158,6 +1163,7 @@ void SyncDynamicSystrayTextures() {
             newItem.textureId = textureID; 
             newItem.currentRenderX = 0.0f;
             newItem.currentRenderWidth = 0.0f;
+            newItem.currentRenderTop = 0.0f;
             fLiveTrayItems.push_back(newItem);
         }
     }
@@ -3058,9 +3064,11 @@ void SyncDockWithRunningDeskbarApps() {
 	    HaikuGlDesktopEngine* engine;
 	    int32 winX;
 	    int32 winY;
+	    int32 winBottom; // live screen-space bottom edge of the dock window, for top-anchored placement
 	    int32 mouseX;
-	    int32 mouseY; 
+	    int32 mouseY;
 	    float currentDockH;
+	    float popupCenterY; // icon's own vertical center in screen space, so the popup opens over the icon
 	};
 	
 	// 2. UPDATED BACKGROUND THREAD FUNCTION
@@ -3101,15 +3109,11 @@ void SyncDockWithRunningDeskbarApps() {
 	    float anchoredMenuX = static_cast<float>(args->winX + args->mouseX) - 45.0f;
 	    if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
 	    
-	    // SMART ADJUSTMENT: Calculate layout normalization metrics boundary limit tracker
-	    float maxExpectedHeight = 164.0f; 
-	    float structuralOffset = maxExpectedHeight - args->currentDockH;
-	    if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Safety clamp to prevent clipping
-	    
-	    // FIX: Push it lower down the screen boundary context as your dock container shrivels
-	    float anchoredMenuY = static_cast<float>(args->winY) + structuralOffset - 5.0f;
+	    // Open the popup centered right over the icon's own vertical midpoint,
+	    // regardless of whether the dock is pinned to the top or bottom of the screen.
+	    float anchoredMenuY = args->popupCenterY;
 	    BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
-	
+
 	    // BLOCKING CALL (Inside background thread only): Freezes safely until user chooses or clicks away
 		BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
 		
@@ -3171,7 +3175,7 @@ void SyncDockWithRunningDeskbarApps() {
 		        if (item.currentRenderWidth <= 0.0f) continue;
 		
 		        if (x >= item.currentRenderX && x <= (item.currentRenderX + item.currentRenderWidth) &&
-		   		    y >= fCachedVolTop && y <= (fCachedVolTop + fCachedVolHeight)) {
+		   		    y >= item.currentRenderTop && y <= (item.currentRenderTop + item.currentRenderWidth)) {
 		
 		            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
 		            if (deskbarMessenger.IsValid()) {
@@ -3206,9 +3210,11 @@ void SyncDockWithRunningDeskbarApps() {
                             args->engine = this; 
                             args->winX = winX;
                             args->winY = winY;
-                            args->mouseX = x; 
-                            args->mouseY = y; 
+                            args->mouseX = x;
+                            args->mouseY = y;
                             args->itemName = item.name; // Deep string copy guarantees memory protection
+                            args->popupCenterX = item.currentRenderX + (item.currentRenderWidth / 2.0f);
+                            args->popupCenterY = item.currentRenderTop + (item.currentRenderWidth / 2.0f);
 
                             // SELF-CONTAINED INLINE THREAD POINTER
                             int32 (*inlineSystrayFunc)(void*) = [](void* data) -> int32 {
@@ -3295,12 +3301,9 @@ void SyncDockWithRunningDeskbarApps() {
 										    }
 										}
 										
-										// Aligns popup horizontally, then places it right above the dock frame
-										float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
-										if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
-										
-										// TWEAKED: Changed from -5.0f to +10.0f to slide the menu downwards
-										float anchoredMenuY = static_cast<float>(threadArgs->winY) + 10.0f; 
+										// Open the popup centered right over the tray icon itself.
+										float anchoredMenuX = static_cast<float>(threadArgs->winX) + threadArgs->popupCenterX;
+										float anchoredMenuY = threadArgs->popupCenterY;
 										BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 										
 										BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, false);
@@ -3810,18 +3813,28 @@ void SyncDockWithRunningDeskbarApps() {
 		                    // FIX 1: Declared exactly ONCE so initialization properties are preserved
 		                    LeafMenuArgs* args = new LeafMenuArgs();
 		                    args->engine = this;
-		                    args->winX = 0; 
+		                    args->winX = 0;
 		                    args->winY = 0;
 		                    args->mouseX = static_cast<int32>(x);
-		                    
+		                    float iconCenterY = (realIconBounds.top + realIconBounds.bottom) / 2.0f;
+		                    if (gDockLocation != kDockLocationTop) {
+		                        // Bottom-anchored dock: nudge the popup up from dead-center toward the
+		                        // icon's top -- splits the difference between fully centered and floating
+		                        // above, which reads better here than pure centering.
+		                        float iconHeight = realIconBounds.bottom - realIconBounds.top;
+		                        iconCenterY -= iconHeight * 0.25f;
+		                    }
+		                    args->popupCenterY = iconCenterY;
+
 		                    // Match the baseline dynamic scaling formula used by the window sizing logic
-		                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f)); 
+		                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
 		
 		                    if (be_app && be_app->Lock()) {
 		                        BWindow* mainNativeWin = be_app->WindowAt(0);
 		                        if (mainNativeWin != nullptr) {
 		                            args->winX = static_cast<int32>(mainNativeWin->Frame().left);
 		                            args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+		                            args->winBottom = static_cast<int32>(mainNativeWin->Frame().bottom);
 		                        }
 		                        be_app->Unlock();
 		                    }
@@ -3841,15 +3854,10 @@ void SyncDockWithRunningDeskbarApps() {
 		                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 15.0f;
 		                        if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f; 
 		
-		                        // FIX 2: Correct layout normalization metrics boundary limit tracker.
-		                        // Assuming 164.0f is your standard maximum baseline footprint width layout,
-		                        // this naturally pushes the layout down when currentDockH drops to ~116.0f.
-		                        float maxExpectedHeight = 164.0f; 
-		                        float structuralOffset = maxExpectedHeight - threadArgs->currentDockH;
-		                        if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Safety clamp prevent clipping
-		                        
-		                        // Push it lower down screen boundary context as your dock container shrivels
-		                        float anchoredMenuY = static_cast<float>(threadArgs->winY) + structuralOffset - 5.0f; 
+		                        // Open the popup centered right over the icon's own vertical
+		                        // midpoint, regardless of whether the dock is pinned to the top
+		                        // or bottom of the screen.
+		                        float anchoredMenuY = threadArgs->popupCenterY;
 		                        
 		                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 		
@@ -4081,9 +4089,18 @@ void SyncDockWithRunningDeskbarApps() {
 				        args->engine = this; // Pass engine instance pointer safely
 				        args->winX = 0;
 				        args->winY = 0;
-				        args->mouseX = static_cast<int32>(x); 
-				        
-				        // SMART MATCH: Mirror the exact dynamic layout sizing math 
+				        args->mouseX = static_cast<int32>(x);
+				        float iconCenterY = (realIconBounds.top + realIconBounds.bottom) / 2.0f;
+				        if (gDockLocation != kDockLocationTop) {
+				            // Bottom-anchored dock: nudge the popup up from dead-center toward the
+				            // icon's top -- splits the difference between fully centered and floating
+				            // above, which reads better here than pure centering.
+				            float iconHeight = realIconBounds.bottom - realIconBounds.top;
+				            iconCenterY -= iconHeight * 0.25f;
+				        }
+				        args->popupCenterY = iconCenterY;
+
+				        // SMART MATCH: Mirror the exact dynamic layout sizing math
 				        args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f)); 
 
 				        // SMART NAVIGATION: Query native Haiku window coordinates like preferences popup
@@ -4092,6 +4109,7 @@ void SyncDockWithRunningDeskbarApps() {
 				            if (mainNativeWin != nullptr) {
 				                args->winX = static_cast<int32>(mainNativeWin->Frame().left);
 				                args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+				                args->winBottom = static_cast<int32>(mainNativeWin->Frame().bottom);
 				            }
 				            be_app->Unlock();
 				        }
@@ -4337,6 +4355,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            args->winY = 0;
 	            args->mouseX = static_cast<int32>(x); 
 	            args->mouseY = static_cast<int32>(y); 
+	            args->popupCenterY = (trashBounds.top + trashBounds.bottom) / 2.0f;
 	            
 	            // SMART MATCH: Pass the live unified dynamic scaling height parameter down
 	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
@@ -4376,13 +4395,8 @@ void SyncDockWithRunningDeskbarApps() {
 	                float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 45.0f;
 	                if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
 	                
-	                // SMART POSITIONING: Normalize menu coordinates based on dynamic dock boundaries
-	                float maxExpectedHeight = 164.0f; 
-	                float structuralOffset = maxExpectedHeight - threadArgs->currentDockH;
-	                if (structuralOffset < 0.0f) structuralOffset = 0.0f; // Clamp shield protection
-	                
-	                // Apply dynamic tracking pushing popup lower down when icons shrink
-	                float anchoredMenuY = static_cast<float>(threadArgs->winY) + structuralOffset - 5.0f; 
+	                // Open the popup centered right over the trash icon itself.
+	                float anchoredMenuY = threadArgs->popupCenterY;
 	                BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 	
 	                // Open synchronously inside our background thread
@@ -4513,33 +4527,52 @@ void SyncDockWithRunningDeskbarApps() {
 	                                    localMenu->AddItem(new BMenuItem("Open Network Preferences...", new BMessage('net1')));
 	                                } else if (fLiveTrayItems[t].name == "MediaReplicant") {
 	                                    localMenu->AddItem(new BMenuItem("Open Audio Mixer Preferences...", new BMessage('aud1')));
+	                                } else if (fLiveTrayItems[t].name == "SuperMusicTrayIcon" || fLiveTrayItems[t].name == "HaikuSuperMusicThingy") {
+	                                    // --- MATCHING NATIVE HAIKUSUPERMUSICTHINGY MENU STRUCTURE & TAB ROUTING ---
+	                                    BMessage* showMsg = new BMessage('atry');
+	                                    showMsg->AddString("target_tab", "radio");
+	                                    localMenu->AddItem(new BMenuItem("Show Player", showMsg));
+
+	                                    localMenu->AddSeparatorItem();
+
+	                                    BMessage* stationsMsg = new BMessage('atry');
+	                                    stationsMsg->AddString("target_tab", "stations");
+	                                    localMenu->AddItem(new BMenuItem("Stations", stationsMsg));
+
+	                                    BMessage* favsMsg = new BMessage('atry');
+	                                    favsMsg->AddString("target_tab", "favorites");
+	                                    localMenu->AddItem(new BMenuItem("Favorites", favsMsg));
+
+	                                    BMessage* eqMsg = new BMessage('atry');
+	                                    eqMsg->AddString("target_tab", "eq");
+	                                    localMenu->AddItem(new BMenuItem("Config", eqMsg));
+
+	                                    localMenu->AddSeparatorItem();
+
+	                                    localMenu->AddItem(new BMenuItem("Shuffle", new BMessage('shuf')));
+	                                    localMenu->AddItem(new BMenuItem("Pause", new BMessage('paus')));
+	                                    localMenu->AddItem(new BMenuItem("Stop", new BMessage('stop')));
+
+	                                    localMenu->AddSeparatorItem();
+
+	                                    localMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED)));
 	                                }
 	                            }
 	
 	                            // Get accurate native window coordinates
 	                            int32 nativeWinX = 0;
-	                            int32 nativeWinY = 0;
 	                            if (be_app && be_app->Lock()) {
 	                                BWindow* mainNativeWin = be_app->WindowAt(0);
 	                                if (mainNativeWin != nullptr) {
 	                                    nativeWinX = static_cast<int32>(mainNativeWin->Frame().left);
-	                                    nativeWinY = static_cast<int32>(mainNativeWin->Frame().top);
 	                                }
 	                                be_app->Unlock();
 	                            }
 	                            
-	                            // Apply the working dynamic scaling calculations
-	                            float currentDockH = static_cast<float>(std::ceil(fBaseIconSize + 68.0f));
-	                            float maxExpectedHeight = 164.0f; 
-	                            float structuralOffset = maxExpectedHeight - currentDockH;
-	                            if (structuralOffset < 0.0f) structuralOffset = 0.0f; 
-	                            
-	                            // STABILITY FIX 1: Anchor X precisely to the physical icon column (localTrayTrackerX) 
-	                            // instead of the volatile mouse coordinate pointer.
-	                            float anchoredMenuX = static_cast<float>(nativeWinX + localTrayTrackerX) + (iconHitboxSize / 2.0f) - 45.0f;
-	                            if (anchoredMenuX < 0.0f) anchoredMenuX = 5.0f;
-	                            
-	                            float anchoredMenuY = static_cast<float>(nativeWinY) + structuralOffset - 5.0f; 
+	                            // Open the popup centered right over the tray icon itself.
+	                            float trayItemCenterY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (8.0f * trayScaleFactor)) + (iconHitboxSize / 2.0f);
+	                            float anchoredMenuX = static_cast<float>(nativeWinX) + localTrayTrackerX + (iconHitboxSize / 2.0f);
+	                            float anchoredMenuY = trayItemCenterY;
 	                            BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 	
 	                            // STABILITY FIX 2: Added explicit parameters down to Go()
@@ -4558,6 +4591,26 @@ void SyncDockWithRunningDeskbarApps() {
 	                                        std::system("/boot/system/preferences/Network &");
 	                                    } else if (choiceAction->what == 'aud1') {
 	                                        std::system("/boot/system/preferences/Media &");
+	                                    } else if (choiceAction->what == 'atry' ||
+	                                               choiceAction->what == 'shuf' ||
+	                                               choiceAction->what == 'paus' ||
+	                                               choiceAction->what == 'stop' ||
+	                                               choiceAction->what == B_QUIT_REQUESTED) {
+
+	                                        BMessenger musicApp("application/x-vnd.HaikuSuperMusicThingy");
+
+	                                        // Auto-launch app using be_roster if it is not currently running
+	                                        if (!musicApp.IsValid()) {
+	                                            status_t launchErr = be_roster->Launch("application/x-vnd.HaikuSuperMusicThingy");
+	                                            if (launchErr == B_OK || launchErr == B_ALREADY_RUNNING) {
+	                                                musicApp = BMessenger("application/x-vnd.HaikuSuperMusicThingy");
+	                                            }
+	                                        }
+
+	                                        // Forward the full BMessage payload (including "target_tab")
+	                                        if (musicApp.IsValid()) {
+	                                            musicApp.SendMessage(choiceAction);
+	                                        }
 	                                    } else {
 	                                        BMessenger replicantTarget("application/x-vnd.be-tskb");
 	                                        replicantTarget.SendMessage(choiceAction);
@@ -5996,7 +6049,10 @@ void SyncDockWithRunningDeskbarApps() {
 		    // =========================================================================
 		    // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
 		    // =========================================================================
-		  if (fShowTitleOverlays) {
+		  // Suppressed while the Tracker right-click popup is open, so navigating its
+		  // folder submenus near the icon doesn't also trigger the hover title overlay's
+		  // restore-minimized-window behavior.
+		  if (fShowTitleOverlays && !fTrackerMenuIsActive) {
 			bool cursorNearIcon = (gDockLocation == kDockLocationTop)
 			    ? (fMouseY >= iconBounds.top && fMouseY <= (iconBounds.bottom + 40.0f))
 			    : (fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom);
@@ -6268,6 +6324,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            // =========================================================================
 	            fLiveTrayItems[i].currentRenderX = localTrayX;
 	            fLiveTrayItems[i].currentRenderWidth = itemWidth;
+	            fLiveTrayItems[i].currentRenderTop = trayRenderTopY;
 	
 	            // Bind explicitly for this specific quad draw task run
 	            glBindTexture(GL_TEXTURE_2D, trayTexID);
