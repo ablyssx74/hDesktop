@@ -6,7 +6,8 @@
 #include <Alert.h>
 #include <algorithm>
 #include <AppKit.h>
-#include <AppServerLink.h> 
+#include <AppServerLink.h>
+#include <Autolock.h>
 #include <Bitmap.h>
 #include <Button.h>
 #include <CheckBox.h>
@@ -30,6 +31,7 @@
 #include <InterfaceDefs.h>
 #include <InterfaceKit.h>
 #include <iostream>
+#include <Locker.h>
 #include <map>
 #include <MediaNode.h>
 #include <MediaRoster.h>
@@ -104,6 +106,26 @@ enum DockLocation {
 };
 int32 gDockLocation = kDockLocationBottom;
 
+bool fShowWindowThumbnails = true;
+bool fShowAdvancedOptions = false;
+
+// Live window preview thumbnails (taskbar hover). Sizing for the popup
+// window's content area -- see ThumbnailPreviewWindow, which is a small
+// separate BWindow (same pattern as WorkspacePreviewWindow's right-click
+// popup) rather than something drawn inside the dock's own SDL/GL surface,
+// specifically so showing/hiding it never touches that window's size --
+// resizing it for this caused a visible full-screen flash.
+const float kThumbnailMaxWidth  = 200.0f;
+const float kThumbnailMaxHeight = 140.0f;
+
+// How often the popup re-captures while open, exposed as an Advanced-only
+// slider for testing the tradeoff yourself: higher feels smoother but means
+// more BScreen::ReadBitmap() calls hitting app_server, which competes with
+// everything else it's drawing (the dock included) -- chaining captures
+// back-to-back with no floor at all was tried and made the whole dock bog
+// down, which is why this defaults to a conservative fixed 2fps.
+int32 fThumbnailCaptureFps = 2;
+
 bool fEffectBounceEnabled = false;
 bool fEffectSpinEnabled = true;
 bool fEffectIllusionEnabled = false;
@@ -170,6 +192,9 @@ enum {
     MSG_AUTOHIDE_TOGGLED   = 'ahtg',
     MSG_SYSTEMTRAY_TOGGLED = 'sttg',
     MSG_TEXTOVERLAYS_TOGGLED = 'totg',
+    MSG_THUMBNAILS_TOGGLED = 'thtg',
+    MSG_ADVANCED_TOGGLED = 'advt',
+    MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_DOCKLOCATION_BOTTOM_TOGGLED = 'dlbt',
     MSG_DOCKLOCATION_TOP_TOGGLED = 'dltp',
@@ -316,6 +341,70 @@ struct DesktopIconItem {
     HaikuRect textBounds;      
     bool isFolder;
 };
+
+
+// Checks whether any OTHER real application window drawn in front of
+// `candidateFrame` (i.e. anything at a lower index than `candidateIndex` in
+// `windowTokens`, which get_window_order() returns frontmost-first)
+// overlaps it at all, on the given workspace. hDesktop's own windows (the
+// dock, the preview popup itself) are excluded via `ownTeam` -- being
+// technically "in front" near screen edges doesn't count as the kind of
+// occlusion this is checking for.
+//
+// Restricted to B_NORMAL_WINDOW_FEEL windows specifically -- the same
+// filter the taskbar's own window-selection logic already applies (see
+// RenderFrame()'s STEP 3) -- so the desktop backdrop window (which spans
+// the *entire* screen and would otherwise "occlude" almost anything, but is
+// simply the wallpaper, not another app drawn on top) and other special
+// system windows (menus, tooltips, floating helpers) never count as
+// occluders. This was the actual bug behind thumbnails only working for a
+// window sitting in a screen corner: this check considered the full-screen
+// desktop window an occluder everywhere except where it happened not to be
+// -- nowhere, in other words, since the desktop backdrop legitimately
+// covers the whole screen; the only reason corners ever "worked" was
+// coincidental gaps in exactly which windows the earlier, unfiltered check
+// happened to intersect.
+//
+// This exists because BScreen::ReadBitmap() -- the only capture mechanism
+// available (see ThumbnailCaptureThreadFunc's own comment) -- reads
+// whatever app_server has actually composited to the physical framebuffer,
+// which for a covered window is whatever is drawn on top of it, not that
+// window's own content; Haiku keeps no off-screen buffer for a window that
+// isn't currently visible. So a window some other app is covering
+// literally cannot be captured correctly by any means available here --
+// this check is what lets the caller skip showing a wrong preview instead
+// of a merely missing one.
+bool IsThumbnailCandidateOccluded(int32* windowTokens, int32 candidateIndex, BRect candidateFrame,
+    int32 currentWorkspace, team_id ownTeam) {
+    for (int32 j = 0; j < candidateIndex; ++j) {
+        client_window_info* front = get_window_info(windowTokens[j]);
+        if (front == nullptr) continue;
+
+        bool overlaps = false;
+        if (front->team != ownTeam && !front->is_mini &&
+            front->feel == B_NORMAL_WINDOW_FEEL &&
+            (front->workspaces & (1 << currentWorkspace))) {
+            BRect frontRect(front->window_left, front->window_top,
+                front->window_right, front->window_bottom);
+            // Not BRect::Intersects() -- it counts merely-touching edges as
+            // an intersection (see its own source: the comparisons are
+            // <=/>=), which is right for hit-testing but wrong here: two
+            // windows sitting edge-to-edge (snapped side by side, or just
+            // butted up against another window) don't actually share a
+            // single covered pixel, and were getting flagged "covered"
+            // anyway. This requires genuine overlapping area instead.
+            float overlapLeft = std::max(frontRect.left, candidateFrame.left);
+            float overlapRight = std::min(frontRect.right, candidateFrame.right);
+            float overlapTop = std::max(frontRect.top, candidateFrame.top);
+            float overlapBottom = std::min(frontRect.bottom, candidateFrame.bottom);
+            overlaps = (overlapRight > overlapLeft) && (overlapBottom > overlapTop);
+        }
+        free(front);
+
+        if (overlaps) return true;
+    }
+    return false;
+}
 
 
 void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& outList) {
@@ -1201,6 +1290,9 @@ private:
     BCheckBox* fSystemTrayCheckbox;
     BCheckBox* fAutoRaiseCheckbox;
     BCheckBox* fTextOverlaysCheckbox;
+    BCheckBox* fThumbnailsCheckbox;
+    BCheckBox* fAdvancedCheckbox;
+    BSlider*   fThumbnailFpsSlider;
     BCheckBox* fWorkspaceSwitcherCheckbox;
     BMenuField* fDockLocationMenuField;
     BMenuField* fEffectsMenuField;
@@ -1255,19 +1347,67 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fWorkspaceSwitcherCheckbox->SetValue(fShowWorkspaceSwitcher ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fWorkspaceSwitcherCheckbox);
 
-        // Row 6: Dock Location Dropdown
-        BPopUpMenu* dockLocationPopup = new BPopUpMenu("Dock Location");
+        // Row 6: Window Preview Thumbnails
+        BRect thumbnailsCheckboxRect(35.0f, 222.0f, 55.0f, 238.0f);
+        fThumbnailsCheckbox = new BCheckBox(thumbnailsCheckboxRect, "thumbnails_cb", nullptr,
+            new BMessage(MSG_THUMBNAILS_TOGGLED));
+        fThumbnailsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fThumbnailsCheckbox->SetValue(fShowWindowThumbnails ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fThumbnailsCheckbox);
 
-        BMenuItem* dockBottomItem = new BMenuItem("Bottom", new BMessage(MSG_DOCKLOCATION_BOTTOM_TOGGLED));
-        dockBottomItem->SetMarked(gDockLocation == kDockLocationBottom);
-        dockLocationPopup->AddItem(dockBottomItem);
+        // Row 7: Advanced Thumbnail Settings -- reveals the FPS slider below
+        // for testing. Only meaningful, and only shown, while the thumbnails
+        // feature itself (Row 6 above) is enabled. Reserves its row either
+        // way (like every other conditional row here) so nothing below has
+        // to reflow when it's toggled.
+        BRect advancedCheckboxRect(35.0f, 242.0f, 55.0f, 258.0f);
+        fAdvancedCheckbox = new BCheckBox(advancedCheckboxRect, "advanced_cb", nullptr,
+            new BMessage(MSG_ADVANCED_TOGGLED));
+        fAdvancedCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fAdvancedCheckbox->SetValue(fShowAdvancedOptions ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fAdvancedCheckbox);
+        if (!fShowWindowThumbnails) {
+            fAdvancedCheckbox->Hide();
+        }
+
+        // Row 7b: Thumbnail Preview FPS Slider -- only meaningful, and only
+        // shown, while both Row 6 and Row 7 above are checked. Reserves its
+        // row regardless, same as every other conditional row here.
+        BRect thumbnailFpsSliderRect(35.0f, 262.0f, frame.Width() - 35.0f, 312.0f);
+        BString thumbnailFpsLabel;
+        thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
+        fThumbnailFpsSlider = new BSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
+            new BMessage(MSG_THUMBNAIL_FPS_SLIDER_CHANGED), 1, 20);
+        fThumbnailFpsSlider->SetHighColor(rgb_color{220, 225, 235, 255});
+        fThumbnailFpsSlider->SetLimitLabels("1 fps", "20 fps");
+        fThumbnailFpsSlider->SetValue(fThumbnailCaptureFps);
+        AddChild(fThumbnailFpsSlider);
+        // No redundant Show() here (unlike this codebase's other, always-
+        // visible sliders) -- BView::Show()/Hide() use a signed nesting
+        // counter (fShowLevel) that starts at 0 (visible); an extra Show()
+        // on an already-visible view drives it to -1, and a single later
+        // Hide() then only cancels that back to 0 (still "visible" --
+        // BView::IsHidden() is fShowLevel > 0) instead of actually hiding
+        // it. That was exactly why toggling Advanced off, or re-enabling
+        // Thumbnails, could leave this slider stuck showing (or stuck
+        // hidden) regardless of the checkboxes' own state.
+        if (!fShowWindowThumbnails || !fShowAdvancedOptions) {
+            fThumbnailFpsSlider->Hide();
+        }
+
+        // Row 8: Dock Location Dropdown
+        BPopUpMenu* dockLocationPopup = new BPopUpMenu("Dock Location");
 
         BMenuItem* dockTopItem = new BMenuItem("Top", new BMessage(MSG_DOCKLOCATION_TOP_TOGGLED));
         dockTopItem->SetMarked(gDockLocation == kDockLocationTop);
         dockLocationPopup->AddItem(dockTopItem);
 
+        BMenuItem* dockBottomItem = new BMenuItem("Bottom", new BMessage(MSG_DOCKLOCATION_BOTTOM_TOGGLED));
+        dockBottomItem->SetMarked(gDockLocation == kDockLocationBottom);
+        dockLocationPopup->AddItem(dockBottomItem);
+
         // Dock Location Dropdown (Label drawn manually in Draw())
-        BRect dockLocationMenuRect(145.0f, 222.0f, frame.Width() - 35.0f, 247.0f);
+        BRect dockLocationMenuRect(145.0f, 332.0f, frame.Width() - 35.0f, 357.0f);
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
@@ -1301,7 +1441,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 264.0f, frame.Width() - 35.0f, 289.0f);
+        BRect effectsMenuRect(145.0f, 374.0f, frame.Width() - 35.0f, 399.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -1335,14 +1475,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 297.0f, frame.Width() - 35.0f, 322.0f);
+        BRect closeEffectsMenuRect(145.0f, 407.0f, frame.Width() - 35.0f, 432.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
         
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 347.0f, frame.Width() - 35.0f, 397.0f);
+        BRect speedSliderRect(35.0f, 457.0f, frame.Width() - 35.0f, 507.0f);
         fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed", 
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1352,7 +1492,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 417.0f, frame.Width() - 35.0f, 467.0f);
+        BRect sliderRect(35.0f, 527.0f, frame.Width() - 35.0f, 577.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1362,7 +1502,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 487.0f, frame.Width() - 35.0f, 537.0f);
+        BRect sizeSliderRect(35.0f, 597.0f, frame.Width() - 35.0f, 647.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1445,7 +1585,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
 		// 6. BALANCED BACKING CONTAINER
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 552.0f);
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 662.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -1459,14 +1599,20 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
         DrawString("Enable Application Title Overlays", BPoint(62.0f, 194.0f));
         DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
-        DrawString("Dock Location:", BPoint(35.0f, 239.0f));
+        DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 234.0f));
+        // Kept in sync with the checkbox's own Show()/Hide() state -- only
+        // meaningful while Window Preview Thumbnails above is enabled.
+        if (fShowWindowThumbnails) {
+            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 254.0f));
+        }
+        DrawString("Dock Location:", BPoint(35.0f, 349.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 281.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 314.0f));
+        DrawString("Open App Effects:", BPoint(35.0f, 391.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 424.0f));
 
         /*
         // Draw smaller, italicized "(Experimental)" tag underneath the Close App Effects dropdown
@@ -1475,7 +1621,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         expFont.SetFace(B_ITALIC_FACE);
         SetFont(&expFont);
         SetHighColor(rgb_color{140, 150, 170, 255});
-        DrawString("(Experimental)", BPoint(145.0f, 302.0f));
+        DrawString("(Experimental)", BPoint(145.0f, 412.0f));
 		*/
 
         // Reset font back to plain for buttons/other elements
@@ -1557,13 +1703,16 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSystemTrayCheckbox->SetTarget(this);
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
+        fThumbnailsCheckbox->SetTarget(this);
+        fAdvancedCheckbox->SetTarget(this);
+        fThumbnailFpsSlider->SetTarget(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
         fDockLocationMenuField->Menu()->SetTargetForItems(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
         fCloseEffectsMenuField->Menu()->SetTargetForItems(this);
         fEffectSpeedSlider->SetTarget(this);
-        fAlphaSlider->SetTarget(this); 
-        fIconSizeSlider->SetTarget(this); 
+        fAlphaSlider->SetTarget(this);
+        fIconSizeSlider->SetTarget(this);
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -1591,6 +1740,61 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 fShowTitleOverlays = (fTextOverlaysCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 Invalidate();
+                break;
+            }
+
+            case MSG_THUMBNAILS_TOGGLED: {
+                fShowWindowThumbnails = (fThumbnailsCheckbox->Value() == B_CONTROL_ON);
+                if (fShowWindowThumbnails) {
+                    fAdvancedCheckbox->Show();
+                } else {
+                    fAdvancedCheckbox->Hide();
+                }
+                // The FPS slider needs both this and Advanced checked -- if
+                // thumbnails just got turned off, hide it regardless of the
+                // Advanced checkbox's own state; if they just got turned on,
+                // only reveal it when Advanced is already checked too.
+                //
+                // Guarded by IsHidden() rather than calling Show()/Hide()
+                // unconditionally: BView's Show()/Hide() are a *nesting*
+                // pair (an internal counter, not a plain "set visible"
+                // flag), so calling the same one twice in a row without an
+                // opposite call in between leaves it stuck relative to what
+                // this code intends -- exactly what made the slider get
+                // wedged shown or hidden regardless of the checkboxes.
+                bool shouldShowFpsSlider = fShowWindowThumbnails && fShowAdvancedOptions;
+                if (shouldShowFpsSlider && fThumbnailFpsSlider->IsHidden()) {
+                    fThumbnailFpsSlider->Show();
+                } else if (!shouldShowFpsSlider && !fThumbnailFpsSlider->IsHidden()) {
+                    fThumbnailFpsSlider->Hide();
+                }
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_ADVANCED_TOGGLED: {
+                fShowAdvancedOptions = (fAdvancedCheckbox->Value() == B_CONTROL_ON);
+                // fAdvancedCheckbox is only ever visible/clickable while
+                // fShowWindowThumbnails is true (see MSG_THUMBNAILS_TOGGLED
+                // above), so this message can't fire with thumbnails off --
+                // the FPS slider's desired state here is just this checkbox's
+                // own. Same IsHidden() guard as above and for the same reason.
+                if (fShowAdvancedOptions && fThumbnailFpsSlider->IsHidden()) {
+                    fThumbnailFpsSlider->Show();
+                } else if (!fShowAdvancedOptions && !fThumbnailFpsSlider->IsHidden()) {
+                    fThumbnailFpsSlider->Hide();
+                }
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_THUMBNAIL_FPS_SLIDER_CHANGED: {
+                fThumbnailCaptureFps = fThumbnailFpsSlider->Value();
+                BString thumbnailFpsLabel;
+                thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
+                fThumbnailFpsSlider->SetLabel(thumbnailFpsLabel.String());
+                SaveConfiguration();
                 break;
             }
 
@@ -1948,13 +2152,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 class HaikuConfigWindow : public BWindow {
 public:
     HaikuConfigWindow(BRect centralAnchor)
-        : BWindow(BRect(0, 0, 560, 634), "hdesktop Configuration",
+        : BWindow(BRect(0, 0, 560, 744), "hdesktop Configuration",
                 B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 
-        ResizeTo(560.0f, 667.0f);
+        ResizeTo(560.0f, 777.0f);
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 667.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 777.0f) / 2.0f;
         MoveTo(targetX, targetY);
         
         ConfigView* configView = new ConfigView(Bounds());
@@ -2650,6 +2854,449 @@ public:
 
 // =========================================================================
 // WORKSPACE PREVIEW / DRAG-TO-MOVE POPUP
+// =========================================================================
+// LIVE WINDOW PREVIEW THUMBNAIL POPUP (taskbar hover)
+// =========================================================================
+// A separate, native BWindow -- the same pattern as WorkspacePreviewWindow
+// below, just hover-triggered instead of click-triggered. Deliberately NOT
+// drawn inside the dock's own SDL/GL surface: that surface is a small window
+// sized tightly to the dock's own content, and growing it to fit a thumbnail
+// caused a visible full-screen flash on show/hide. A small independent popup
+// avoids that entirely, the same way the workspace preview already does.
+class ThumbnailPreviewWindow;
+ThumbnailPreviewWindow* gActiveThumbnailPreview = nullptr;
+
+// Last-known-good captured frame per app team, kept independent of any
+// single popup instance's own lifetime. Without this, the occluded
+// fallback almost never had anything to freeze on in practice: covering a
+// window normally means clicking or raising some *other* window to do it,
+// which moves the mouse off the dock -- and ThumbnailPreviewWindow's own
+// 'thtk' relevance check (see MessageReceived below) closes the popup the
+// moment the mouse isn't near it or the icon anymore, discarding whatever
+// it had captured. So by the time the user re-hovers the now-covered icon,
+// a brand new popup gets created with nothing captured yet, and the
+// occluded view had nothing to show but its "no frame yet" placeholder
+// text -- never the dimmed last-good image. This map survives across that
+// close/reopen. Guarded by gThumbnailCacheLock since a popup's own message-
+// loop thread writes to it (see the 'thbm' handler) and a *different*
+// popup's constructor, on a different thread, can read it soon after.
+// Time-bounded (kMaxCachedFrameAgeUs) since Haiku can reuse a team_id for
+// a later, unrelated process once the original one exits.
+struct CachedThumbnailFrame {
+    std::vector<uint8> bits;
+    int32 width = 0;
+    int32 height = 0;
+    bigtime_t capturedAt = 0;
+};
+std::map<team_id, CachedThumbnailFrame> gLastGoodThumbnailByTeam;
+BLocker gThumbnailCacheLock("hdesktop thumbnail cache");
+const bigtime_t kMaxCachedFrameAgeUs = 15000000; // 15s
+
+// Tile size used when reading a preview window's content -- borrowed
+// directly from hrecord's own "--tiled-capture" (its real-hardware-
+// confirmed default screen-capture mode) and from RemoteControl's RCServer,
+// which both settled on the same figure. Many small BScreen::ReadBitmap()
+// calls take a bit longer in total than one big call covering the whole
+// region, but each individual call is short enough that app_server can
+// interleave other work (mouse handling, the dock's own drawing) between
+// them instead of being stuck inside one long blocking read -- confirmed,
+// in hrecord's own real-world testing, to be what actually matters for a
+// system feeling responsive while a capture is happening, which is the
+// "slowness in general" this targets, more than raw capture throughput.
+const float kThumbnailCaptureTileSize = 100.0f;
+
+// Args for the one-shot background thread that captures a single preview
+// pass. Heap allocated by ThumbnailPreviewWindow::RequestCapture(), freed by
+// the capture thread once it's posted its result (or failed to). Captured
+// by value, not by a pointer back into the popup window, specifically so
+// this thread never has to know or care whether that window is still alive
+// by the time it finishes -- BMessenger::SendMessage() simply drops the
+// message if the target is gone, unlike a stale raw pointer, and there is
+// deliberately nothing here for a destructor to wait on or synchronize
+// with. An earlier version used one persistent thread per popup instead
+// (to skip spawn_thread()'s own overhead) with a stop-flag the destructor
+// waited on to shut it down -- that's what caused the "only works for the
+// first icon hovered" bug: closing that popup blocked its own message
+// thread inside BLooper::Quit() (which is genuinely synchronous when called
+// cross-thread) waiting for the capture thread to notice the stop flag,
+// while the very next hover was already trying to open a *new* popup on the
+// same render frame, and the two waits could tangle. Spawning fresh per
+// pass sidesteps that whole class of problem.
+struct ThumbnailCaptureArgs {
+    BMessenger targetMessenger;
+    BRect windowFrame;
+};
+
+// Defined after ThumbnailPreviewWindow's own class body further down (kept
+// there alongside the rest of the capture machinery); forward-declared here
+// so the class's own RequestCapture() method, which spawns it via
+// spawn_thread(), can reference it by name.
+static int32 ThumbnailCaptureThreadFunc(void* data);
+
+class ThumbnailPreviewView : public BView {
+private:
+    BBitmap* fBitmap = nullptr;
+    bool fOccluded = false;
+
+public:
+    ThumbnailPreviewView(BRect frame)
+        : BView(frame, "ThumbnailPreviewView", B_FOLLOW_ALL, B_WILL_DRAW) {
+        SetViewColor(rgb_color{24, 24, 28, 255});
+    }
+
+    virtual ~ThumbnailPreviewView() {
+        delete fBitmap;
+    }
+
+    // Always called on this view's own window thread (from MessageReceived).
+    // Reuses the existing bitmap when the size hasn't changed -- the normal
+    // case, since the captured window's size doesn't change for the popup's
+    // lifetime -- only reallocating if it has.
+    void UpdateFromRawBits(const void* bits, size_t byteSize, int32 width, int32 height) {
+        if (fBitmap == nullptr ||
+            fBitmap->Bounds().IntegerWidth() + 1 != width ||
+            fBitmap->Bounds().IntegerHeight() + 1 != height) {
+            delete fBitmap;
+            fBitmap = new BBitmap(BRect(0.0f, 0.0f, width - 1.0f, height - 1.0f), B_RGB32);
+        }
+
+        if (fBitmap->InitCheck() == B_OK && (size_t)fBitmap->BitsLength() == byteSize) {
+            memcpy(fBitmap->Bits(), bits, byteSize);
+        }
+
+        Invalidate();
+    }
+
+    // Freezes the view on whatever it last captured (or, if nothing was ever
+    // captured, shows a plain placeholder) instead of going blank -- see
+    // ThumbnailPreviewWindow's own 'tocc' handling for why capturing itself
+    // is paused while occluded, not just the display.
+    void SetOccluded(bool occluded) {
+        if (fOccluded == occluded) return;
+        fOccluded = occluded;
+        Invalidate();
+    }
+
+    virtual void Draw(BRect updateRect) {
+        BRect bounds = Bounds();
+        SetHighColor(rgb_color{24, 24, 28, 255});
+        FillRect(bounds);
+
+        BRect destRect = bounds;
+        bool haveDestRect = false;
+        if (fBitmap != nullptr) {
+            BRect srcBounds = fBitmap->Bounds();
+            float srcW = srcBounds.Width() + 1.0f;
+            float srcH = srcBounds.Height() + 1.0f;
+            float scale = std::min(bounds.Width() / srcW, bounds.Height() / srcH);
+            float destW = srcW * scale;
+            float destH = srcH * scale;
+            float destLeft = (bounds.Width() - destW) / 2.0f;
+            float destTop  = (bounds.Height() - destH) / 2.0f;
+            destRect.Set(destLeft, destTop, destLeft + destW, destTop + destH);
+            haveDestRect = true;
+            DrawBitmap(fBitmap, srcBounds, destRect);
+        }
+
+        if (fOccluded) {
+            SetDrawingMode(B_OP_ALPHA);
+            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            SetHighColor(rgb_color{0, 0, 0, 150});
+            FillRect(haveDestRect ? destRect : bounds);
+            SetDrawingMode(B_OP_COPY);
+
+            BFont font(be_plain_font);
+            font.SetSize(10.0f);
+            SetFont(&font);
+            SetHighColor(rgb_color{225, 225, 225, 255});
+
+            const char* label = haveDestRect ? "window covered" : "covered by another window";
+            float textW = StringWidth(label);
+            BPoint textPos(bounds.left + (bounds.Width() - textW) / 2.0f, bounds.bottom - 8.0f);
+            if (!haveDestRect) {
+                font_height fh;
+                font.GetHeight(&fh);
+                textPos.y = bounds.top + (bounds.Height() + fh.ascent) / 2.0f;
+            }
+            DrawString(label, textPos);
+        }
+
+        SetHighColor(rgb_color{48, 50, 58, 255});
+        StrokeRect(bounds);
+    }
+};
+
+class ThumbnailPreviewWindow : public BWindow {
+private:
+    BMessageRunner* fTicker;
+    ThumbnailPreviewView* fView;
+    HaikuRect fAnchorIconRect; // the hovered taskbar icon's own screen-space bounds
+    BRect fWindowFrame;        // the target window's on-screen frame to capture (screen coords) -- write-once
+    team_id fTeam;
+    bool fCaptureInFlight;
+    bigtime_t fLastCaptureTime;
+    // True while some other app's window covers the target (see
+    // IsThumbnailCandidateOccluded) -- capturing is paused entirely rather
+    // than just hidden, since a read while covered would show the covering
+    // window's content, not this one's. The view keeps showing whatever it
+    // last captured (dimmed) instead of going blank.
+    bool fOccluded;
+
+public:
+    ThumbnailPreviewWindow(BPoint anchorScreenPoint, HaikuRect anchorIconRect,
+        team_id team, BRect windowFrame, bool initiallyOccluded)
+        : BWindow(BRect(0, 0, 10, 10), "Window Preview",
+                  B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
+          fTicker(nullptr), fView(nullptr), fAnchorIconRect(anchorIconRect),
+          fWindowFrame(windowFrame), fTeam(team),
+          fCaptureInFlight(false), fLastCaptureTime(0), fOccluded(initiallyOccluded) {
+
+        float panelW = kThumbnailMaxWidth + 8.0f;
+        float panelH = kThumbnailMaxHeight + 8.0f;
+
+        BScreen screen(this);
+        BRect screenFrame = screen.Frame();
+
+        float targetX = anchorScreenPoint.x - (panelW / 2.0f);
+        if (targetX < 10.0f) targetX = 10.0f;
+        if (targetX + panelW > screenFrame.right - 10.0f) targetX = screenFrame.right - 10.0f - panelW;
+
+        // Bottom dock: open upward above the icon. Top dock: open downward below it.
+        float targetY;
+        if (gDockLocation == kDockLocationTop) {
+            targetY = anchorIconRect.bottom + 20.0f;
+        } else {
+            targetY = anchorIconRect.top - panelH - 20.0f;
+        }
+        if (targetY < 10.0f) targetY = 10.0f;
+        if (targetY + panelH > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelH;
+
+        MoveTo(targetX, targetY);
+        ResizeTo(panelW, panelH);
+
+        fView = new ThumbnailPreviewView(Bounds());
+        AddChild(fView);
+
+        // Seed from the last frame this team's own popup actually captured,
+        // if any -- see gLastGoodThumbnailByTeam's own comment for why a
+        // brand new popup otherwise starts with nothing to show even when
+        // this exact app was captured successfully moments ago.
+        {
+            BAutolock cacheLock(gThumbnailCacheLock);
+            auto it = gLastGoodThumbnailByTeam.find(fTeam);
+            if (it != gLastGoodThumbnailByTeam.end() &&
+                (system_time() - it->second.capturedAt) < kMaxCachedFrameAgeUs) {
+                fView->UpdateFromRawBits(it->second.bits.data(), it->second.bits.size(),
+                    it->second.width, it->second.height);
+            }
+        }
+
+        fView->SetOccluded(fOccluded);
+
+        if (!fOccluded) {
+            RequestCapture();
+        }
+
+        // Cheap poll (mouse-position check, occasional recapture) -- mirrors
+        // WorkspacePreviewWindow's own self-closing 'tick' pattern, but at
+        // 50ms (20Hz) rather than that one's 100ms: RequestCapture() below
+        // can only ever run when this tick fires, so a 100ms tick silently
+        // capped every FPS setting above 10 at ~10fps no matter what the
+        // slider (1-20) said. 50ms matches the slider's own top end; the
+        // per-tick throttle a few lines down still paces slower settings
+        // correctly.
+        BMessage tickMessage('thtk');
+        fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 50000);
+    }
+
+    virtual ~ThumbnailPreviewWindow() {
+        delete fTicker;
+        gActiveThumbnailPreview = nullptr;
+    }
+
+    team_id Team() const { return fTeam; }
+
+    // Thread-safe from any thread -- just posts a message, same as any other
+    // cross-thread interaction with this window (see ThumbnailCaptureArgs's
+    // own comment on why nothing here needs a lock/wait).
+    void SetOccluded(bool occluded) {
+        BMessage msg('tocc');
+        msg.AddBool("occluded", occluded);
+        PostMessage(&msg);
+    }
+
+    void RequestCapture() {
+        if (fCaptureInFlight) return;
+        fCaptureInFlight = true;
+        fLastCaptureTime = system_time();
+
+        ThumbnailCaptureArgs* args = new ThumbnailCaptureArgs();
+        args->targetMessenger = BMessenger(this);
+        args->windowFrame = fWindowFrame;
+
+        thread_id captureThread = spawn_thread(ThumbnailCaptureThreadFunc,
+            "hdesktop_thumb_capture", B_LOW_PRIORITY, args);
+        if (captureThread >= B_OK) {
+            resume_thread(captureThread);
+        } else {
+            fCaptureInFlight = false;
+            delete args;
+        }
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        switch (message->what) {
+            case 'thbm': {
+                fCaptureInFlight = false;
+                const void* bits = nullptr;
+                ssize_t byteSize = 0;
+                int32 width = 0, height = 0;
+                if (message->FindData("pixels", B_RAW_TYPE, &bits, &byteSize) == B_OK &&
+                    message->FindInt32("width", &width) == B_OK &&
+                    message->FindInt32("height", &height) == B_OK &&
+                    fView != nullptr) {
+                    fView->UpdateFromRawBits(bits, (size_t)byteSize, width, height);
+
+                    // Remember this frame past this popup's own lifetime --
+                    // see gLastGoodThumbnailByTeam's own comment for why.
+                    BAutolock cacheLock(gThumbnailCacheLock);
+                    CachedThumbnailFrame& cached = gLastGoodThumbnailByTeam[fTeam];
+                    cached.bits.assign((const uint8*)bits, (const uint8*)bits + byteSize);
+                    cached.width = width;
+                    cached.height = height;
+                    cached.capturedAt = system_time();
+                }
+                break;
+            }
+            case 'tocc': {
+                bool occluded = false;
+                if (message->FindBool("occluded", &occluded) == B_OK) {
+                    fOccluded = occluded;
+                    if (fView != nullptr) {
+                        fView->SetOccluded(fOccluded);
+                    }
+                }
+                break;
+            }
+            case 'thtk': {
+                if (IsHidden()) return;
+
+                BPoint screenMousePos;
+                uint32 buttons;
+                if (ChildAt(0)) {
+                    ChildAt(0)->GetMouse(&screenMousePos, &buttons, false);
+                    ChildAt(0)->ConvertToScreen(&screenMousePos);
+
+                    bool stillRelevant = Frame().Contains(screenMousePos) ||
+                        (screenMousePos.x >= fAnchorIconRect.left && screenMousePos.x <= fAnchorIconRect.right &&
+                         screenMousePos.y >= fAnchorIconRect.top - 40.0f && screenMousePos.y <= fAnchorIconRect.bottom + 40.0f);
+
+                    if (!stillRelevant) {
+                        PostMessage(B_QUIT_REQUESTED);
+                        return;
+                    }
+                }
+
+                int32 fps = fThumbnailCaptureFps > 0 ? fThumbnailCaptureFps : 1;
+                bigtime_t captureInterval = 1000000 / fps;
+                if (!fOccluded && !fCaptureInFlight && (system_time() - fLastCaptureTime) >= captureInterval) {
+                    RequestCapture();
+                }
+                break;
+            }
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+};
+
+
+// Runs on its own one-shot thread, spawned fresh for each capture pass by
+// ThumbnailPreviewWindow::RequestCapture() (see ThumbnailCaptureArgs's own
+// comment for why this isn't one persistent thread instead). Reads the
+// target window through a grid of small tiles rather than one big call --
+// borrowed directly from hrecord's own "--tiled-capture" (its real-
+// hardware-confirmed default screen-capture mode) and from RemoteControl's
+// RCServer, which both settled on the same tile size. Many small
+// BScreen::ReadBitmap() calls take a bit longer in total than one big call
+// covering the whole region, but each individual call is short enough that
+// app_server can interleave other work (mouse handling, the dock's own
+// drawing) between them instead of being stuck inside one long blocking
+// read -- confirmed, in hrecord's own real-world testing, to be what
+// actually matters for a system feeling responsive while a capture is
+// happening, more than raw capture throughput.
+//
+// Only ever captures the currently active workspace's framebuffer -- an
+// earlier version also supported switching to a different workspace first
+// for an "all workspaces" preview option, but that never reliably worked
+// (Haiku's activate_workspace() only requests the switch; app_server's
+// actual redraw is asynchronous, so timing the capture against it proved
+// fragile) and wasn't worth the complexity, so that option was dropped.
+static int32 ThumbnailCaptureThreadFunc(void* data) {
+    ThumbnailCaptureArgs* args = static_cast<ThumbnailCaptureArgs*>(data);
+    if (args != nullptr) {
+        BRect windowFrame = args->windowFrame;
+
+        if (windowFrame.IsValid() && windowFrame.Width() >= 2.0f && windowFrame.Height() >= 2.0f) {
+            BScreen screen(B_MAIN_SCREEN_ID);
+            if (screen.IsValid()) {
+                int32 fullWidth  = (int32)windowFrame.Width() + 1;
+                int32 fullHeight = (int32)windowFrame.Height() + 1;
+
+                BBitmap composite(BRect(0.0f, 0.0f, fullWidth - 1.0f, fullHeight - 1.0f), B_RGB32);
+                if (composite.InitCheck() == B_OK) {
+                    uint8* compositeBits = (uint8*)composite.Bits();
+                    int32 compositeBPR = composite.BytesPerRow();
+
+                    for (float tileTop = 0.0f; tileTop < (float)fullHeight; tileTop += kThumbnailCaptureTileSize) {
+                        float tileH = std::min(kThumbnailCaptureTileSize, (float)fullHeight - tileTop);
+
+                        for (float tileLeft = 0.0f; tileLeft < (float)fullWidth; tileLeft += kThumbnailCaptureTileSize) {
+                            float tileW = std::min(kThumbnailCaptureTileSize, (float)fullWidth - tileLeft);
+
+                            BRect tileScreenRect(
+                                windowFrame.left + tileLeft,
+                                windowFrame.top + tileTop,
+                                windowFrame.left + tileLeft + tileW - 1.0f,
+                                windowFrame.top + tileTop + tileH - 1.0f);
+
+                            BBitmap tileBitmap(BRect(0.0f, 0.0f, tileW - 1.0f, tileH - 1.0f), B_RGB32);
+                            if (tileBitmap.InitCheck() == B_OK &&
+                                screen.ReadBitmap(&tileBitmap, false, &tileScreenRect) == B_OK) {
+                                // Paste this tile into the composite one row at a
+                                // time -- the tile's own bytes-per-row and the
+                                // composite's don't match, so a single memcpy of
+                                // the whole thing won't work.
+                                const uint8* tileBits = (const uint8*)tileBitmap.Bits();
+                                int32 tileBPR = tileBitmap.BytesPerRow();
+                                int32 rowBytes = (int32)tileW * 4; // B_RGB32 == 4 bytes/pixel
+                                int32 destColOffset = (int32)tileLeft * 4;
+                                int32 destRowBase = (int32)tileTop;
+                                for (int32 row = 0; row < (int32)tileH; ++row) {
+                                    memcpy(compositeBits + (destRowBase + row) * compositeBPR + destColOffset,
+                                        tileBits + row * tileBPR, rowBytes);
+                                }
+                            }
+                        }
+                    }
+
+                    BMessage resultMsg('thbm');
+                    resultMsg.AddInt32("width", fullWidth);
+                    resultMsg.AddInt32("height", fullHeight);
+                    resultMsg.AddData("pixels", B_RAW_TYPE, compositeBits, (size_t)composite.BitsLength());
+                    args->targetMessenger.SendMessage(&resultMsg);
+                }
+            }
+        }
+    }
+    delete args;
+    return B_OK;
+}
+
+
+// =========================================================================
 // Opened by right-clicking the dock's workspace switcher widget. Shows a
 // simple grid of workspace cells with a fixed-size labeled box per window
 // (not a live thumbnail, matching Haiku's own Workspaces app), and lets you
@@ -4308,7 +4955,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 634.0f;
+									    float winHeight = 744.0f;
 									
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
@@ -6232,7 +6879,8 @@ void SyncDockWithRunningDeskbarApps() {
 		int32* windowTokens = nullptr;
 		int32 totalWindows = 0;
 		BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
-	
+		team_id ownTeam = be_app ? be_app->Team() : -1;
+
 		for (size_t w = 0; w < fTaskbarWindows.size(); ++w) {
 		    auto& activeTaskWin = fTaskbarWindows[w];
 		    float size = dynamicWidths[renderingSlotIdx];
@@ -6250,21 +6898,41 @@ void SyncDockWithRunningDeskbarApps() {
 		    bool isTracker = (activeTaskWin.title == "Tracker");
 		    int32 normalVisibleWindows = 0;
 		    int32 totalTeamWindows = 0;
-	
+
+		    // Thumbnail source selection: independent of the minimized-state
+		    // counters above -- picks the topmost qualifying window's on-screen
+		    // frame for the hover-preview capture below. Only ever considers
+		    // windows on the current workspace, same as the counters above.
+		    BRect activeTaskWinThumbnailFrame;
+		    bool haveActiveTaskWinThumbnailFrame = false;
+		    // Whether some other app's window is drawn on top of the chosen
+		    // window, at least partially -- if so, a capture would show that
+		    // other window's content in the overlap, not this app's own (see
+		    // IsThumbnailCandidateOccluded's own comment for why). Checked
+		    // once the frame is chosen, using its index in windowTokens.
+		    bool activeTaskWinThumbnailOccluded = false;
+
 		    // 1. UNIVERSAL STATE CHECKING PIPELINE (Replaces thread counters and streaks)
 		    if (windowTokens != nullptr && totalWindows > 0) {
 		        for (int32 i = 0; i < totalWindows; ++i) {
 		            client_window_info* info = get_window_info(windowTokens[i]);
 		            if (info == nullptr) continue;
-	
+
 		            if (info->team == activeTaskWin.teamId) {
 		                if (isTracker) {
-		                    // TRACKER RULE: Target only active folder panels (layer 3+) 
+		                    // TRACKER RULE: Target only active folder panels (layer 3+)
 		                    // Discards desktop backdrop (1024) and right-click popups (1025)
 		                    if (info->feel == B_NORMAL_WINDOW_FEEL && info->layer >= 3) {
 		                        totalTeamWindows++;
 		                        if (!info->is_mini && (info->workspaces & (1 << currentWorkspace))) {
 		                            normalVisibleWindows++;
+		                            if (!haveActiveTaskWinThumbnailFrame) {
+		                                activeTaskWinThumbnailFrame.Set(info->window_left, info->window_top,
+		                                    info->window_right, info->window_bottom);
+		                                haveActiveTaskWinThumbnailFrame = true;
+		                                activeTaskWinThumbnailOccluded = IsThumbnailCandidateOccluded(
+		                                    windowTokens, i, activeTaskWinThumbnailFrame, currentWorkspace, ownTeam);
+		                            }
 		                        }
 		                    }
 		                } else {
@@ -6274,6 +6942,13 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (!info->is_mini && info->layer > 0) {
 		                            if (info->workspaces & (1 << currentWorkspace)) {
 		                                normalVisibleWindows++;
+		                                if (!haveActiveTaskWinThumbnailFrame) {
+		                                    activeTaskWinThumbnailFrame.Set(info->window_left, info->window_top,
+		                                        info->window_right, info->window_bottom);
+		                                    haveActiveTaskWinThumbnailFrame = true;
+		                                    activeTaskWinThumbnailOccluded = IsThumbnailCandidateOccluded(
+		                                        windowTokens, i, activeTaskWinThumbnailFrame, currentWorkspace, ownTeam);
+		                                }
 		                            }
 		                        }
 		                    }
@@ -6526,12 +7201,52 @@ void SyncDockWithRunningDeskbarApps() {
 			        GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
 			        fLastHoverListRefreshTime = nowTime;
 			    }
-			    
+
+			    // Live preview popup: a separate native BWindow (see
+			    // ThumbnailPreviewWindow), not something drawn into this SDL/GL
+			    // surface -- so opening/closing it never resizes this window.
+			    // iconBounds is already in real screen coordinates here (this
+			    // engine's whole coordinate space is set up to match the desktop
+			    // 1:1 -- see the gluOrtho2D call in main()), so it can be handed
+			    // straight to the popup for anchoring.
+			    if (fShowWindowThumbnails && haveActiveTaskWinThumbnailFrame) {
+			        if (gActiveThumbnailPreview == nullptr ||
+			            gActiveThumbnailPreview->Team() != activeTaskWin.teamId) {
+			            if (gActiveThumbnailPreview != nullptr) {
+			                if (gActiveThumbnailPreview->Lock()) {
+			                    gActiveThumbnailPreview->Quit();
+			                }
+			                gActiveThumbnailPreview = nullptr;
+			            }
+
+			            BPoint anchorScreenPoint(
+			                (iconBounds.left + iconBounds.right) / 2.0f,
+			                (iconBounds.top + iconBounds.bottom) / 2.0f);
+			            gActiveThumbnailPreview = new ThumbnailPreviewWindow(anchorScreenPoint, iconBounds,
+			                activeTaskWin.teamId, activeTaskWinThumbnailFrame, activeTaskWinThumbnailOccluded);
+			            gActiveThumbnailPreview->Show();
+			        } else {
+			            // Same popup, same app -- just tell it whether the target
+			            // is currently covered. It freezes on the last good frame
+			            // instead of capturing wrong content or going blank; see
+			            // ThumbnailPreviewWindow::SetOccluded().
+			            gActiveThumbnailPreview->SetOccluded(activeTaskWinThumbnailOccluded);
+			        }
+			    } else if (gActiveThumbnailPreview != nullptr) {
+			        // Nothing capturable for this app right now (fully minimized
+			        // or thumbnails turned off). Occlusion alone no longer closes
+			        // the popup -- see the SetOccluded() branch above.
+			        if (gActiveThumbnailPreview->Lock()) {
+			            gActiveThumbnailPreview->Quit();
+			        }
+			        gActiveThumbnailPreview = nullptr;
+			    }
+
 			    fShouldDrawList = true;
-			    mouseIsOverAnyIcon = true; 
-			    mouseLeftTime = 0;         
+			    mouseIsOverAnyIcon = true;
+			    mouseLeftTime = 0;
 			}
-		  }	    
+		  }
 		    currentX += size + padding;
 		    renderingSlotIdx++;
 		} 
@@ -7230,6 +7945,12 @@ void SyncDockWithRunningDeskbarApps() {
         } else if (!fShouldDrawList) {
             fHoveredTeam = -1;
             fCurrentWindowsList.clear();
+            if (gActiveThumbnailPreview != nullptr) {
+                if (gActiveThumbnailPreview->Lock()) {
+                    gActiveThumbnailPreview->Quit();
+                }
+                gActiveThumbnailPreview = nullptr;
+            }
         }
 
         glDisable(GL_BLEND);   
@@ -7798,6 +8519,9 @@ void SaveConfiguration() {
             settingsMsg.AddBool("system_tray", showSystemTray);
             settingsMsg.AddBool("auto_raise", dockAlwaysOnTop);
             settingsMsg.AddBool("text_overlays", fShowTitleOverlays);
+            settingsMsg.AddBool("window_thumbnails", fShowWindowThumbnails);
+            settingsMsg.AddBool("advanced_options", fShowAdvancedOptions);
+            settingsMsg.AddInt32("thumbnail_fps", fThumbnailCaptureFps);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
             settingsMsg.AddInt32("dock_location", gDockLocation);
 
@@ -7852,6 +8576,9 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("system_tray", &valBool) == B_OK) showSystemTray = valBool;
                 if (settingsMsg.FindBool("auto_raise", &valBool) == B_OK) dockAlwaysOnTop = valBool;
                 if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlays = valBool;
+                if (settingsMsg.FindBool("window_thumbnails", &valBool) == B_OK) fShowWindowThumbnails = valBool;
+                if (settingsMsg.FindBool("advanced_options", &valBool) == B_OK) fShowAdvancedOptions = valBool;
+                if (settingsMsg.FindInt32("thumbnail_fps", &valInt32) == B_OK) fThumbnailCaptureFps = valInt32;
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
                 if (settingsMsg.FindInt32("dock_location", &valInt32) == B_OK) {
                     gDockLocation = (valInt32 == kDockLocationTop) ? kDockLocationTop : kDockLocationBottom;
