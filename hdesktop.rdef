@@ -3,10 +3,10 @@ resource app_signature "application/x-vnd.hdesktop";
 resource app_version {
     major  = 1,   
     minor  = 0,   
-    middle = 48,   
+    middle = 49,   
     variety = B_APPV_DEVELOPMENT, 
     internal = 0,
-    short_info = "hdesktop v1.0.48",
+    short_info = "hdesktop v1.0.49",
     long_info = "hdesktop - SDL2 OpenGL Hyrbid Desktop Manager"
 
 };

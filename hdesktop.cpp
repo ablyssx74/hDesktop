@@ -71,7 +71,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.48"
+#define APP_LOCAL_VERSION "v1.0.49"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -94,7 +94,7 @@ bool autoHideEnabled;
 bool showSystemTray;
 bool dockAlwaysOnTop;
 bool fShowTitleOverlays = true;
-bool fShowWorkspaceSwitcher = false;
+bool fShowWorkspaceSwitcher = true;
 
 // Which screen edge the dock is pinned to. Left/Right are intentionally not
 // offered in the settings UI yet -- the dock's layout, hit-testing, and
@@ -106,25 +106,19 @@ enum DockLocation {
 };
 int32 gDockLocation = kDockLocationBottom;
 
-bool fShowWindowThumbnails = true;
+bool fShowWindowThumbnails = false;
 bool fShowAdvancedOptions = false;
 
 // Live window preview thumbnails (taskbar hover). Sizing for the popup
 // window's content area -- see ThumbnailPreviewWindow, which is a small
-// separate BWindow (same pattern as WorkspacePreviewWindow's right-click
-// popup) rather than something drawn inside the dock's own SDL/GL surface,
-// specifically so showing/hiding it never touches that window's size --
-// resizing it for this caused a visible full-screen flash.
+// separate BWindow - same pattern as WorkspacePreviewWindow's right-click popup
 const float kThumbnailMaxWidth  = 200.0f;
 const float kThumbnailMaxHeight = 140.0f;
 
 // How often the popup re-captures while open, exposed as an Advanced-only
 // slider for testing the tradeoff yourself: higher feels smoother but means
-// more BScreen::ReadBitmap() calls hitting app_server, which competes with
-// everything else it's drawing (the dock included) -- chaining captures
-// back-to-back with no floor at all was tried and made the whole dock bog
-// down, which is why this defaults to a conservative fixed 2fps.
-int32 fThumbnailCaptureFps = 2;
+// more BScreen::ReadBitmap() calls hitting app_server.
+int32 fThumbnailCaptureFps = 5;
 
 bool fEffectBounceEnabled = false;
 bool fEffectSpinEnabled = true;
@@ -141,7 +135,7 @@ bool fEffectCloseExplodeEnabled = false;
 void SaveConfiguration(); 
 float fBaseIconSize = 48.0f;
 float maxDockHeight = 160.0f;
-float fDockAlpha = 0.40f;
+float fDockAlpha = 0.32f;
 uint32 fSpinDurationMs = 750;
 const char* const kSettingsIconSizeKey = "base_icon_size";
 const char* const kSettingsAlphaKey = "dock_alpha";
@@ -1360,7 +1354,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // feature itself (Row 6 above) is enabled. Reserves its row either
         // way (like every other conditional row here) so nothing below has
         // to reflow when it's toggled.
-        BRect advancedCheckboxRect(35.0f, 242.0f, 55.0f, 258.0f);
+        BRect advancedCheckboxRect(35.0f, 262.0f, 55.0f, 278.0f);
         fAdvancedCheckbox = new BCheckBox(advancedCheckboxRect, "advanced_cb", nullptr,
             new BMessage(MSG_ADVANCED_TOGGLED));
         fAdvancedCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -1373,7 +1367,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7b: Thumbnail Preview FPS Slider -- only meaningful, and only
         // shown, while both Row 6 and Row 7 above are checked. Reserves its
         // row regardless, same as every other conditional row here.
-        BRect thumbnailFpsSliderRect(35.0f, 262.0f, frame.Width() - 35.0f, 312.0f);
+        BRect thumbnailFpsSliderRect(35.0f, 282.0f, frame.Width() - 35.0f, 332.0f);
         BString thumbnailFpsLabel;
         thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
         fThumbnailFpsSlider = new BSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
@@ -1407,7 +1401,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         dockLocationPopup->AddItem(dockBottomItem);
 
         // Dock Location Dropdown (Label drawn manually in Draw())
-        BRect dockLocationMenuRect(145.0f, 332.0f, frame.Width() - 35.0f, 357.0f);
+        BRect dockLocationMenuRect(145.0f, 352.0f, frame.Width() - 35.0f, 377.0f);
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
@@ -1441,7 +1435,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 374.0f, frame.Width() - 35.0f, 399.0f);
+        BRect effectsMenuRect(145.0f, 394.0f, frame.Width() - 35.0f, 419.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -1475,14 +1469,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 407.0f, frame.Width() - 35.0f, 432.0f);
+        BRect closeEffectsMenuRect(145.0f, 427.0f, frame.Width() - 35.0f, 452.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
         
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 457.0f, frame.Width() - 35.0f, 507.0f);
+        BRect speedSliderRect(35.0f, 477.0f, frame.Width() - 35.0f, 527.0f);
         fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed", 
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1492,7 +1486,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 527.0f, frame.Width() - 35.0f, 577.0f);
+        BRect sliderRect(35.0f, 547.0f, frame.Width() - 35.0f, 597.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency", 
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1502,7 +1496,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 597.0f, frame.Width() - 35.0f, 647.0f);
+        BRect sizeSliderRect(35.0f, 617.0f, frame.Width() - 35.0f, 667.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size", 
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1585,7 +1579,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
 		// 6. BALANCED BACKING CONTAINER
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 662.0f);
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 682.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -1600,29 +1594,37 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Enable Application Title Overlays", BPoint(62.0f, 194.0f));
         DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
         DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 234.0f));
+
+        // Smaller, italicized note under the Thumbnails checkbox -- the row
+        // below it (Row 7, Advanced Thumbnail Settings) was shifted down
+        // another 20px, same as every row from there on, to make room.
+        BFont expFont(be_plain_font);
+        expFont.SetSize(10.0f);
+        expFont.SetFace(B_ITALIC_FACE);
+        SetFont(&expFont);
+        SetHighColor(rgb_color{140, 150, 170, 255});
+        DrawString("(Experimental) app_server compositing not required but some features are limited.",
+            BPoint(62.0f, 248.0f));
+
+        // Reset back to plain before the rest of this method's labels --
+        // otherwise every DrawString() below would inherit the 9pt italic.
+        SetFont(be_plain_font);
+        SetFontSize(12.0f);
+        SetHighColor(rgb_color{220, 225, 235, 255});
+
         // Kept in sync with the checkbox's own Show()/Hide() state -- only
         // meaningful while Window Preview Thumbnails above is enabled.
         if (fShowWindowThumbnails) {
-            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 254.0f));
+            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 274.0f));
         }
-        DrawString("Dock Location:", BPoint(35.0f, 349.0f));
+        DrawString("Dock Location:", BPoint(35.0f, 369.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 391.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 424.0f));
-
-        /*
-        // Draw smaller, italicized "(Experimental)" tag underneath the Close App Effects dropdown
-        BFont expFont(be_plain_font);
-        expFont.SetSize(9.0f);
-        expFont.SetFace(B_ITALIC_FACE);
-        SetFont(&expFont);
-        SetHighColor(rgb_color{140, 150, 170, 255});
-        DrawString("(Experimental)", BPoint(145.0f, 412.0f));
-		*/
+        DrawString("Open App Effects:", BPoint(35.0f, 411.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 444.0f));
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -2156,9 +2158,9 @@ public:
                 B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 
-        ResizeTo(560.0f, 777.0f);
+        ResizeTo(560.0f, 797.0f);
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 777.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 797.0f) / 2.0f;
         MoveTo(targetX, targetY);
         
         ConfigView* configView = new ConfigView(Bounds());
@@ -4955,7 +4957,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 744.0f;
+									    float winHeight = 764.0f;
 									
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
