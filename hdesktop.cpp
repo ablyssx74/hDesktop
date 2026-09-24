@@ -7,17 +7,21 @@
 #include <algorithm>
 #include <AppKit.h>
 #include <AppServerLink.h>
+#include <atomic> // gDirectCaptureVerified and friends -- see their own comment
 #include <Autolock.h>
 #include <Bitmap.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <cmath>
+#include <csetjmp> // sigsetjmp/siglongjmp -- SetupDirectCaptureIfNeeded()'s SIGSEGV/SIGBUS safety net
+#include <cstdint> // uintptr_t -- FastFramebufferCopy()'s own alignment check
 #include <cstdio>
-#include <cstdlib> 
+#include <cstdlib>
 #include <cstdarg>
 #include <cstring>
 #include <ctime>
 #include <curl/curl.h>
+#include <DirectWindow.h> // BDirectWindow -- see SetupDirectCaptureIfNeeded()
 #include <Deskbar.h>
 #include <Directory.h>
 #include <Entry.h>
@@ -52,6 +56,7 @@
 #include <Roster.h>
 #include <Screen.h>
 #include <ScrollView.h>
+#include <signal.h> // sigaction/raise -- SetupDirectCaptureIfNeeded()'s SIGSEGV/SIGBUS safety net
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include <SDL2/SDL_syswm.h>
@@ -1371,9 +1376,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         BString thumbnailFpsLabel;
         thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
         fThumbnailFpsSlider = new BSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
-            new BMessage(MSG_THUMBNAIL_FPS_SLIDER_CHANGED), 1, 20);
+            new BMessage(MSG_THUMBNAIL_FPS_SLIDER_CHANGED), 1, 30);
         fThumbnailFpsSlider->SetHighColor(rgb_color{220, 225, 235, 255});
-        fThumbnailFpsSlider->SetLimitLabels("1 fps", "20 fps");
+        // 30fps top end (was 20) -- the direct-framebuffer tile reads (see
+        // "DIRECT FRAMEBUFFER ACCELERATION" above) are fast enough on
+        // verified hardware to make that worth offering; unverified hardware
+        // still just uses the plain BScreen path underneath, same as always.
+        fThumbnailFpsSlider->SetLimitLabels("1 fps", "30 fps");
         fThumbnailFpsSlider->SetValue(fThumbnailCaptureFps);
         AddChild(fThumbnailFpsSlider);
         // No redundant Show() here (unlike this codebase's other, always-
@@ -2907,6 +2916,359 @@ const bigtime_t kMaxCachedFrameAgeUs = 15000000; // 15s
 // "slowness in general" this targets, more than raw capture throughput.
 const float kThumbnailCaptureTileSize = 100.0f;
 
+// =========================================================================
+// DIRECT FRAMEBUFFER ACCELERATION FOR THUMBNAIL CAPTURE (BDirectWindow)
+// =========================================================================
+// Ported from hrecord (https://github.com/ablyssx74/hrecord)'s own
+// --direct-tiled-capture, confirmed on real hardware to cut its own tile
+// reads roughly 10x (~640-760ms/frame down to ~43-63ms/frame) over plain
+// BScreen::ReadBitmap() calls, by reading straight through a BDirectWindow's
+// raw framebuffer pointer instead of an app_server IPC round trip per tile.
+// hDesktop's own thumbnail capture (ThumbnailCaptureThreadFunc below) does
+// the exact same shape of work -- a grid of small BScreen::ReadBitmap()
+// tiles -- so the same acceleration applies directly.
+//
+// **Not trusted on a capability check alone.** hrecord's own prior research
+// (see its research/directwindow_probe.cpp) found BDirectWindow::
+// SupportsWindowMode() reporting true does NOT guarantee a safe
+// out-of-window-bounds read -- one real, experimental accelerant crashed
+// doing exactly that despite the capability check passing. So this is never
+// trusted by itself. SetupDirectCaptureIfNeeded() below only ever leaves
+// gDirectCaptureHardwareSafe true after: SupportsWindowMode(), a successful
+// connection, a matching 32-bit pixel format, AND a real out-of-window-
+// bounds probe read -- signal-guarded (SIGSEGV/SIGBUS) the same way
+// hrecord's own research proved necessary -- checked byte-for-byte against
+// a real BScreen::ReadBitmap() at the same point. Any failure at any step
+// leaves gDirectCaptureVerified false and every tile read keeps going
+// through BScreen exactly as this file already did before this section
+// existed -- the fallback this feature promises.
+//
+// **Live geometry, not just a one-time check.** A real crash hrecord hit on
+// real hardware (after this same code had already been ported and shipped
+// there) taught this project a second lesson: a BDirectWindow's
+// DirectConnected() callback fires again whenever app_server tears down and
+// recreates the underlying buffer -- a workspace switch being the most
+// common real-world trigger -- and a buffer captured once at startup can
+// point at memory that's simply gone by the time a later frame tries to
+// read it. hDesktop runs continuously (unlike hrecord, which only needs
+// this for the length of one recording), so this exposure is if anything
+// larger here. gDirectCaptureHardwareSafe (checked once, a property of the
+// driver/accelerant) and gDirectCaptureVerified (live, updated on every
+// DirectConnected() event, paused immediately on B_DIRECT_STOP) are kept
+// separate for exactly that reason -- see UpdateDirectCaptureGeometry()'s
+// own comment below.
+//
+// All shared state is std::atomic: DirectConnected() runs on app_server's
+// own dedicated callback thread, while the actual tile reads happen on
+// ThumbnailCaptureThreadFunc's own one-shot capture thread (a third thread
+// again) -- plain globals written from one thread and read from another
+// with no synchronization at all would be a real data race, not a
+// theoretical one.
+std::atomic<bool> gDirectCaptureHardwareSafe(false);
+std::atomic<bool> gDirectCaptureVerified(false);
+std::atomic<const uint8*> gDirectDesktopOrigin(nullptr);
+std::atomic<uint32> gDirectBytesPerRow(0);
+std::atomic<int> gDirectBytesPerPixel(0);
+
+// Recomputes the desktop-space origin pointer/stride/bytes-per-pixel from a
+// fresh direct_buffer_info and publishes it -- called from
+// DirectCaptureWindow::DirectConnected() on *every* connection event once
+// the hardware is known safe, not just the first. mode == B_DIRECT_STOP
+// means the buffer is going away right now (workspace switch, mode change,
+// connection torn down) -- stops trusting the pointer immediately rather
+// than risk reading it again before a fresh B_DIRECT_START/MODIFY arrives
+// with new, valid geometry. The capture code's own gDirectCaptureVerified
+// check just falls back to a BScreen tile read for however many tiles this
+// takes, never a crash.
+static void UpdateDirectCaptureGeometry(const direct_buffer_info& info, int mode) {
+    if (mode == B_DIRECT_STOP) {
+        gDirectCaptureVerified.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    if (!gDirectCaptureHardwareSafe.load(std::memory_order_relaxed)) {
+        // SetupDirectCaptureIfNeeded()'s own one-time verification hasn't
+        // passed (or hasn't run) yet -- never trust geometry before that.
+        return;
+    }
+
+    if (info.bits == nullptr || info.bytes_per_row == 0
+            || (info.pixel_format != B_RGB32 && info.pixel_format != B_RGBA32)) {
+        gDirectCaptureVerified.store(false, std::memory_order_relaxed);
+        return;
+    }
+    int bytesPerPixel = info.bits_per_pixel / 8;
+    if (bytesPerPixel != 4) {
+        gDirectCaptureVerified.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    // window_bounds is set by app_server on every non-STOP connection event
+    // (DirectWindowInfo::SetState(), confirmed by hrecord's own research
+    // reading its actual source).
+    const uint8* desktopOrigin = (const uint8*)info.bits
+        - (size_t)info.window_bounds.top * info.bytes_per_row
+        - (size_t)info.window_bounds.left * bytesPerPixel;
+
+    gDirectDesktopOrigin.store(desktopOrigin, std::memory_order_relaxed);
+    gDirectBytesPerRow.store(info.bytes_per_row, std::memory_order_relaxed);
+    gDirectBytesPerPixel.store(bytesPerPixel, std::memory_order_relaxed);
+    gDirectCaptureVerified.store(true, std::memory_order_release);
+}
+
+#ifdef __x86_64__
+#include <smmintrin.h> // _mm_stream_load_si128 (MOVNTDQA) -- SSE4.1
+
+// The bulk-copy half of FastFramebufferCopy() below, split into its own
+// function so only *this* function is compiled for SSE4.1 -- the rest of
+// this file stays on whatever baseline the Makefile targets, and
+// __builtin_cpu_supports() at the one call site below gates whether this
+// ever actually runs, so a CPU that predates SSE4.1 (2008+, never assumed)
+// simply never reaches it. Guarded to __x86_64__ only: a 32-bit build using
+// an older gcc2-era compiler (BeOS ABI compatibility) wouldn't support this
+// attribute or __builtin_cpu_supports() at all, and never defines
+// __x86_64__, so this whole block compiles out cleanly for that toolchain.
+__attribute__((target("sse4.1")))
+static void FastFramebufferCopySSE41(void* dst, const void* src, size_t bytes) {
+    uint8* d = (uint8*)dst;
+    const uint8* s = (const uint8*)src;
+    size_t chunks = bytes / 16;
+    for (size_t i = 0; i < chunks; i++) {
+        __m128i v = _mm_stream_load_si128((__m128i*)(const_cast<uint8*>(s)));
+        _mm_storeu_si128((__m128i*)d, v);
+        s += 16;
+        d += 16;
+    }
+    size_t remainder = bytes - chunks * 16;
+    if (remainder > 0) {
+        memcpy(d, s, remainder);
+    }
+}
+#endif
+
+// Copies `bytes` bytes from src (framebuffer memory) to dst. Real
+// GPU-mapped framebuffer memory is typically write-combined -- a memory
+// type ordinary MOV-based reads (what a plain memcpy uses) are known to
+// handle poorly, since write-combining is optimized for writes, not reads.
+// SSE4.1's MOVNTDQA streaming-load instruction exists specifically for fast
+// reads from that memory type, so this uses it for the bulk of the copy
+// whenever the CPU actually supports it (checked once, via
+// __builtin_cpu_supports(), never assumed) and src happens to be 16-byte
+// aligned -- true by construction for a tile whose screen-space left edge
+// is a multiple of 4px (every kThumbnailCaptureTileSize-aligned tile is,
+// since 100 * 4 bytes/pixel = 400, itself a multiple of 16) -- and falls
+// back to plain memcpy otherwise. Always safe to call regardless of
+// caller, hardware, or alignment. Confirmed in hrecord's own real-world
+// testing to be the difference between a modest ~10-15% win and a genuine
+// ~10x one for this exact kind of framebuffer read.
+static inline void FastFramebufferCopy(void* dst, const void* src, size_t bytes) {
+#ifdef __x86_64__
+    static int sHasSse41 = -1;
+    if (sHasSse41 < 0) {
+        sHasSse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
+    }
+    if (sHasSse41 && ((uintptr_t)src & 15) == 0 && bytes >= 16) {
+        FastFramebufferCopySSE41(dst, src, bytes);
+        return;
+    }
+#endif
+    memcpy(dst, src, bytes);
+}
+
+// The out-of-window-bounds probe read in SetupDirectCaptureIfNeeded() below
+// is wrapped in this the same way hrecord's own research/
+// directwindow_probe.cpp's --desktop-read-test already validated on real
+// hardware: reading outside a connected window's own clip region is
+// outside what the DirectWindow API contract promises is safe, so on some
+// driver/hardware combination it can raise SIGSEGV/SIGBUS instead of just
+// returning wrong bytes. sigsetjmp/siglongjmp turns that into a clean "not
+// safe here" instead of taking the whole dock down.
+static sigjmp_buf gDirectCaptureSegvJmpBuf;
+static volatile sig_atomic_t gInDirectCaptureRiskyRead = 0;
+
+static void DirectCaptureSegvHandler(int sig) {
+    if (gInDirectCaptureRiskyRead) {
+        siglongjmp(gDirectCaptureSegvJmpBuf, sig);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+// A small, otherwise-unused, borderless BDirectWindow purely to get a raw
+// framebuffer pointer -- B_FLOATING_ALL_WINDOW_FEEL so it stays connected
+// (and keeps receiving DirectConnected() callbacks) across workspace
+// switches, since that's exactly the event UpdateDirectCaptureGeometry()
+// needs to hear about. B_DIRECT_START/STOP/MODIFY are mutually-exclusive
+// *values* packed into buffer_state's low 4 bits (B_DIRECT_MODE_MASK), not
+// independent flags -- must be extracted and compared, never tested with a
+// bare "&" (confirmed the hard way in hrecord's own research).
+class DirectCaptureWindow : public BDirectWindow {
+public:
+    DirectCaptureWindow(BRect frame)
+        : BDirectWindow(frame, "hdesktop direct capture",
+              B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_NOT_MOVABLE
+                  | B_NOT_CLOSABLE | B_NOT_MINIMIZABLE | B_AVOID_FOCUS),
+          fConnected(false),
+          fConnectSem(create_sem(0, "hdesktop_direct_connect")) {
+        memset(&fInfo, 0, sizeof(fInfo));
+    }
+
+    ~DirectCaptureWindow() {
+        delete_sem(fConnectSem);
+    }
+
+    // Called by app_server on its own dedicated thread, not this window's
+    // usual message-handling thread -- including again later, e.g. on a
+    // workspace switch, not just once at startup.
+    virtual void DirectConnected(direct_buffer_info* info) {
+        fLock.Lock();
+        fInfo = *info;
+        int mode = info->buffer_state & B_DIRECT_MODE_MASK;
+        if (mode == B_DIRECT_START) {
+            fConnected = true;
+            release_sem(fConnectSem);
+        } else if (mode == B_DIRECT_STOP) {
+            fConnected = false;
+        }
+        fLock.Unlock();
+
+        UpdateDirectCaptureGeometry(*info, mode);
+    }
+
+    bool WaitForConnect(bigtime_t timeoutUs) {
+        status_t err = acquire_sem_etc(fConnectSem, 1, B_RELATIVE_TIMEOUT, timeoutUs);
+        return err == B_OK;
+    }
+
+    direct_buffer_info Snapshot() {
+        fLock.Lock();
+        direct_buffer_info copy = fInfo;
+        fLock.Unlock();
+        return copy;
+    }
+
+private:
+    BLocker fLock;
+    bool fConnected;
+    sem_id fConnectSem;
+    direct_buffer_info fInfo;
+};
+
+DirectCaptureWindow* gDirectCaptureWindow = nullptr;
+
+// Sets up gDirectCaptureWindow and runs the full four-step verification
+// exactly once, the first time a thumbnail is actually about to be shown
+// (called from the popup-creation site below, guarded by an "attempted"
+// flag) -- not unconditionally at startup, so a user who leaves thumbnails
+// disabled never pays for a window they don't use. Safe to call from
+// hDesktop's own main thread: by the time any thumbnail popup can exist,
+// SDL_CreateWindow() has already succeeded, which on Haiku's SDL2 backend
+// means a BApplication is already running its own Run() loop -- the same
+// precondition hrecord's own SetupDirectCapture() relies on, just
+// satisfied differently there (it constructs its own BApplication first).
+// Constructed and Show()n on this same thread, so there's no cross-thread
+// BWindow-lock hazard to work around either.
+static void SetupDirectCaptureIfNeeded() {
+    BRect frame(0, 0, 3, 3); // tiny, borderless, pinned to the corner
+    gDirectCaptureWindow = new DirectCaptureWindow(frame);
+
+    if (!gDirectCaptureWindow->SupportsWindowMode()) {
+        std::cout << "[i] hDesktop: this video driver doesn't support BDirectWindow's "
+            "windowed mode; window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+
+    gDirectCaptureWindow->Show();
+
+    if (!gDirectCaptureWindow->WaitForConnect(5000000)) {
+        std::cout << "[i] hDesktop: never got a DirectWindow connection within 5s; "
+            "window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+
+    direct_buffer_info info = gDirectCaptureWindow->Snapshot();
+    if (info.bits == nullptr || info.bytes_per_row == 0) {
+        std::cout << "[i] hDesktop: connected, but got no usable buffer pointer; "
+            "window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+    if (info.pixel_format != B_RGB32 && info.pixel_format != B_RGBA32) {
+        std::cout << "[i] hDesktop: screen isn't in a 32-bit-per-pixel color mode; "
+            "window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+    int bytesPerPixel = info.bits_per_pixel / 8;
+    if (bytesPerPixel != 4) {
+        std::cout << "[i] hDesktop: unexpected bits_per_pixel (" << info.bits_per_pixel
+            << "); window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+
+    const uint8* desktopOrigin = (const uint8*)info.bits
+        - (size_t)info.window_bounds.top * info.bytes_per_row
+        - (size_t)info.window_bounds.left * bytesPerPixel;
+
+    // The actual safety test: read one pixel well outside this window's
+    // own tiny (4x4, top-left corner) bounds -- the screen's own center --
+    // and compare it against a BScreen::ReadBitmap() of that same point.
+    BScreen screen;
+    BRect screenFrame = screen.Frame();
+    int probeX = (int)(screenFrame.Width() / 2.0f);
+    int probeY = (int)(screenFrame.Height() / 2.0f);
+    BRect probeRect(probeX, probeY, probeX, probeY);
+    BBitmap refBitmap(probeRect, B_RGB32);
+    if (screen.ReadBitmap(&refBitmap, false, &probeRect) != B_OK) {
+        std::cout << "[i] hDesktop: couldn't get a reference read for the safety check; "
+            "window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+
+    const uint8* probePtr = desktopOrigin
+        + (size_t)probeY * info.bytes_per_row + (size_t)probeX * bytesPerPixel;
+
+    struct sigaction sa, oldSegv, oldBus;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = DirectCaptureSegvHandler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &oldSegv);
+    sigaction(SIGBUS, &sa, &oldBus);
+
+    bool safe = false;
+    uint8 probeBytes[4] = {0, 0, 0, 0};
+    int caughtSignal = sigsetjmp(gDirectCaptureSegvJmpBuf, 1);
+    if (caughtSignal == 0) {
+        gInDirectCaptureRiskyRead = 1;
+        memcpy(probeBytes, probePtr, 4);
+        gInDirectCaptureRiskyRead = 0;
+        safe = true;
+    } else {
+        gInDirectCaptureRiskyRead = 0;
+    }
+
+    sigaction(SIGSEGV, &oldSegv, nullptr);
+    sigaction(SIGBUS, &oldBus, nullptr);
+
+    if (!safe) {
+        std::cout << "[i] hDesktop: reading outside this window's own region crashed "
+            "(caught safely) on this video driver; window thumbnails will use BScreen "
+            "tile reads." << std::endl;
+        return;
+    }
+
+    uint8* refBytes = (uint8*)refBitmap.Bits();
+    if (memcmp(probeBytes, refBytes, 4) != 0) {
+        std::cout << "[i] hDesktop: the direct-pointer read didn't match a real screen "
+            "read at the same point; window thumbnails will use BScreen tile reads." << std::endl;
+        return;
+    }
+
+    gDirectCaptureHardwareSafe.store(true, std::memory_order_relaxed);
+    UpdateDirectCaptureGeometry(info, info.buffer_state & B_DIRECT_MODE_MASK);
+    std::cout << "[i] hDesktop: BDirectWindow verified safe on this video driver -- "
+        "window thumbnails will read the framebuffer directly." << std::endl;
+}
+
 // Args for the one-shot background thread that captures a single preview
 // pass. Heap allocated by ThumbnailPreviewWindow::RequestCapture(), freed by
 // the capture thread once it's posted its result (or failed to). Captured
@@ -3102,14 +3464,13 @@ public:
 
         // Cheap poll (mouse-position check, occasional recapture) -- mirrors
         // WorkspacePreviewWindow's own self-closing 'tick' pattern, but at
-        // 50ms (20Hz) rather than that one's 100ms: RequestCapture() below
-        // can only ever run when this tick fires, so a 100ms tick silently
-        // capped every FPS setting above 10 at ~10fps no matter what the
-        // slider (1-20) said. 50ms matches the slider's own top end; the
-        // per-tick throttle a few lines down still paces slower settings
-        // correctly.
+        // ~33ms (30Hz) rather than that one's 100ms: RequestCapture() below
+        // can only ever run when this tick fires, so a slower tick would
+        // silently cap the FPS slider below whatever it's actually set to.
+        // 33ms matches the slider's own top end (1-30 fps); the per-tick
+        // throttle a few lines down still paces slower settings correctly.
         BMessage tickMessage('thtk');
-        fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 50000);
+        fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 33000);
     }
 
     virtual ~ThumbnailPreviewWindow() {
@@ -3230,12 +3591,34 @@ public:
 // actually matters for a system feeling responsive while a capture is
 // happening, more than raw capture throughput.
 //
+// Each tile read below checks gDirectCaptureVerified and, when true, reads
+// straight through a BDirectWindow's raw framebuffer pointer instead of
+// going through BScreen at all -- see the "DIRECT FRAMEBUFFER ACCELERATION"
+// section above ThumbnailCaptureArgs for the full design, the safety
+// verification behind it, and why it's never trusted without that. Falls
+// back to the exact BScreen tile read this function always used otherwise,
+// so this never behaves worse than before that section existed, only
+// potentially faster.
+//
 // Only ever captures the currently active workspace's framebuffer -- an
 // earlier version also supported switching to a different workspace first
 // for an "all workspaces" preview option, but that never reliably worked
 // (Haiku's activate_workspace() only requests the switch; app_server's
 // actual redraw is asynchronous, so timing the capture against it proved
 // fragile) and wasn't worth the complexity, so that option was dropped.
+//
+// Before any of the above: if the target window is bigger than the popup's
+// own small display box (kThumbnailMaxWidth x kThumbnailMaxHeight) --
+// notably a large or near-fullscreen video player -- and direct capture is
+// verified and the whole window is on-screen, this skips the tile grid
+// entirely and reads only the dstWidth x dstHeight pixels the popup will
+// actually show, straight out of the framebuffer by nearest-neighbor
+// sampling. That keeps both the capture itself and the BMessage sent back
+// to the popup proportional to the *display* size instead of the *window*
+// size, which is what actually cuts the round-trip latency a large window
+// would otherwise add on every single tick. Any window too big for that fast
+// path (unverified hardware, or not fully on-screen) still gets the full
+// tile-grid capture below, just shrunk to the same box before it's sent.
 static int32 ThumbnailCaptureThreadFunc(void* data) {
     ThumbnailCaptureArgs* args = static_cast<ThumbnailCaptureArgs*>(data);
     if (args != nullptr) {
@@ -3244,8 +3627,87 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
         if (windowFrame.IsValid() && windowFrame.Width() >= 2.0f && windowFrame.Height() >= 2.0f) {
             BScreen screen(B_MAIN_SCREEN_ID);
             if (screen.IsValid()) {
+                // The direct-pointer path below has no clipping of its own --
+                // unlike BScreen::ReadBitmap(), which fails/clips gracefully
+                // on a rect outside the screen, a raw pointer offset computed
+                // from an out-of-bounds tile is just wrong memory, and a
+                // negative coordinate (a window dragged partway off the top
+                // or left edge, or a secondary monitor with a negative
+                // origin -- both real on Haiku, which doesn't clamp window
+                // positions) turns into a huge offset once cast to size_t,
+                // not a small one. So every tile is checked against the
+                // *current* screen frame before taking that path; any tile
+                // that isn't fully on-screen falls back to the BScreen read
+                // below, exactly as it would if direct capture weren't
+                // verified at all.
+                BRect screenFrame = screen.Frame();
                 int32 fullWidth  = (int32)windowFrame.Width() + 1;
                 int32 fullHeight = (int32)windowFrame.Height() + 1;
+
+                // The popup only ever displays a thumbnail inside a small,
+                // fixed box (kThumbnailMaxWidth x kThumbnailMaxHeight) -- see
+                // ThumbnailPreviewView::Draw()'s own scale-to-fit. Moving a
+                // full window-resolution frame through a BMessage every tick
+                // (this function's own composite -> AddData's copy into the
+                // message -> the popup's memcpy back out of it) costs in
+                // direct proportion to how much bigger the captured window is
+                // than that box -- invisible for an ordinary small window,
+                // but real, size-proportional, every-frame latency for a
+                // large one (a near-fullscreen video player being the
+                // obvious case). scale < 1 here means this window doesn't
+                // fit the box natively; dstWidth/dstHeight is what it'll
+                // actually be drawn at either way, so there's nothing lost
+                // by only ever capturing and sending that many pixels.
+                float scale = std::min(kThumbnailMaxWidth / (float)fullWidth,
+                    kThumbnailMaxHeight / (float)fullHeight);
+                bool downscale = scale < 1.0f;
+                int32 dstWidth  = downscale ? std::max((int32)1, (int32)(fullWidth * scale + 0.5f)) : fullWidth;
+                int32 dstHeight = downscale ? std::max((int32)1, (int32)(fullHeight * scale + 0.5f)) : fullHeight;
+
+                // Same out-of-bounds reasoning as the per-tile check below,
+                // just applied to the whole window frame at once -- the fast
+                // path right below reads every source pixel itself rather
+                // than going tile by tile, so it needs the same guarantee
+                // before it can trust the direct pointer at all.
+                bool wholeWindowOnScreen = screenFrame.Contains(windowFrame.LeftTop())
+                    && screenFrame.Contains(windowFrame.RightBottom());
+
+                if (downscale && wholeWindowOnScreen
+                        && gDirectCaptureVerified.load(std::memory_order_acquire)) {
+                    // Fast path: read exactly the dstWidth x dstHeight pixels
+                    // this thumbnail will actually show, straight out of the
+                    // framebuffer via nearest-neighbor sampling. Never builds,
+                    // copies, or sends the other, larger fullWidth x
+                    // fullHeight image at all -- for a big window this is the
+                    // difference between moving a few hundred KB a second
+                    // through a cross-thread BMessage and moving tens of MB/s.
+                    const uint8* origin = gDirectDesktopOrigin.load(std::memory_order_relaxed);
+                    uint32 bytesPerRow = gDirectBytesPerRow.load(std::memory_order_relaxed);
+                    int bytesPerPixel = gDirectBytesPerPixel.load(std::memory_order_relaxed);
+                    int32 winLeft = (int32)windowFrame.left;
+                    int32 winTop = (int32)windowFrame.top;
+
+                    std::vector<uint8_t> smallPixels((size_t)dstWidth * dstHeight * 4);
+                    for (int32 dy = 0; dy < dstHeight; ++dy) {
+                        int32 sy = winTop + (dy * fullHeight) / dstHeight;
+                        uint8* dstRow = smallPixels.data() + (size_t)dy * dstWidth * 4;
+                        for (int32 dx = 0; dx < dstWidth; ++dx) {
+                            int32 sx = winLeft + (dx * fullWidth) / dstWidth;
+                            const uint8* srcPixel = origin
+                                + (size_t)sy * bytesPerRow + (size_t)sx * bytesPerPixel;
+                            memcpy(dstRow + dx * 4, srcPixel, 4);
+                        }
+                    }
+
+                    BMessage resultMsg('thbm');
+                    resultMsg.AddInt32("width", dstWidth);
+                    resultMsg.AddInt32("height", dstHeight);
+                    resultMsg.AddData("pixels", B_RAW_TYPE, smallPixels.data(), smallPixels.size());
+                    args->targetMessenger.SendMessage(&resultMsg);
+
+                    delete args;
+                    return B_OK;
+                }
 
                 BBitmap composite(BRect(0.0f, 0.0f, fullWidth - 1.0f, fullHeight - 1.0f), B_RGB32);
                 if (composite.InitCheck() == B_OK) {
@@ -3264,30 +3726,86 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                                 windowFrame.left + tileLeft + tileW - 1.0f,
                                 windowFrame.top + tileTop + tileH - 1.0f);
 
-                            BBitmap tileBitmap(BRect(0.0f, 0.0f, tileW - 1.0f, tileH - 1.0f), B_RGB32);
-                            if (tileBitmap.InitCheck() == B_OK &&
-                                screen.ReadBitmap(&tileBitmap, false, &tileScreenRect) == B_OK) {
-                                // Paste this tile into the composite one row at a
-                                // time -- the tile's own bytes-per-row and the
-                                // composite's don't match, so a single memcpy of
-                                // the whole thing won't work.
-                                const uint8* tileBits = (const uint8*)tileBitmap.Bits();
-                                int32 tileBPR = tileBitmap.BytesPerRow();
-                                int32 rowBytes = (int32)tileW * 4; // B_RGB32 == 4 bytes/pixel
-                                int32 destColOffset = (int32)tileLeft * 4;
-                                int32 destRowBase = (int32)tileTop;
+                            int32 rowBytes = (int32)tileW * 4; // B_RGB32 == 4 bytes/pixel
+                            int32 destColOffset = (int32)tileLeft * 4;
+                            int32 destRowBase = (int32)tileTop;
+
+                            // Acquire ordering pairs with UpdateDirectCaptureGeometry()'s
+                            // own release store -- if this load sees true, the three
+                            // loads right below it are guaranteed to see the geometry
+                            // that goes with it, not a stale mix from before the most
+                            // recent DirectConnected() event (which can land on a
+                            // different thread at any time, including mid-capture).
+                            // screenFrame.Contains() is the out-of-bounds guard described
+                            // above -- only taken when the whole tile is on-screen.
+                            bool tileOnScreen = screenFrame.Contains(tileScreenRect.LeftTop())
+                                && screenFrame.Contains(tileScreenRect.RightBottom());
+                            if (gDirectCaptureVerified.load(std::memory_order_acquire) && tileOnScreen) {
+                                // Same tile grid, read straight through the framebuffer
+                                // pointer instead of a BScreen::ReadBitmap() IPC call --
+                                // no per-tile BBitmap allocation needed either, straight
+                                // into the composite. See FastFramebufferCopy()'s own
+                                // comment for the SSE4.1 fast path underneath this.
+                                const uint8* origin = gDirectDesktopOrigin.load(std::memory_order_relaxed);
+                                uint32 bytesPerRow = gDirectBytesPerRow.load(std::memory_order_relaxed);
+                                int bytesPerPixel = gDirectBytesPerPixel.load(std::memory_order_relaxed);
+                                int32 tileScreenLeft = (int32)tileScreenRect.left;
+                                int32 tileScreenTop = (int32)tileScreenRect.top;
+                                const uint8* srcRow = origin
+                                    + (size_t)tileScreenTop * bytesPerRow
+                                    + (size_t)tileScreenLeft * bytesPerPixel;
+                                uint8* dstRow = compositeBits + destRowBase * compositeBPR + destColOffset;
                                 for (int32 row = 0; row < (int32)tileH; ++row) {
-                                    memcpy(compositeBits + (destRowBase + row) * compositeBPR + destColOffset,
-                                        tileBits + row * tileBPR, rowBytes);
+                                    FastFramebufferCopy(dstRow, srcRow, rowBytes);
+                                    srcRow += bytesPerRow;
+                                    dstRow += compositeBPR;
+                                }
+                            } else {
+                                BBitmap tileBitmap(BRect(0.0f, 0.0f, tileW - 1.0f, tileH - 1.0f), B_RGB32);
+                                if (tileBitmap.InitCheck() == B_OK &&
+                                    screen.ReadBitmap(&tileBitmap, false, &tileScreenRect) == B_OK) {
+                                    // Paste this tile into the composite one row at a
+                                    // time -- the tile's own bytes-per-row and the
+                                    // composite's don't match, so a single memcpy of
+                                    // the whole thing won't work.
+                                    const uint8* tileBits = (const uint8*)tileBitmap.Bits();
+                                    int32 tileBPR = tileBitmap.BytesPerRow();
+                                    for (int32 row = 0; row < (int32)tileH; ++row) {
+                                        memcpy(compositeBits + (destRowBase + row) * compositeBPR + destColOffset,
+                                            tileBits + row * tileBPR, rowBytes);
+                                    }
                                 }
                             }
                         }
                     }
 
                     BMessage resultMsg('thbm');
-                    resultMsg.AddInt32("width", fullWidth);
-                    resultMsg.AddInt32("height", fullHeight);
-                    resultMsg.AddData("pixels", B_RAW_TYPE, compositeBits, (size_t)composite.BitsLength());
+                    if (downscale) {
+                        // Reached here because either the fast path above
+                        // wasn't safe to take (window not fully on-screen, or
+                        // direct capture isn't verified on this hardware) --
+                        // the capture itself already cost full resolution,
+                        // but shrinking before the BMessage crosses threads
+                        // still saves the copy-into-message and copy-back-out
+                        // cost on the transmit side.
+                        std::vector<uint8_t> smallPixels((size_t)dstWidth * dstHeight * 4);
+                        for (int32 dy = 0; dy < dstHeight; ++dy) {
+                            int32 sy = (dy * fullHeight) / dstHeight;
+                            const uint8* srcRow = compositeBits + (size_t)sy * compositeBPR;
+                            uint8* dstRow = smallPixels.data() + (size_t)dy * dstWidth * 4;
+                            for (int32 dx = 0; dx < dstWidth; ++dx) {
+                                int32 sx = (dx * fullWidth) / dstWidth;
+                                memcpy(dstRow + dx * 4, srcRow + (size_t)sx * 4, 4);
+                            }
+                        }
+                        resultMsg.AddInt32("width", dstWidth);
+                        resultMsg.AddInt32("height", dstHeight);
+                        resultMsg.AddData("pixels", B_RAW_TYPE, smallPixels.data(), smallPixels.size());
+                    } else {
+                        resultMsg.AddInt32("width", fullWidth);
+                        resultMsg.AddInt32("height", fullHeight);
+                        resultMsg.AddData("pixels", B_RAW_TYPE, compositeBits, (size_t)composite.BitsLength());
+                    }
                     args->targetMessenger.SendMessage(&resultMsg);
                 }
             }
@@ -7212,6 +7730,16 @@ void SyncDockWithRunningDeskbarApps() {
 			    // 1:1 -- see the gluOrtho2D call in main()), so it can be handed
 			    // straight to the popup for anchoring.
 			    if (fShowWindowThumbnails && haveActiveTaskWinThumbnailFrame) {
+			        // Lazy, one-time: only the first thumbnail a session actually
+			        // shows pays for BDirectWindow setup/verification -- see
+			        // SetupDirectCaptureIfNeeded()'s own comment for why this isn't
+			        // done unconditionally at startup instead.
+			        static bool sDirectCaptureSetupAttempted = false;
+			        if (!sDirectCaptureSetupAttempted) {
+			            sDirectCaptureSetupAttempted = true;
+			            SetupDirectCaptureIfNeeded();
+			        }
+
 			        if (gActiveThumbnailPreview == nullptr ||
 			            gActiveThumbnailPreview->Team() != activeTaskWin.teamId) {
 			            if (gActiveThumbnailPreview != nullptr) {

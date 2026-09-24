@@ -34,7 +34,9 @@ GUI_RSRCS = hdesktop.rsrc
 
 
 # Shared linking assets
-LIBS = -L./lib -lbe -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -llocalestub -lcurl
+# -lgame: BDirectWindow's own symbols live in Haiku's separate Game Kit lib,
+# not libbe itself -- needed for SetupDirectCaptureIfNeeded()'s DirectCaptureWindow.
+LIBS = -L./lib -lbe -lgame -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -llocalestub -lcurl
 
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
