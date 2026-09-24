@@ -369,17 +369,36 @@ struct DesktopIconItem {
 // whatever app_server has actually composited to the physical framebuffer,
 // which for a covered window is whatever is drawn on top of it, not that
 // window's own content; Haiku keeps no off-screen buffer for a window that
-// isn't currently visible. So a window some other app is covering
-// literally cannot be captured correctly by any means available here --
-// this check is what lets the caller skip showing a wrong preview instead
-// of a merely missing one.
+// isn't currently visible. So the covered *portion* of a window some other
+// app overlaps literally cannot be captured correctly by any means
+// available here -- a capture just shows the occluder's own pixels there.
+//
+// A single stray pixel of overlap used to be enough to call the whole
+// window "occluded" and blank the thumbnail entirely, which was needlessly
+// strict: a window that's only lightly clipped by another still has a
+// mostly-correct, still-useful preview, wrong pixels and all. So this now
+// measures roughly how much of the candidate's own area is actually
+// covered -- via a coarse grid rather than summing each occluder's raw
+// overlap area, since two overlapping occluders would otherwise double-
+// count the same covered pixels -- and only calls it occluded past
+// kOcclusionThreshold. Below that, the caller still shows the thumbnail; a
+// small wrong patch in a corner is preferable to no preview at all.
+const int32 kOcclusionGridSize = 8; // 8x8 = 64 cells, plenty for a threshold decision
+const float kOcclusionThreshold = 0.5f; // >50% covered counts as occluded
+
 bool IsThumbnailCandidateOccluded(int32* windowTokens, int32 candidateIndex, BRect candidateFrame,
     int32 currentWorkspace, team_id ownTeam) {
+    float candW = candidateFrame.Width();
+    float candH = candidateFrame.Height();
+    if (candW <= 0.0f || candH <= 0.0f) return false;
+
+    bool covered[kOcclusionGridSize][kOcclusionGridSize];
+    memset(covered, 0, sizeof(covered));
+
     for (int32 j = 0; j < candidateIndex; ++j) {
         client_window_info* front = get_window_info(windowTokens[j]);
         if (front == nullptr) continue;
 
-        bool overlaps = false;
         if (front->team != ownTeam && !front->is_mini &&
             front->feel == B_NORMAL_WINDOW_FEEL &&
             (front->workspaces & (1 << currentWorkspace))) {
@@ -396,13 +415,34 @@ bool IsThumbnailCandidateOccluded(int32* windowTokens, int32 candidateIndex, BRe
             float overlapRight = std::min(frontRect.right, candidateFrame.right);
             float overlapTop = std::max(frontRect.top, candidateFrame.top);
             float overlapBottom = std::min(frontRect.bottom, candidateFrame.bottom);
-            overlaps = (overlapRight > overlapLeft) && (overlapBottom > overlapTop);
+            if (overlapRight > overlapLeft && overlapBottom > overlapTop) {
+                // Mark every grid cell whose center falls inside this
+                // occluder's overlap with the candidate -- cheap, and
+                // sampling by center avoids fiddly partial-cell area math
+                // for a decision that only needs to be roughly right.
+                for (int32 gy = 0; gy < kOcclusionGridSize; ++gy) {
+                    float centerY = candidateFrame.top + ((float)gy + 0.5f) * (candH / kOcclusionGridSize);
+                    if (centerY < overlapTop || centerY >= overlapBottom) continue;
+                    for (int32 gx = 0; gx < kOcclusionGridSize; ++gx) {
+                        float centerX = candidateFrame.left + ((float)gx + 0.5f) * (candW / kOcclusionGridSize);
+                        if (centerX < overlapLeft || centerX >= overlapRight) continue;
+                        covered[gy][gx] = true;
+                    }
+                }
+            }
         }
         free(front);
-
-        if (overlaps) return true;
     }
-    return false;
+
+    int32 coveredCells = 0;
+    for (int32 gy = 0; gy < kOcclusionGridSize; ++gy) {
+        for (int32 gx = 0; gx < kOcclusionGridSize; ++gx) {
+            if (covered[gy][gx]) coveredCells++;
+        }
+    }
+
+    const int32 totalCells = kOcclusionGridSize * kOcclusionGridSize;
+    return (float)coveredCells / (float)totalCells > kOcclusionThreshold;
 }
 
 
