@@ -230,12 +230,17 @@ enum {
 
 struct TrackedWindowInfo {
     BString title;
-    int32 windowIndex;
     BRect hitBox;
+    // app_server's own token for this specific window (client_window_info's
+    // server_token) -- see TitleListPreviewView::MouseDown()'s own comment
+    // for why this is what actually activates the right window. -1 for
+    // entries with no real, individually addressable window (the Rakarrack
+    // guard, the no-windows-found fallback).
+    int32 serverToken;
 
     // Explicit constructor to fix brace-enclosed initialization failures
-    TrackedWindowInfo(BString t, int32 idx, BRect box) 
-        : title(t), windowIndex(idx), hitBox(box) {}
+    TrackedWindowInfo(BString t, BRect box, int32 token = -1)
+        : title(t), hitBox(box), serverToken(token) {}
 };
 
 
@@ -466,7 +471,7 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
     if (hasAppInfo) {
         if (strcmp(info.signature, "application/x-vnd.rakarrack-haiku") == 0 || 
             BString(info.ref.name).ICompare("rakarrack") == 0) {
-            outList.push_back(TrackedWindowInfo("Rakarrack", 0, BRect()));
+            outList.push_back(TrackedWindowInfo("Rakarrack", BRect()));
             return;
         }
     }
@@ -482,14 +487,22 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
     BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
 
     if (windowTokens != nullptr && totalWindows > 0) {
-        // Track the relative 0-indexed position of windows for each specific application team
-        int32 appSpecificScriptIndex = 0;
-
         for (int32 i = 0; i < totalWindows; ++i) {
             client_window_info* wInfo = get_window_info(windowTokens[i]);
             if (wInfo == nullptr) continue;
 
-            if (wInfo->team == team) {
+            // B_NORMAL_WINDOW_FEEL only -- the same filter every other
+            // window-enumeration path in this file already applies (the
+            // occlusion check, WorkspacePreviewView, the taskbar's own
+            // window counting). This one was missing it, which is exactly
+            // why floating palette/utility windows -- WebPositive's
+            // Downloads panel, PE's HTML palette, and the like, none of
+            // them B_NORMAL_WINDOW_FEEL -- were showing up as if they were
+            // real windows to switch to. SDL mode only ever displays
+            // fCurrentWindowsList[0], so it happened to hide this by
+            // accident (whichever entry landed first was usually the real
+            // window) rather than by any actual filtering of its own.
+            if (wInfo->team == team && wInfo->feel == B_NORMAL_WINDOW_FEEL) {
                 BString subTitle(wInfo->name);
 
                 if (subTitle.Length() > 0) {
@@ -503,15 +516,13 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
                             || subTitle == "Tracker status");
                     if (!isTrackerBackgroundWindow) {
                         // Every real window -- Tracker's folders included --
-                        // gets its own entry with its own scriptable index,
+                        // gets its own entry carrying its own server_token,
                         // so TitleListPreviewWindow can list and activate
                         // each one individually instead of Tracker's windows
                         // being folded into a single combined summary line.
-                        outList.push_back(TrackedWindowInfo(subTitle, appSpecificScriptIndex, BRect()));
+                        outList.push_back(TrackedWindowInfo(subTitle, BRect(), wInfo->server_token));
                     }
                 }
-                // Always increment relative to the team's scriptable object bounds stack
-                appSpecificScriptIndex++;
             }
             free(wInfo);
         }
@@ -524,38 +535,12 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
         if (hasAppInfo) {
             if (strcmp(info.signature, "application/x-vnd.Be-TRAK") == 0) fallbackName = "Tracker";
         }
-        outList.push_back(TrackedWindowInfo(fallbackName, 0, BRect()));
+        outList.push_back(TrackedWindowInfo(fallbackName, BRect()));
     }
 }
 
 
 
-
-void ActivateApplicationWindow(team_id team, int32 windowIndex) {
-    BMessenger appMessenger(NULL, team);
-    if (appMessenger.IsValid()) {
-        // Build the precise script message that worked beautifully earlier
-        BMessage activateMsg(B_SET_PROPERTY);
-        activateMsg.AddSpecifier("Active");
-        activateMsg.AddSpecifier("Window", windowIndex);
-        activateMsg.AddBool("data", true);
-
-        BMessage reply;
-        appMessenger.SendMessage(&activateMsg, &reply, 20000, 20000);
-
-        // --- NEW LINE: Unminimize the window if it's currently folded away ---
-        BMessage unminimizeMsg(B_SET_PROPERTY);
-        unminimizeMsg.AddSpecifier("Minimized");
-        unminimizeMsg.AddSpecifier("Window", windowIndex);
-        unminimizeMsg.AddBool("data", false); // Force Minimized to false
-        
-        BMessage unminimizeReply;
-        appMessenger.SendMessage(&unminimizeMsg, &unminimizeReply, 20000, 20000);
-    }
-    
-    // Globally lift the process context into the active foreground layer
-    be_roster->ActivateApp(team);
-}
 
 
 
@@ -3655,13 +3640,15 @@ public:
 // hovered icon's windows as its own clickable row (GetTrackedWindowsFromTeam
 // now gives Tracker's own folders individual entries too, not one combined
 // summary line), and only ever activates the *specific* window clicked --
-// via the same public "Window"-by-index scripting ActivateApplicationWindow()
-// already used elsewhere in this file, not app_server's own private
-// AS_BRING_TEAM_TO_FRONT the old code used. Nothing opens on its own by
-// just hovering; the user decides.
+// via do_window_action(server_token, B_BRING_TO_FRONT, ...), the same
+// mechanism Deskbar's own per-window expander menu uses (confirmed from
+// Haiku's actual source), not BMessage "Window"-by-index scripting -- see
+// TitleListPreviewView::MouseDown()'s own comment for why that first
+// attempt picked the wrong window. Nothing opens on its own by just
+// hovering; the user decides.
 class TitleListPreviewView : public BView {
 private:
-    std::vector<TrackedWindowInfo> fEntries; // title/windowIndex from the caller; hitBox recomputed every Draw()
+    std::vector<TrackedWindowInfo> fEntries; // title/serverToken from the caller; hitBox recomputed every Draw()
     team_id fTeam;
     int32 fHoveredRow;
     float fRowHeight;
@@ -3752,14 +3739,38 @@ public:
         }
     }
 
-    // A click activates and unminimizes *that one* window (see
-    // ActivateApplicationWindow's own comment) and closes this popup --
-    // this is the entire point of the feature: the user picks, nothing
-    // happens automatically just from hovering.
+    // A click activates and unminimizes *that one* window and closes this
+    // popup -- this is the entire point of the feature: the user picks,
+    // nothing happens automatically just from hovering.
+    //
+    // Uses do_window_action(server_token, B_BRING_TO_FRONT, ...) -- the
+    // exact mechanism Deskbar's own per-window expander menu uses
+    // (src/apps/deskbar/WindowMenuItem.cpp's Invoke(), confirmed from the
+    // real Haiku source) -- not BMessage "Window"-by-index scripting like
+    // this codebase's other window-targeting code (MoveWindowToWorkspace(),
+    // SendWindowFrame()) uses. Those two are different, incompatible
+    // numbering schemes: our windowIndex was a position computed by walking
+    // get_window_order()'s global, workspace-filtered z-order stack, but
+    // the "Window" scripting specifier resolves by index into the *target
+    // app's own* internal window list (BApplication::WindowAt(), ordered by
+    // creation, not z-order, not workspace-filtered, and including that
+    // app's windows on every workspace). The two only ever happened to
+    // agree with exactly one window open -- confirmed to be exactly why
+    // clicking any Tracker title but one opened the wrong window. server_token
+    // (client_window_info's own field, already captured in
+    // GetTrackedWindowsFromTeam()) is unambiguous: it's this one window's
+    // own app_server-assigned identity, not a position in either list.
     virtual void MouseDown(BPoint point) {
         for (size_t i = 0; i < fEntries.size(); ++i) {
             if (fEntries[i].hitBox.Contains(point)) {
-                ActivateApplicationWindow(fTeam, fEntries[i].windowIndex);
+                if (fEntries[i].serverToken >= 0) {
+                    do_window_action(fEntries[i].serverToken, B_BRING_TO_FRONT, BRect(), false);
+                } else {
+                    // No real, individually addressable window for this
+                    // entry (the Rakarrack guard, or the no-windows-found
+                    // fallback) -- just bring the app forward generally.
+                    be_roster->ActivateApp(fTeam);
+                }
                 if (Window()) Window()->PostMessage(B_QUIT_REQUESTED);
                 return;
             }
