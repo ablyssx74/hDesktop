@@ -51,6 +51,7 @@
 #include <OS.h>
 #include <ParameterWeb.h>
 #include <Path.h>
+#include <Picture.h> // BPicture -- TitleListPreviewView's own round-rect clip
 #include <PopUpMenu.h>
 #include <Rect.h> 
 #include <Roster.h>
@@ -98,7 +99,15 @@ static void DebugLog(const char* fmt, ...) {
 bool autoHideEnabled;
 bool showSystemTray;
 bool dockAlwaysOnTop;
-bool fShowTitleOverlays = true;
+// Title overlays have two mutually exclusive implementations -- see
+// TitleListPreviewWindow's own comment for what "Haiku mode" replaced and
+// why. Exactly one of these should be true at a time (enforced by the
+// settings checkboxes' own message handlers, not here); both false just
+// means the feature is off entirely. Haiku mode is the default going
+// forward, but SDL mode (the original single-line hover text + auto-focus)
+// stays available as a fallback/choice per the user's own request.
+bool fShowTitleOverlaysHaiku = true;
+bool fShowTitleOverlaysSDL = false;
 bool fShowWorkspaceSwitcher = true;
 
 // Which screen edge the dock is pinned to. Left/Right are intentionally not
@@ -190,7 +199,8 @@ enum {
 	SDL_EVENT_WALLPAPER_CHANGED = SDL_USEREVENT + 1,
     MSG_AUTOHIDE_TOGGLED   = 'ahtg',
     MSG_SYSTEMTRAY_TOGGLED = 'sttg',
-    MSG_TEXTOVERLAYS_TOGGLED = 'totg',
+    MSG_TEXTOVERLAYS_TOGGLED = 'totg', // Haiku mode (the BWindow popup) -- kept the old constant name, see fShowTitleOverlaysHaiku
+    MSG_TEXTOVERLAYS_SDL_TOGGLED = 'tosd',
     MSG_THUMBNAILS_TOGGLED = 'thtg',
     MSG_ADVANCED_TOGGLED = 'advt',
     MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
@@ -461,22 +471,19 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
         }
     }
 
-    bool isTrackerApp = (hasAppInfo && (strcmp(info.signature, "application/x-vnd.Benjamin-TRAK") == 0 || 
+    bool isTrackerApp = (hasAppInfo && (strcmp(info.signature, "application/x-vnd.Benjamin-TRAK") == 0 ||
                          strcmp(info.signature, "application/x-vnd.Be-TRAK") == 0));
 
     // 2. Query raw App Server window order stack directly
-    int32 currentWorkspace = current_workspace(); 
+    int32 currentWorkspace = current_workspace();
     int32* windowTokens = nullptr;
     int32 totalWindows = 0;
-    
-    BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
 
-    BString combinedPaths = "";
-    int32 trackerValidCount = 0;
+    BPrivate::get_window_order(currentWorkspace, &windowTokens, &totalWindows);
 
     if (windowTokens != nullptr && totalWindows > 0) {
         // Track the relative 0-indexed position of windows for each specific application team
-        int32 appSpecificScriptIndex = 0; 
+        int32 appSpecificScriptIndex = 0;
 
         for (int32 i = 0; i < totalWindows; ++i) {
             client_window_info* wInfo = get_window_info(windowTokens[i]);
@@ -484,30 +491,22 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
 
             if (wInfo->team == team) {
                 BString subTitle(wInfo->name);
-                
+
                 if (subTitle.Length() > 0) {
-                    
-                    if (isTrackerApp) {
-                        // FIX A: Detect and ignore the system background wallpaper layer
-                        if ((subTitle == "Desktop" || subTitle.EndsWith("/Desktop")) && wInfo->feel == 1024) {
-                            free(wInfo);
-                            appSpecificScriptIndex++;
-                            continue; 
-                        }
-
-                        // FIX B: Detect and ignore the background progress file dialog window 
-                        if (subTitle == "Tracker status") {
-                            free(wInfo);
-                            appSpecificScriptIndex++;
-                            continue; // Bypasses the status panel safely!
-                        }
-
-                        // Gather genuine folders into a combined layout horizontal line
-                        if (trackerValidCount > 0) combinedPaths << " | ";
-                        combinedPaths << subTitle;
-                        trackerValidCount++;
-                    } else {
-                        // Standard apps: Keep your working multiline row entries completely untouched!
+                    // Tracker's own background windows (the desktop wallpaper
+                    // layer, the transient file-progress dialog) are never
+                    // real, clickable windows for the user -- filtered out
+                    // here for both apps alike, but only Tracker ever
+                    // actually produces one.
+                    bool isTrackerBackgroundWindow = isTrackerApp &&
+                        (((subTitle == "Desktop" || subTitle.EndsWith("/Desktop")) && wInfo->feel == 1024)
+                            || subTitle == "Tracker status");
+                    if (!isTrackerBackgroundWindow) {
+                        // Every real window -- Tracker's folders included --
+                        // gets its own entry with its own scriptable index,
+                        // so TitleListPreviewWindow can list and activate
+                        // each one individually instead of Tracker's windows
+                        // being folded into a single combined summary line.
                         outList.push_back(TrackedWindowInfo(subTitle, appSpecificScriptIndex, BRect()));
                     }
                 }
@@ -517,14 +516,6 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
             free(wInfo);
         }
         free(windowTokens);
-    }
-
-    // 3. Format final string output context
-    if (isTrackerApp && trackerValidCount > 0) {
-        BString finalDisplayString;
-        finalDisplayString << "Tracker (" << combinedPaths << ")";
-        // Target index 0 handles basic grouping for multi-window paths
-        outList.push_back(TrackedWindowInfo(finalDisplayString, 0, BRect()));
     }
 
     // Ultimate fallback if no window fields whatsoever were populated by the loop pass
@@ -1328,7 +1319,8 @@ private:
     BCheckBox* fAutoHideCheckbox;
     BCheckBox* fSystemTrayCheckbox;
     BCheckBox* fAutoRaiseCheckbox;
-    BCheckBox* fTextOverlaysCheckbox;
+    BCheckBox* fTextOverlaysCheckbox;    // Haiku mode
+    BCheckBox* fTextOverlaysSDLCheckbox; // SDL mode -- mutually exclusive with the above
     BCheckBox* fThumbnailsCheckbox;
     BCheckBox* fAdvancedCheckbox;
     BSlider*   fThumbnailFpsSlider;
@@ -1370,13 +1362,24 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoRaiseCheckbox);
 
-        // Row 4: Text Overlays
+        // Row 4: Text Overlays -- two mutually exclusive checkboxes sharing
+        // one row (Haiku mode's own box at its usual position, SDL mode's
+        // further right) rather than a whole new row, so nothing below has
+        // to be reflowed. See fShowTitleOverlaysHaiku/SDL's own comment for
+        // what each mode is.
         BRect textOverlaysRect(35.0f, 182.0f, 55.0f, 198.0f);
-        fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", nullptr, 
+        fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", nullptr,
             new BMessage(MSG_TEXTOVERLAYS_TOGGLED));
         fTextOverlaysCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
-        fTextOverlaysCheckbox->SetValue(fShowTitleOverlays ? B_CONTROL_ON : B_CONTROL_OFF);
+        fTextOverlaysCheckbox->SetValue(fShowTitleOverlaysHaiku ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysCheckbox);
+
+        BRect textOverlaysSDLRect(290.0f, 182.0f, 310.0f, 198.0f);
+        fTextOverlaysSDLCheckbox = new BCheckBox(textOverlaysSDLRect, "text_overlays_sdl_cb", nullptr,
+            new BMessage(MSG_TEXTOVERLAYS_SDL_TOGGLED));
+        fTextOverlaysSDLCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fTextOverlaysSDLCheckbox->SetValue(fShowTitleOverlaysSDL ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fTextOverlaysSDLCheckbox);
 
         // Row 5: Workspace Switcher
         BRect workspaceSwitcherRect(35.0f, 202.0f, 55.0f, 218.0f);
@@ -1640,7 +1643,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Enable Auto-Hide", BPoint(62.0f, 134.0f));
         DrawString("Enable System Tray", BPoint(62.0f, 154.0f));
         DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
-        DrawString("Enable Application Title Overlays", BPoint(62.0f, 194.0f));
+        DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
+        DrawString("SDL Mode", BPoint(317.0f, 194.0f));
         DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
         DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 234.0f));
 
@@ -1754,6 +1758,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSystemTrayCheckbox->SetTarget(this);
         fAutoRaiseCheckbox->SetTarget(this);
         fTextOverlaysCheckbox->SetTarget(this);
+        fTextOverlaysSDLCheckbox->SetTarget(this);
         fThumbnailsCheckbox->SetTarget(this);
         fAdvancedCheckbox->SetTarget(this);
         fThumbnailFpsSlider->SetTarget(this);
@@ -1788,7 +1793,25 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             }
 
             case MSG_TEXTOVERLAYS_TOGGLED: {
-                fShowTitleOverlays = (fTextOverlaysCheckbox->Value() == B_CONTROL_ON);
+                fShowTitleOverlaysHaiku = (fTextOverlaysCheckbox->Value() == B_CONTROL_ON);
+                // Mutually exclusive with SDL mode -- checking this one
+                // turns the other off; unchecking it just leaves both off,
+                // rather than forcing SDL mode on.
+                if (fShowTitleOverlaysHaiku && fShowTitleOverlaysSDL) {
+                    fShowTitleOverlaysSDL = false;
+                    fTextOverlaysSDLCheckbox->SetValue(B_CONTROL_OFF);
+                }
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_TEXTOVERLAYS_SDL_TOGGLED: {
+                fShowTitleOverlaysSDL = (fTextOverlaysSDLCheckbox->Value() == B_CONTROL_ON);
+                if (fShowTitleOverlaysSDL && fShowTitleOverlaysHaiku) {
+                    fShowTitleOverlaysHaiku = false;
+                    fTextOverlaysCheckbox->SetValue(B_CONTROL_OFF);
+                }
                 SaveConfiguration();
                 Invalidate();
                 break;
@@ -2917,6 +2940,11 @@ public:
 class ThumbnailPreviewWindow;
 ThumbnailPreviewWindow* gActiveThumbnailPreview = nullptr;
 
+// See TitleListPreviewWindow's own comment, right after ThumbnailPreviewWindow
+// below, for what this is.
+class TitleListPreviewWindow;
+TitleListPreviewWindow* gActiveTitleListPreview = nullptr;
+
 // Last-known-good captured frame per app team, kept independent of any
 // single popup instance's own lifetime. Without this, the occluded
 // fallback almost never had anything to freeze on in practice: covering a
@@ -3612,6 +3640,275 @@ public:
                 BWindow::MessageReceived(message);
                 break;
         }
+    }
+};
+
+
+// =========================================================================
+// Replaces the old single-line, SDL/GL-drawn hover title and its 750ms
+// auto-focus (which brought the *whole* team, every window at once, to
+// front just from lingering the mouse over the text -- awkward for an app
+// with several windows spread across workspaces, Tracker being the obvious
+// case, since there was no way to pick *which* one without already having
+// it in front). A real BWindow instead, same native-popup pattern as
+// ThumbnailPreviewWindow and WorkspacePreviewWindow: lists every one of the
+// hovered icon's windows as its own clickable row (GetTrackedWindowsFromTeam
+// now gives Tracker's own folders individual entries too, not one combined
+// summary line), and only ever activates the *specific* window clicked --
+// via the same public "Window"-by-index scripting ActivateApplicationWindow()
+// already used elsewhere in this file, not app_server's own private
+// AS_BRING_TEAM_TO_FRONT the old code used. Nothing opens on its own by
+// just hovering; the user decides.
+class TitleListPreviewView : public BView {
+private:
+    std::vector<TrackedWindowInfo> fEntries; // title/windowIndex from the caller; hitBox recomputed every Draw()
+    team_id fTeam;
+    int32 fHoveredRow;
+    float fRowHeight;
+
+public:
+    TitleListPreviewView(BRect frame, team_id team, const std::vector<TrackedWindowInfo>& entries, float rowHeight)
+        : BView(frame, "TitleListPreviewView", B_FOLLOW_ALL, B_WILL_DRAW),
+          fEntries(entries), fTeam(team), fHoveredRow(-1), fRowHeight(rowHeight) {
+        SetViewColor(rgb_color{24, 24, 28, 255});
+    }
+
+    team_id Team() const { return fTeam; }
+
+    // Called by TitleListPreviewWindow when the same team is still hovered
+    // but its window list may have changed (a window opened/closed/moved
+    // workspace) -- keeps the same popup instance and its hover state
+    // instead of tearing it down and rebuilding it every refresh.
+    void UpdateEntries(const std::vector<TrackedWindowInfo>& entries) {
+        fEntries = entries;
+        if (fHoveredRow >= static_cast<int32>(fEntries.size())) fHoveredRow = -1;
+        Invalidate();
+    }
+
+    virtual void Draw(BRect updateRect) {
+        BRect bounds = Bounds();
+
+        // Same 6px corner radius WorkspacePreviewView's own cells use, for a
+        // consistent look across the dock's popups -- but a round-rect
+        // background alone isn't enough: a full-width row highlight below
+        // is a plain FillRect, and painting that straight over the rounded
+        // background draws square corners right back on top of it. That's
+        // the clipped-square artifact. Recording the round rect into a
+        // BPicture and clipping to it means nothing drawn afterward -- the
+        // background fill, every row highlight, the text -- can paint
+        // outside the rounded outline at all, however many rows there are.
+        BPicture clipShape;
+        BeginPicture(&clipShape);
+        FillRoundRect(bounds, 6.0f, 6.0f);
+        EndPicture();
+        ClipToPicture(&clipShape);
+
+        SetHighColor(rgb_color{24, 24, 28, 255});
+        FillRoundRect(bounds, 6.0f, 6.0f);
+
+        SetFont(be_plain_font);
+        SetFontSize(11.0f);
+        BFont font;
+        GetFont(&font);
+        font_height fh;
+        font.GetHeight(&fh);
+
+        for (size_t i = 0; i < fEntries.size(); ++i) {
+            BRect rowRect(0.0f, (float)i * fRowHeight, bounds.Width(), (float)(i + 1) * fRowHeight);
+            fEntries[i].hitBox = rowRect;
+
+            bool hovered = (static_cast<int32>(i) == fHoveredRow);
+            if (hovered) {
+                SetHighColor(rgb_color{70, 110, 200, 255});
+                FillRect(rowRect);
+            }
+
+            SetHighColor(hovered ? rgb_color{255, 255, 255, 255} : rgb_color{220, 220, 225, 255});
+            BString truncTitle = fEntries[i].title;
+            font.TruncateString(&truncTitle, B_TRUNCATE_END, bounds.Width() - 16.0f);
+            DrawString(truncTitle.String(),
+                BPoint(8.0f, rowRect.top + fh.ascent + ((fRowHeight - (fh.ascent + fh.descent)) / 2.0f)));
+        }
+
+        // Drop the picture clip before the border stroke -- StrokeRoundRect
+        // draws straddling the outline itself, and the fill's clip would
+        // otherwise cut off its outer half.
+        ConstrainClippingRegion(NULL);
+        SetHighColor(rgb_color{48, 50, 58, 255});
+        StrokeRoundRect(bounds, 6.0f, 6.0f);
+    }
+
+    virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) {
+        int32 newHover = -1;
+        for (size_t i = 0; i < fEntries.size(); ++i) {
+            if (fEntries[i].hitBox.Contains(point)) {
+                newHover = static_cast<int32>(i);
+                break;
+            }
+        }
+        if (newHover != fHoveredRow) {
+            fHoveredRow = newHover;
+            Invalidate();
+        }
+    }
+
+    // A click activates and unminimizes *that one* window (see
+    // ActivateApplicationWindow's own comment) and closes this popup --
+    // this is the entire point of the feature: the user picks, nothing
+    // happens automatically just from hovering.
+    virtual void MouseDown(BPoint point) {
+        for (size_t i = 0; i < fEntries.size(); ++i) {
+            if (fEntries[i].hitBox.Contains(point)) {
+                ActivateApplicationWindow(fTeam, fEntries[i].windowIndex);
+                if (Window()) Window()->PostMessage(B_QUIT_REQUESTED);
+                return;
+            }
+        }
+    }
+};
+
+class TitleListPreviewWindow : public BWindow {
+private:
+    BMessageRunner* fTicker;
+    TitleListPreviewView* fView;
+    HaikuRect fAnchorIconRect; // the hovered taskbar icon's own screen-space bounds
+    BPoint fAnchorScreenPoint; // for horizontal centering -- see ResizeAndReposition()
+    team_id fTeam;
+    float fRowHeight;
+    static constexpr float kPanelWidth = 240.0f;
+
+public:
+    TitleListPreviewWindow(BPoint anchorScreenPoint, HaikuRect anchorIconRect,
+        team_id team, const std::vector<TrackedWindowInfo>& entries)
+        : BWindow(BRect(0, 0, 10, 10), "Window Titles",
+                  B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
+          fTicker(nullptr), fView(nullptr), fAnchorIconRect(anchorIconRect),
+          fAnchorScreenPoint(anchorScreenPoint), fTeam(team), fRowHeight(0.0f) {
+
+        BFont font(be_plain_font);
+        font.SetSize(11.0f);
+        font_height fh;
+        font.GetHeight(&fh);
+        fRowHeight = fh.ascent + fh.descent + fh.leading + 10.0f;
+
+        ResizeAndReposition(entries.size());
+
+        fView = new TitleListPreviewView(Bounds(), team, entries, fRowHeight);
+        AddChild(fView);
+
+        // Self-closing poll, same 100ms cadence and relevance check as
+        // WorkspacePreviewWindow's own 'tick' -- no reason for this one to
+        // run any faster, since nothing here needs to redraw on a timer,
+        // only to notice when the mouse has left.
+        BMessage tickMessage('tltk');
+        fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 100000);
+    }
+
+    virtual ~TitleListPreviewWindow() {
+        delete fTicker;
+        gActiveTitleListPreview = nullptr;
+    }
+
+    team_id Team() const { return fTeam; }
+
+    // Sizes and positions this window for a given row count, anchored the
+    // same way the constructor originally placed it (horizontally centered
+    // on fAnchorScreenPoint, opened above/below fAnchorIconRect depending on
+    // dock location). Pulled out of the constructor so a later refresh with
+    // a *different* row count (see MessageReceived's 'tlup' case) can call
+    // it again -- without this, a popup first built while Tracker still had
+    // only one window enumerated would stay sized for one row forever, and
+    // a second row added by a later refresh would be drawn (and hit-tested)
+    // entirely outside the window's own actual bounds: invisible, or
+    // visible but unclickable depending on exactly where it falls. That's
+    // confirmed to be exactly what "the top title flickers off before I can
+    // click it, but the bottom one works" looks like -- the bottom row was
+    // there from the start and fits; a row added afterward doesn't.
+    void ResizeAndReposition(size_t rowCount) {
+        if (rowCount == 0) rowCount = 1;
+        float panelH = fRowHeight * (float)rowCount + 2.0f; // +2 for the 1px stroke on each edge
+
+        BScreen screen(this);
+        BRect screenFrame = screen.Frame();
+
+        float targetX = fAnchorScreenPoint.x - (kPanelWidth / 2.0f);
+        if (targetX < 10.0f) targetX = 10.0f;
+        if (targetX + kPanelWidth > screenFrame.right - 10.0f) targetX = screenFrame.right - 10.0f - kPanelWidth;
+
+        // Bottom dock: open upward above the icon. Top dock: open downward below it.
+        float targetY;
+        if (gDockLocation == kDockLocationTop) {
+            targetY = fAnchorIconRect.bottom + 12.0f;
+        } else {
+            targetY = fAnchorIconRect.top - panelH - 12.0f;
+        }
+        if (targetY < 10.0f) targetY = 10.0f;
+        if (targetY + panelH > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelH;
+
+        MoveTo(targetX, targetY);
+        ResizeTo(kPanelWidth, panelH);
+    }
+
+    // Thread-safe from any thread -- unlike the constructor's own direct
+    // fView setup (safe only because it runs before Show(), while this
+    // window has no message-loop thread of its own yet to race with), this
+    // can be called on an *already-shown* popup from RenderFrame()'s own
+    // thread on every hover refresh. fView->UpdateEntries() calls
+    // Invalidate(), which asserts this window is locked -- calling it
+    // directly from another thread without that lock is exactly what
+    // crashed here (BView::Invalidate() -> "Looper must be locked").
+    // Posting a message instead defers the actual call to MessageReceived()
+    // below, which BLooper's own dispatch already runs with the lock held,
+    // the same reason ThumbnailPreviewWindow::SetOccluded() posts rather
+    // than calling through directly. The heap-allocated copy crosses only
+    // within this same process/team (a local PostMessage, not scripting IPC
+    // to another app), so a raw pointer hand-off is fine -- MessageReceived
+    // takes ownership and deletes it.
+    void UpdateEntries(const std::vector<TrackedWindowInfo>& entries) {
+        BMessage msg('tlup');
+        msg.AddPointer("entries", new std::vector<TrackedWindowInfo>(entries));
+        PostMessage(&msg);
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        if (message->what == 'tlup') {
+            void* ptr = nullptr;
+            if (message->FindPointer("entries", &ptr) == B_OK && ptr != nullptr) {
+                std::vector<TrackedWindowInfo>* entries = static_cast<std::vector<TrackedWindowInfo>*>(ptr);
+                // Resize *before* handing the new entries to the view --
+                // see ResizeAndReposition's own comment for why a changed
+                // row count needs this every refresh, not just at
+                // construction. B_FOLLOW_ALL on fView means ResizeTo() here
+                // already resizes it to match; no separate call needed.
+                ResizeAndReposition(entries->size());
+                if (fView != nullptr) {
+                    fView->UpdateEntries(*entries);
+                }
+                delete entries;
+            }
+            return;
+        }
+        if (message->what == 'tltk') {
+            if (IsHidden()) return;
+
+            BPoint screenMousePos;
+            uint32 buttons;
+            if (ChildAt(0)) {
+                ChildAt(0)->GetMouse(&screenMousePos, &buttons, false);
+                ChildAt(0)->ConvertToScreen(&screenMousePos);
+
+                bool stillRelevant = Frame().Contains(screenMousePos) ||
+                    (screenMousePos.x >= fAnchorIconRect.left && screenMousePos.x <= fAnchorIconRect.right &&
+                     screenMousePos.y >= fAnchorIconRect.top - 40.0f && screenMousePos.y <= fAnchorIconRect.bottom + 40.0f);
+
+                if (!stillRelevant) {
+                    PostMessage(B_QUIT_REQUESTED);
+                }
+            }
+            return;
+        }
+        BWindow::MessageReceived(message);
     }
 };
 
@@ -8058,7 +8355,7 @@ void SyncDockWithRunningDeskbarApps() {
 		  // Suppressed while the Tracker right-click popup is open, so navigating its
 		  // folder submenus near the icon doesn't also trigger the hover title overlay's
 		  // restore-minimized-window behavior.
-		  if (fShowTitleOverlays && !fTrackerMenuIsActive) {
+		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL) && !fTrackerMenuIsActive) {
 			bool cursorNearIcon = (gDockLocation == kDockLocationTop)
 			    ? (fMouseY >= iconBounds.top && fMouseY <= (iconBounds.bottom + 40.0f))
 			    : (fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom);
@@ -8129,6 +8426,37 @@ void SyncDockWithRunningDeskbarApps() {
 			            gActiveThumbnailPreview->Quit();
 			        }
 			        gActiveThumbnailPreview = nullptr;
+			    }
+
+			    // Clickable window-title list popup -- same native BWindow
+			    // pattern as the thumbnail preview above. See
+			    // TitleListPreviewWindow's own comment for why this replaced
+			    // the old single-line hover text and its 750ms auto-focus.
+			    if (fShowTitleOverlaysHaiku && !fCurrentWindowsList.empty()) {
+			        if (gActiveTitleListPreview == nullptr ||
+			            gActiveTitleListPreview->Team() != activeTaskWin.teamId) {
+			            if (gActiveTitleListPreview != nullptr) {
+			                if (gActiveTitleListPreview->Lock()) {
+			                    gActiveTitleListPreview->Quit();
+			                }
+			                gActiveTitleListPreview = nullptr;
+			            }
+
+			            BPoint anchorScreenPoint(listBaseX, listBaseY);
+			            gActiveTitleListPreview = new TitleListPreviewWindow(anchorScreenPoint, iconBounds,
+			                activeTaskWin.teamId, fCurrentWindowsList);
+			            gActiveTitleListPreview->Show();
+			        } else {
+			            // Same popup, same app -- just refresh its list in place
+			            // (a window may have opened/closed/moved workspace since
+			            // the last 300ms refresh) instead of tearing it down.
+			            gActiveTitleListPreview->UpdateEntries(fCurrentWindowsList);
+			        }
+			    } else if (gActiveTitleListPreview != nullptr) {
+			        if (gActiveTitleListPreview->Lock()) {
+			            gActiveTitleListPreview->Quit();
+			        }
+			        gActiveTitleListPreview = nullptr;
 			    }
 
 			    fShouldDrawList = true;
@@ -8748,11 +9076,25 @@ void SyncDockWithRunningDeskbarApps() {
         fLastCalculatedWidth = totalCalculatedWidth;
 
         // =========================================================================
-        // DEFERRED RENDERING PASS: UNIFIED INTERACTIVE HOVER TITLE OVERLAY
+        // SDL MODE: SINGLE-LINE HOVER TITLE + AUTO-FOCUS
         // =========================================================================
-        if (fShouldDrawList && !fCurrentWindowsList.empty()) {
+        // The original title-overlay implementation, kept available as an
+        // explicit opt-in choice alongside Haiku mode's BWindow popup (see
+        // TitleListPreviewWindow's own comment for the tradeoffs of each).
+        // Draws one line of text straight into this SDL/GL surface (no
+        // native popup), and auto-activates the hovered team -- every one
+        // of its windows -- after 750ms of hovering that text, with no
+        // click required. GetTrackedWindowsFromTeam() now gives Tracker's
+        // own windows individual entries rather than one combined summary
+        // string (added for Haiku mode's clickable list), so with several
+        // Tracker windows open, this mode shows only whichever one happens
+        // to be frontmost, not a combined line the way it originally did --
+        // a minor, accepted side effect of the two modes sharing one list,
+        // rather than reintroducing Tracker-specific combining just for
+        // this one.
+        if (fShowTitleOverlaysSDL && fShouldDrawList && !fCurrentWindowsList.empty()) {
             BString displayTitle = fCurrentWindowsList[0].title;
-            
+
             float textEstimatedWidth = 240.0f;
             BRect unifiedBox;
             unifiedBox.left   = listBaseX - (textEstimatedWidth / 2.0f);
@@ -8774,7 +9116,7 @@ void SyncDockWithRunningDeskbarApps() {
 
             if (fMouseX >= unifiedBox.left && fMouseX <= unifiedBox.right &&
                 fMouseY >= unifiedBox.top  && fMouseY <= unifiedBox.bottom) {
-                
+
                 // 1. If this is the very first frame the mouse entered this box, start the stopwatch
                 if (hoverStartTime == 0 || fHoveredTeam != lastCheckedTeam) {
                     hoverStartTime = currentTime;
@@ -8783,7 +9125,7 @@ void SyncDockWithRunningDeskbarApps() {
 
                 // 2. Compute the difference. 0.75 seconds translates to exactly 750,000 microseconds.
                 if (currentTime - hoverStartTime >= 750000) {
-                    
+
                     // =========================================================================
                     // LOW-LEVEL HOVER FOCUS PIPELINE
                     // =========================================================================
@@ -8793,13 +9135,13 @@ void SyncDockWithRunningDeskbarApps() {
                     } else {
                         be_roster->ActivateApp(fHoveredTeam);
                     }
-                    
+
                     // Flush low-level bring-to-front message straight to the app_server link
                     BPrivate::AppServerLink link;
                     link.StartMessage(AS_BRING_TEAM_TO_FRONT);
                     link.Attach<team_id>(fHoveredTeam);
                     link.Flush();
-                    
+
                     // Wake up hidden/minimized windows belonging to this specific team thread context
                     int32 systemCount = 0;
                     int32 currentWorkspace = current_workspace();
@@ -8820,18 +9162,29 @@ void SyncDockWithRunningDeskbarApps() {
                         free(systemTokens);
                     }
                     // =========================================================================
-                    
+
                     // Optional: Reset timer after execution so it doesn't endlessly refire link updates
                     // if you keep your mouse parked on the text bar.
-                    hoverStartTime = currentTime; 
+                    hoverStartTime = currentTime;
                 }
             } else {
                 // The cursor slipped out of the box boundaries; clear the stopwatch register instantly!
                 hoverStartTime = 0;
             }
-            
+
             DrawNativeSystemText(displayTitle.String(), listBaseX, listBaseY, gDockLocation != kDockLocationTop);
-        } else if (!fShouldDrawList) {
+        }
+
+        // =========================================================================
+        // HOVER STATE CLEANUP
+        // =========================================================================
+        // The window-title list and thumbnail popups are both real BWindows
+        // managed up where the icon hover is actually detected (see
+        // TitleListPreviewWindow's own comment for why Haiku mode replaced
+        // this block's old job of drawing a hover title and auto-focusing after
+        // 750ms) -- this only needs to clear the tracked-team state and
+        // close both popups once the mouse isn't over any icon at all.
+        if (!fShouldDrawList) {
             fHoveredTeam = -1;
             fCurrentWindowsList.clear();
             if (gActiveThumbnailPreview != nullptr) {
@@ -8839,6 +9192,38 @@ void SyncDockWithRunningDeskbarApps() {
                     gActiveThumbnailPreview->Quit();
                 }
                 gActiveThumbnailPreview = nullptr;
+            }
+            if (gActiveTitleListPreview != nullptr) {
+                // fShouldDrawList going false only means the cursor left
+                // the icon's own tight proximity zone (iconBounds +/- 40px)
+                // -- tuned for the old single-line hover text, which never
+                // needed more room than that. This popup can be much
+                // taller with several rows, so reaching a row further up
+                // than 40px means exceeding that zone while the cursor is
+                // still genuinely over the popup itself. Confirmed to be
+                // exactly what made every row but the closest one
+                // unclickable: this cleanup ran the instant the zone was
+                // exceeded, with no real grace period (the 2-second
+                // countdown above never actually triggers here, since
+                // fShouldDrawList is already false the same frame it's
+                // checked -- it guards a case that can't happen the way
+                // it's currently wired). Checking the popup's own real
+                // Frame() here instead means the outer loop only closes it
+                // once the cursor has left that too; the popup's own
+                // 'tltk' tick (see TitleListPreviewWindow::MessageReceived)
+                // already does the equivalent check independently, so this
+                // is redundant, not a substitute -- both just need to agree.
+                BPoint mousePt((float)fMouseX, (float)fMouseY);
+                if (gActiveTitleListPreview->Lock()) {
+                    if (!gActiveTitleListPreview->Frame().Contains(mousePt)) {
+                        gActiveTitleListPreview->Quit(); // Quit() unlocks internally
+                        gActiveTitleListPreview = nullptr;
+                    } else {
+                        gActiveTitleListPreview->Unlock();
+                    }
+                }
+                // Lock() failing just means try again next frame -- leave
+                // the pointer alone rather than risk leaking the window.
             }
         }
 
@@ -9407,7 +9792,8 @@ void SaveConfiguration() {
             settingsMsg.AddBool("auto_hide", autoHideEnabled);
             settingsMsg.AddBool("system_tray", showSystemTray);
             settingsMsg.AddBool("auto_raise", dockAlwaysOnTop);
-            settingsMsg.AddBool("text_overlays", fShowTitleOverlays);
+            settingsMsg.AddBool("text_overlays", fShowTitleOverlaysHaiku);
+            settingsMsg.AddBool("text_overlays_sdl", fShowTitleOverlaysSDL);
             settingsMsg.AddBool("window_thumbnails", fShowWindowThumbnails);
             settingsMsg.AddBool("advanced_options", fShowAdvancedOptions);
             settingsMsg.AddInt32("thumbnail_fps", fThumbnailCaptureFps);
@@ -9464,7 +9850,8 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("auto_hide", &valBool) == B_OK) autoHideEnabled = valBool;
                 if (settingsMsg.FindBool("system_tray", &valBool) == B_OK) showSystemTray = valBool;
                 if (settingsMsg.FindBool("auto_raise", &valBool) == B_OK) dockAlwaysOnTop = valBool;
-                if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlays = valBool;
+                if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlaysHaiku = valBool;
+                if (settingsMsg.FindBool("text_overlays_sdl", &valBool) == B_OK) fShowTitleOverlaysSDL = valBool;
                 if (settingsMsg.FindBool("window_thumbnails", &valBool) == B_OK) fShowWindowThumbnails = valBool;
                 if (settingsMsg.FindBool("advanced_options", &valBool) == B_OK) fShowAdvancedOptions = valBool;
                 if (settingsMsg.FindInt32("thumbnail_fps", &valInt32) == B_OK) fThumbnailCaptureFps = valInt32;
