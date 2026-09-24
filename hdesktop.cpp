@@ -3858,9 +3858,14 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
 
 // =========================================================================
 // Opened by right-clicking the dock's workspace switcher widget. Shows a
-// simple grid of workspace cells with a fixed-size labeled box per window
-// (not a live thumbnail, matching Haiku's own Workspaces app), and lets you
-// drag a box onto a different cell to move that window there.
+// grid of workspace cells, each a scaled-down "mini desktop" with every
+// window drawn at its own real on-screen position and size -- matching
+// Haiku's own Workspaces app, not a fixed-size flow-grid layout of boxes.
+// Dragging a box moves the real window live, in real screen coordinates, as
+// the drag crosses the mini desktop -- including across cells, where it also
+// reassigns the window's workspace once the drag is released. Still no live
+// thumbnail image per window (that's ThumbnailPreviewWindow's own job); each
+// box is just a plain rect (with an icon/title where there's room for them).
 // =========================================================================
 class WorkspacePreviewWindow;
 WorkspacePreviewWindow* gActiveWorkspacePreview = nullptr;
@@ -3870,12 +3875,39 @@ private:
     struct WindowBox {
         team_id teamId;
         BString title;
+        // Which cell this box is currently drawn in. Normally the window's
+        // real assigned workspace, but temporarily overridden to track
+        // whichever cell the cursor is over while this box is being dragged
+        // across cells -- see MouseMoved. The real workspace membership only
+        // actually changes once, on MouseUp.
         int32 workspaceIndex;
-        BRect frame; // last-drawn box rect, cached here for hit-testing
+        // The window's real, on-screen CLIENT frame (screen coordinates,
+        // same convention client_window_info and the "Frame" scripting
+        // property both use) -- what a live drag repositions, and what
+        // actually gets sent to reposition the real window. Kept here
+        // (rather than re-querying app_server every Draw()) so a drag can
+        // update it optimistically as soon as this view commands a move,
+        // without waiting on a round trip through the target app's own
+        // message loop.
+        BRect windowFrame;
+        // How much the window's decorator (tab/title bar above, border
+        // around) extends beyond windowFrame -- from client_window_info's
+        // own tab_height/border_size. windowFrame alone understates how
+        // much screen space this window actually occupies; see
+        // DecoratedFrame()'s own comment for why that matters.
+        float tabHeight;
+        float borderSize;
+        BRect frame; // last-drawn box rect (cell-local), cached for hit-testing
     };
 
     std::vector<WindowBox> fBoxes;
     std::vector<BRect> fCellRects;
+    // Paired 1:1 with fCellRects -- the aspect-preserving, centered sub-rect
+    // within each cell that actually represents the screen (see
+    // ComputeMiniDesktopRect's own comment). Window boxes and drag math both
+    // map through this, not the raw cell rect, so a non-screen-shaped cell
+    // never distorts real window proportions.
+    std::vector<BRect> fMiniDesktopRects;
     int fGridCols;
     int fGridRows;
     int fWorkspaceCount;
@@ -3884,6 +3916,23 @@ private:
     int32 fDragBoxIndex;
     BPoint fDragCurrentPoint;
     int32 fDropTargetWorkspace;
+    // The box's real frame and workspace at the moment the drag started --
+    // needed both to restore it exactly if the drag is released outside
+    // every cell, and to know whether MouseUp's final workspace differs from
+    // where it actually started (fBoxes[].workspaceIndex may already have
+    // been overwritten several times by then, per-cell, during the drag).
+    BRect fDragOriginalFrame;
+    int32 fDragOriginalWorkspace;
+    // Offset, in real screen pixels, between where the box was actually
+    // grabbed and its own top-left -- keeps the window moving relative to
+    // the cursor instead of snapping a corner under it on the first move.
+    BPoint fDragGrabOffsetReal;
+    // Resolved once at MouseDown (see ResolveWindowByTitle's own comment)
+    // and reused for every live move during the drag; -1 means resolution
+    // failed, so the drag stays visual-only -- no live window movement, no
+    // workspace reassignment on drop.
+    BMessenger fDragAppMessenger;
+    int32 fDragWindowIndex;
 
     BMessageRunner* fRefreshTicker;
 
@@ -3897,6 +3946,7 @@ public:
         : BView(frame, "WorkspacePreviewView", B_FOLLOW_ALL, B_WILL_DRAW),
           fGridCols(1), fGridRows(1), fWorkspaceCount(1),
           fDragging(false), fDragBoxIndex(-1), fDropTargetWorkspace(-1),
+          fDragOriginalWorkspace(-1), fDragWindowIndex(-1),
           fRefreshTicker(nullptr) {
         SetViewColor(rgb_color{24, 24, 28, 255});
         RefreshWindowList();
@@ -3942,7 +3992,14 @@ public:
     virtual void AttachedToWindow() {
         BView::AttachedToWindow();
         BMessage tickMsg('wtik');
-        fRefreshTicker = new BMessageRunner(BMessenger(this), &tickMsg, 500000); // 2x/sec
+        // 150ms (~6.6Hz), not the 500ms this used to be -- this popup is
+        // meant to reflect the real, current window layout, including
+        // moves/closes/new windows that happen outside of dragging a box in
+        // here (someone else's window being dragged by its own title bar
+        // while this is open, an app opening a new window, etc.). 500ms was
+        // visibly stale for that; RefreshWindowList()'s own cost (a handful
+        // of get_window_info() calls) stays trivial at this rate.
+        fRefreshTicker = new BMessageRunner(BMessenger(this), &tickMsg, 150000);
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -3984,6 +4041,10 @@ public:
                             box.teamId = info->team;
                             box.title = title;
                             box.workspaceIndex = ws;
+                            box.windowFrame.Set(info->window_left, info->window_top,
+                                info->window_right, info->window_bottom);
+                            box.tabHeight = info->tab_height;
+                            box.borderSize = info->border_size;
                             fBoxes.push_back(box);
                         }
                     }
@@ -4003,7 +4064,11 @@ public:
         float cellW = (bounds.Width()  - gap * (fGridCols + 1)) / fGridCols;
         float cellH = (bounds.Height() - gap * (fGridRows + 1)) / fGridRows;
 
+        BScreen screen(Window());
+        BRect screenFrame = screen.Frame();
+
         fCellRects.clear();
+        fMiniDesktopRects.clear();
         int32 activeWs = current_workspace();
 
         for (int ws = 0; ws < fWorkspaceCount; ++ws) {
@@ -4013,10 +4078,26 @@ public:
             float top  = gap + row * (cellH + gap);
             BRect cellRect(left, top, left + cellW, top + cellH);
             fCellRects.push_back(cellRect);
+            BRect miniRect = ComputeMiniDesktopRect(cellRect, screenFrame);
+            fMiniDesktopRects.push_back(miniRect);
 
             bool isActive = (ws == activeWs);
             bool isDropTarget = (fDragging && fDropTargetWorkspace == ws);
 
+            // Drawn (and, per MouseDown/MouseMoved below, hit-tested) at
+            // miniRect -- the aspect-correct, letterboxed sub-rect within
+            // this grid slot -- never the full cellRect. A screen whose own
+            // aspect ratio doesn't match the grid slot's leaves a real gap
+            // between them (e.g. a 1920x1080 screen in an ~220x140 slot),
+            // and coloring/hit-testing that whole slot as if it were the
+            // screen used to make dragging into that gap look like it was
+            // still safely "on screen" when it geometrically wasn't --
+            // confirmed the hard way (a drag landing the real window well
+            // past the actual screen edge) even with the position math
+            // itself clamped. Tightening what's drawn and interactive to
+            // miniRect removes the illusion at its source: what's visibly a
+            // workspace now IS, pixel for pixel, all of and only the
+            // screen it represents.
             if (isDropTarget) {
                 SetHighColor(rgb_color{80, 140, 255, 255});
             } else if (isActive) {
@@ -4024,17 +4105,17 @@ public:
             } else {
                 SetHighColor(rgb_color{60, 60, 68, 255});
             }
-            FillRoundRect(cellRect, 6.0f, 6.0f);
+            FillRoundRect(miniRect, 6.0f, 6.0f);
 
             SetHighColor(rgb_color{15, 15, 18, 255});
-            StrokeRoundRect(cellRect, 6.0f, 6.0f);
+            StrokeRoundRect(miniRect, 6.0f, 6.0f);
 
             SetFont(be_bold_font);
             SetFontSize(10.0f);
             SetHighColor(rgb_color{230, 230, 235, 255});
             BString wsLabel;
             wsLabel << (ws + 1);
-            DrawString(wsLabel.String(), BPoint(cellRect.right - 14.0f, cellRect.bottom - 6.0f));
+            DrawString(wsLabel.String(), BPoint(miniRect.right - 14.0f, miniRect.bottom - 6.0f));
         }
 
         SetFont(be_plain_font);
@@ -4042,79 +4123,67 @@ public:
         BFont font;
         GetFont(&font);
 
-        float boxW = 70.0f, boxH = 42.0f, boxGap = 6.0f;
-        std::vector<int> boxesPerCellCount(fWorkspaceCount, 0);
-
-        for (size_t i = 0; i < fBoxes.size(); ++i) {
-            if (fDragging && static_cast<int32>(i) == fDragBoxIndex) continue; // drawn as the drag ghost instead
-
+        // Each box is drawn at its window's real on-screen position and size,
+        // scaled down into whichever cell it currently belongs to (normally
+        // its real workspace, but see WindowBox::workspaceIndex's own comment
+        // for the mid-drag exception) -- matching Haiku's own Workspaces app,
+        // rather than the fixed-size flow-grid layout this used before.
+        //
+        // Drawn back-to-front (highest index first), the opposite of
+        // fBoxes' own order: RefreshWindowList() appends each workspace's
+        // windows in get_window_order()'s own frontmost-first order (the
+        // same fact IsThumbnailCandidateOccluded's own comment already
+        // relies on), so index 0 within a workspace is whatever's actually
+        // on top on the real screen. Painting in that same forward order
+        // would draw it *first*, only for every window behind it to then
+        // get painted over it -- inverting the real stacking so a buried,
+        // inactive window's box visually covers the active one's. Painting
+        // back-to-front makes the frontmost box land on top here too, same
+        // as it is for real.
+        for (size_t ri = fBoxes.size(); ri > 0; --ri) {
+            size_t i = ri - 1;
             int ws = fBoxes[i].workspaceIndex;
-            if (ws < 0 || ws >= static_cast<int>(fCellRects.size())) continue;
+            if (ws < 0 || ws >= static_cast<int>(fMiniDesktopRects.size())) continue;
 
-            BRect cell = fCellRects[ws];
-            int idxInCell = boxesPerCellCount[ws]++;
-
-            int colsInCell = static_cast<int>((cell.Width() - boxGap) / (boxW + boxGap));
-            if (colsInCell < 1) colsInCell = 1;
-            int col = idxInCell % colsInCell;
-            int row = idxInCell / colsInCell;
-
-            float bx = cell.left + boxGap + col * (boxW + boxGap);
-            float by = cell.top + boxGap + row * (boxH + boxGap);
-            BRect boxRect(bx, by, bx + boxW, by + boxH);
-
-            if (boxRect.bottom > cell.bottom - boxGap) continue; // out of room in this cell; simple scope skips overflow
-
+            BRect miniRect = fMiniDesktopRects[ws];
+            BRect boxRect = ScreenFrameToMini(DecoratedFrame(fBoxes[i]), miniRect, screenFrame);
             fBoxes[i].frame = boxRect;
 
-            SetHighColor(rgb_color{235, 235, 240, 255});
+            bool isBeingDragged = (fDragging && static_cast<int32>(i) == fDragBoxIndex);
+
+            SetHighColor(isBeingDragged ? rgb_color{255, 255, 255, 255} : rgb_color{235, 235, 240, 255});
             FillRect(boxRect);
-            SetHighColor(rgb_color{120, 120, 130, 255});
+            SetHighColor(isBeingDragged ? rgb_color{80, 140, 255, 255} : rgb_color{120, 120, 130, 255});
             StrokeRect(boxRect);
 
-            float textLeft = bx + 4.0f;
-            BBitmap* icon = GetIconForTeam(fBoxes[i].teamId);
-            if (icon != nullptr) {
-                // Respect the icon's own per-pixel alpha instead of copying its
-                // background in solid, which otherwise shows as an opaque box.
-                SetDrawingMode(B_OP_ALPHA);
-                SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-                DrawBitmap(icon, BPoint(bx + 4.0f, by + (boxH / 2.0f) - 8.0f));
-                SetDrawingMode(B_OP_COPY);
-                textLeft += 20.0f;
+            // Real proportional sizing means a box can end up too small for
+            // an icon, or for any text at all -- both are skipped rather
+            // than overflowing a tiny rect or drawing over a neighbor.
+            if (boxRect.Width() >= 20.0f && boxRect.Height() >= 14.0f) {
+                float textLeft = boxRect.left + 3.0f;
+                if (boxRect.Width() >= 32.0f) {
+                    BBitmap* icon = GetIconForTeam(fBoxes[i].teamId);
+                    if (icon != nullptr) {
+                        // Respect the icon's own per-pixel alpha instead of
+                        // copying its background in solid, which otherwise
+                        // shows as an opaque box.
+                        SetDrawingMode(B_OP_ALPHA);
+                        SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+                        DrawBitmap(icon, BPoint(boxRect.left + 2.0f,
+                            boxRect.top + (boxRect.Height() / 2.0f) - 8.0f));
+                        SetDrawingMode(B_OP_COPY);
+                        textLeft += 18.0f;
+                    }
+                }
+
+                if (textLeft < boxRect.right - 4.0f) {
+                    SetHighColor(rgb_color{20, 20, 24, 255});
+                    BString truncTitle = fBoxes[i].title;
+                    font.TruncateString(&truncTitle, B_TRUNCATE_END, (boxRect.right - 3.0f) - textLeft);
+                    DrawString(truncTitle.String(),
+                        BPoint(textLeft, boxRect.top + (boxRect.Height() / 2.0f) + 3.0f));
+                }
             }
-
-            SetHighColor(rgb_color{20, 20, 24, 255});
-            BString truncTitle = fBoxes[i].title;
-            font.TruncateString(&truncTitle, B_TRUNCATE_END, (bx + boxW - 4.0f) - textLeft);
-            DrawString(truncTitle.String(), BPoint(textLeft, by + (boxH / 2.0f) + 4.0f));
-        }
-
-        if (fDragging && fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
-            BRect ghost(fDragCurrentPoint.x - (boxW / 2.0f), fDragCurrentPoint.y - (boxH / 2.0f),
-                        fDragCurrentPoint.x + (boxW / 2.0f), fDragCurrentPoint.y + (boxH / 2.0f));
-
-            SetDrawingMode(B_OP_ALPHA);
-            SetHighColor(rgb_color{235, 235, 240, 180});
-            FillRect(ghost);
-            SetHighColor(rgb_color{80, 140, 255, 220});
-            StrokeRect(ghost);
-            SetDrawingMode(B_OP_COPY);
-
-            float ghostTextLeft = ghost.left + 4.0f;
-            BBitmap* ghostIcon = GetIconForTeam(fBoxes[fDragBoxIndex].teamId);
-            if (ghostIcon != nullptr) {
-                SetDrawingMode(B_OP_ALPHA);
-                SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-                DrawBitmap(ghostIcon, BPoint(ghost.left + 4.0f, ghost.top + (boxH / 2.0f) - 8.0f));
-                SetDrawingMode(B_OP_COPY);
-                ghostTextLeft += 20.0f;
-            }
-
-            SetHighColor(rgb_color{20, 20, 24, 255});
-            BString truncTitle = fBoxes[fDragBoxIndex].title;
-            font.TruncateString(&truncTitle, B_TRUNCATE_END, (ghost.right - 4.0f) - ghostTextLeft);
-            DrawString(truncTitle.String(), BPoint(ghostTextLeft, ghost.top + (boxH / 2.0f) + 4.0f));
         }
     }
 
@@ -4125,15 +4194,39 @@ public:
                 fDragBoxIndex = static_cast<int32>(i);
                 fDragCurrentPoint = point;
                 fDropTargetWorkspace = fBoxes[i].workspaceIndex;
+                fDragOriginalFrame = fBoxes[i].windowFrame;
+                fDragOriginalWorkspace = fBoxes[i].workspaceIndex;
+
+                // Resolved once up front rather than by title on every move
+                // -- see ResolveWindowByTitle's own comment. A failed
+                // resolve just means this drag stays visual-only: no live
+                // window movement, no workspace reassignment on drop.
+                fDragWindowIndex = ResolveWindowByTitle(fBoxes[i].teamId, fBoxes[i].title, fDragAppMessenger);
+
+                // Offset, in real screen pixels, between where the box was
+                // actually grabbed and its own top-left -- keeps the window
+                // moving relative to the cursor instead of snapping a corner
+                // under it on the very first move.
+                int ws = fBoxes[i].workspaceIndex;
+                if (ws >= 0 && ws < static_cast<int32>(fMiniDesktopRects.size())) {
+                    BScreen screen(Window());
+                    BPoint realGrabPoint = MiniPointToScreen(point, fMiniDesktopRects[ws], screen.Frame());
+                    fDragGrabOffsetReal = realGrabPoint - fDragOriginalFrame.LeftTop();
+                } else {
+                    fDragGrabOffsetReal = BPoint(0.0f, 0.0f);
+                }
+
                 SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
                 Invalidate();
                 return;
             }
         }
 
-        // Not on a box -- clicking empty cell space just switches to that workspace.
-        for (size_t ws = 0; ws < fCellRects.size(); ++ws) {
-            if (fCellRects[ws].Contains(point)) {
+        // Not on a box -- clicking empty mini-desktop space just switches to
+        // that workspace. fMiniDesktopRects, not fCellRects -- see its own
+        // comment in Draw() for why only the tightened rect counts.
+        for (size_t ws = 0; ws < fMiniDesktopRects.size(); ++ws) {
+            if (fMiniDesktopRects[ws].Contains(point)) {
                 activate_workspace(static_cast<int32>(ws));
                 if (Window()) Window()->PostMessage(B_QUIT_REQUESTED);
                 return;
@@ -4146,12 +4239,65 @@ public:
 
         fDragCurrentPoint = point;
         fDropTargetWorkspace = -1;
-        for (size_t ws = 0; ws < fCellRects.size(); ++ws) {
-            if (fCellRects[ws].Contains(point)) {
+        for (size_t ws = 0; ws < fMiniDesktopRects.size(); ++ws) {
+            if (fMiniDesktopRects[ws].Contains(point)) {
                 fDropTargetWorkspace = static_cast<int32>(ws);
                 break;
             }
         }
+
+        // Only actually move the real window (and this box's own drawn
+        // position) while the cursor is over a valid mini desktop -- outside
+        // that, there's no well-defined real-screen point to map to, so the
+        // box just stays wherever it last was rather than extrapolating
+        // somewhere arbitrary.
+        if (fDropTargetWorkspace >= 0 && fDragBoxIndex >= 0 &&
+                fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
+            BScreen screen(Window());
+            BRect screenFrame = screen.Frame();
+            BRect miniRect = fMiniDesktopRects[fDropTargetWorkspace];
+
+            BPoint realPoint = MiniPointToScreen(point, miniRect, screenFrame);
+            float newLeft = realPoint.x - fDragGrabOffsetReal.x;
+            float newTop  = realPoint.y - fDragGrabOffsetReal.y;
+            BRect newFrame(newLeft, newTop,
+                newLeft + fDragOriginalFrame.Width(), newTop + fDragOriginalFrame.Height());
+            newFrame = ClampToScreen(newFrame, fBoxes[fDragBoxIndex].tabHeight,
+                fBoxes[fDragBoxIndex].borderSize, screenFrame);
+
+            // Live-move the real window only while still inside its own
+            // origin cell -- the window is still only a member of its
+            // original workspace throughout the whole drag (see MouseUp's
+            // own comment for why that reassignment is deferred), so as
+            // long as the cursor is in a *different* cell, honestly
+            // repositioning the real window would mean physically dragging
+            // it across whichever workspace it's still actually on -- your
+            // current desktop, if that happens to be it. Haiku's own
+            // Workspaces app never hits this at all: it's a thin client
+            // over app_server's own privileged, server-side window
+            // dragging, not IPC scripting against another app's window, so
+            // it has no equivalent trade-off to make. This is the closest
+            // an ordinary app can get without that access: genuinely live
+            // while repositioning in place, silent (no real move sent at
+            // all) while only previewing a *different* workspace, with the
+            // real move and the workspace reassignment applied together,
+            // once, on drop.
+            if (fDragWindowIndex >= 0 && fDropTargetWorkspace == fDragOriginalWorkspace) {
+                SendWindowFrame(fDragAppMessenger, fDragWindowIndex, newFrame);
+            }
+
+            // Client-side prediction: trust the position we just commanded
+            // rather than reading it back, so the box tracks the cursor
+            // immediately instead of waiting on a round trip through the
+            // target app's own message loop. Also temporarily reassigns
+            // which cell this box draws in -- purely local bookkeeping for
+            // where to draw it; the real window position/workspace are only
+            // ever actually touched above (in place) or on MouseUp (across
+            // cells).
+            fBoxes[fDragBoxIndex].windowFrame = newFrame;
+            fBoxes[fDragBoxIndex].workspaceIndex = fDropTargetWorkspace;
+        }
+
         Invalidate();
     }
 
@@ -4159,34 +4305,168 @@ public:
         if (!fDragging) return;
         fDragging = false;
 
-        if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size()) &&
-            fDropTargetWorkspace >= 0 && fDropTargetWorkspace != fBoxes[fDragBoxIndex].workspaceIndex) {
-            MoveWindowToWorkspace(fBoxes[fDragBoxIndex].teamId, fBoxes[fDragBoxIndex].title, fDropTargetWorkspace);
+        if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
+            if (fDropTargetWorkspace >= 0) {
+                // One final, authoritative position at the actual release
+                // point -- MouseMoved's last update may not exactly coincide
+                // with it.
+                BScreen screen(Window());
+                BRect screenFrame = screen.Frame();
+                BRect miniRect = fMiniDesktopRects[fDropTargetWorkspace];
+                BPoint realPoint = MiniPointToScreen(point, miniRect, screenFrame);
+                float newLeft = realPoint.x - fDragGrabOffsetReal.x;
+                float newTop  = realPoint.y - fDragGrabOffsetReal.y;
+                BRect newFrame(newLeft, newTop,
+                    newLeft + fDragOriginalFrame.Width(), newTop + fDragOriginalFrame.Height());
+                newFrame = ClampToScreen(newFrame, fBoxes[fDragBoxIndex].tabHeight,
+                    fBoxes[fDragBoxIndex].borderSize, screenFrame);
+
+                // Position first, workspace reassignment last -- confirmed
+                // correct in testing; a since-reverted attempt at reordering
+                // these (on an untested theory that Haiku tracks a distinct
+                // position per workspace) sent the window's final position
+                // way off, so don't reorder this again without solid
+                // evidence it's actually needed.
+                if (fDragWindowIndex >= 0) {
+                    SendWindowFrame(fDragAppMessenger, fDragWindowIndex, newFrame);
+                }
+
+                if (fDropTargetWorkspace != fDragOriginalWorkspace) {
+                    MoveWindowToWorkspace(fBoxes[fDragBoxIndex].teamId, fBoxes[fDragBoxIndex].title,
+                        fDropTargetWorkspace);
+                }
+            } else if (fDragWindowIndex >= 0) {
+                // Released outside every cell -- rather than leaving the
+                // real window wherever the last valid drag position put it,
+                // put it back exactly where it started and leave its
+                // workspace alone, same as if the drag had never happened.
+                SendWindowFrame(fDragAppMessenger, fDragWindowIndex, fDragOriginalFrame);
+            }
         }
 
         fDragBoxIndex = -1;
         fDropTargetWorkspace = -1;
+        fDragWindowIndex = -1;
         RefreshWindowList();
         Invalidate();
     }
 
 private:
-    // Moves a window to a different workspace via Haiku's public scripting
-    // suite (the same "Window"-by-index specifier this codebase already uses
-    // to close a specific Tracker window), rather than any private app_server
-    // protocol message -- safer, since a bad index here just fails the
-    // request instead of risking a malformed low-level message.
-    void MoveWindowToWorkspace(team_id teamId, const BString& title, int32 destWorkspace) {
-        BMessenger appMessenger(NULL, teamId);
-        if (!appMessenger.IsValid()) return;
+    // windowFrame alone is just the window's *client* area -- the same
+    // convention client_window_info and the "Frame" scripting property both
+    // use, and what actually gets sent to reposition the real window (see
+    // WindowBox::windowFrame's own comment). But the title bar is drawn
+    // *above* that frame, and the border drawn *around* it, so the window's
+    // true on-screen footprint is bigger than windowFrame reports. Drawing
+    // the box at windowFrame alone understates that, which is exactly what
+    // made the mini desktop's edges misleading: a box with visible room
+    // above it could still mean the window's actual title bar has no room
+    // left and would go off-screen. Confirmed against real client_window_info
+    // values (tab_height/border_size genuinely non-zero, e.g. 24/5) rather
+    // than assumed.
+    static BRect DecoratedFrame(BRect clientFrame, float tabHeight, float borderSize) {
+        return BRect(clientFrame.left - borderSize, clientFrame.top - tabHeight,
+            clientFrame.right + borderSize, clientFrame.bottom + borderSize);
+    }
+
+    BRect DecoratedFrame(const WindowBox& box) const {
+        return DecoratedFrame(box.windowFrame, box.tabHeight, box.borderSize);
+    }
+
+    // Shifts (never resizes) a candidate client frame by the minimum amount
+    // needed to keep its *decorated* footprint -- title bar and border
+    // included -- within screenFrame. Confirmed necessary from real
+    // client_window_info data: the mini desktop inside a cell is a
+    // letterboxed sub-rect (ComputeMiniDesktopRect), smaller than the cell
+    // itself whenever the screen's own aspect ratio doesn't exactly match
+    // the cell's, and MiniPointToScreen() has no reason to know that --
+    // it's a plain affine mapping, so a cursor position in that leftover
+    // cell padding (still comfortably "inside the cell" to the user) maps
+    // to a real point *outside* the actual screen, extrapolated straight
+    // through the valid range. Without this, a drag that looks like it
+    // lines up with a mini desktop's own edge can still send the real
+    // window well past the real screen's edge -- confirmed exactly this way
+    // (window ending up at y=-43, decorated y=-67, against a screen
+    // starting at y=0) before this clamp existed.
+    BRect ClampToScreen(BRect candidateClientFrame, float tabHeight, float borderSize,
+            BRect screenFrame) const {
+        BRect decorated = DecoratedFrame(candidateClientFrame, tabHeight, borderSize);
+        float dx = 0.0f, dy = 0.0f;
+        if (decorated.left < screenFrame.left) {
+            dx = screenFrame.left - decorated.left;
+        } else if (decorated.right > screenFrame.right) {
+            dx = screenFrame.right - decorated.right;
+        }
+        if (decorated.top < screenFrame.top) {
+            dy = screenFrame.top - decorated.top;
+        } else if (decorated.bottom > screenFrame.bottom) {
+            dy = screenFrame.bottom - decorated.bottom;
+        }
+        candidateClientFrame.OffsetBy(dx, dy);
+        return candidateClientFrame;
+    }
+
+    // Uniform, aspect-preserving scale + centered inset placement of the
+    // mini desktop drawn inside one grid cell -- the same scale-to-fit-then-
+    // center approach ThumbnailPreviewView::Draw() already uses for a single
+    // window's own capture, just applied to the whole screen here so real
+    // window positions map back onto it without distortion.
+    BRect ComputeMiniDesktopRect(BRect cellRect, BRect screenFrame) const {
+        float inset = 4.0f;
+        BRect inner = cellRect.InsetByCopy(inset, inset);
+        if (screenFrame.Width() <= 0.0f || screenFrame.Height() <= 0.0f) return inner;
+        float scale = std::min(inner.Width() / screenFrame.Width(), inner.Height() / screenFrame.Height());
+        float miniW = screenFrame.Width() * scale;
+        float miniH = screenFrame.Height() * scale;
+        float left = inner.left + (inner.Width() - miniW) / 2.0f;
+        float top  = inner.top  + (inner.Height() - miniH) / 2.0f;
+        return BRect(left, top, left + miniW, top + miniH);
+    }
+
+    // Real screen-space window frame -> its scaled rect inside a cell's mini
+    // desktop.
+    BRect ScreenFrameToMini(BRect windowFrame, BRect miniRect, BRect screenFrame) const {
+        if (screenFrame.Width() <= 0.0f || screenFrame.Height() <= 0.0f) return BRect();
+        float scaleX = miniRect.Width() / screenFrame.Width();
+        float scaleY = miniRect.Height() / screenFrame.Height();
+        float left   = miniRect.left + (windowFrame.left   - screenFrame.left) * scaleX;
+        float top    = miniRect.top  + (windowFrame.top    - screenFrame.top)  * scaleY;
+        float right  = miniRect.left + (windowFrame.right  - screenFrame.left) * scaleX;
+        float bottom = miniRect.top  + (windowFrame.bottom - screenFrame.top)  * scaleY;
+        return BRect(left, top, right, bottom);
+    }
+
+    // The inverse -- a point inside a cell's mini desktop -> the real screen
+    // point it represents. This relationship is what makes dragging inside a
+    // cell move the actual window to the matching real position, the same
+    // way Haiku's own Workspaces app behaves.
+    BPoint MiniPointToScreen(BPoint miniPoint, BRect miniRect, BRect screenFrame) const {
+        if (miniRect.Width() <= 0.0f || miniRect.Height() <= 0.0f) {
+            return BPoint(screenFrame.left, screenFrame.top);
+        }
+        float scaleX = miniRect.Width() / screenFrame.Width();
+        float scaleY = miniRect.Height() / screenFrame.Height();
+        float x = screenFrame.left + (miniPoint.x - miniRect.left) / scaleX;
+        float y = screenFrame.top  + (miniPoint.y - miniRect.top)  / scaleY;
+        return BPoint(x, y);
+    }
+
+    // Resolves a window's scripting index within its own team by matching
+    // Title -- the same lookup MoveWindowToWorkspace() used to do inline,
+    // pulled out here so a drag can resolve it once at MouseDown and reuse
+    // the same index for every live move, instead of re-matching titles on
+    // every single MouseMoved.
+    int32 ResolveWindowByTitle(team_id teamId, const BString& title, BMessenger& outMessenger) {
+        outMessenger = BMessenger(NULL, teamId);
+        if (!outMessenger.IsValid()) return -1;
 
         BMessage countRequest(B_COUNT_PROPERTIES);
         countRequest.AddSpecifier("Window");
         BMessage countReply;
-        if (appMessenger.SendMessage(&countRequest, &countReply) != B_OK) return;
+        if (outMessenger.SendMessage(&countRequest, &countReply) != B_OK) return -1;
 
         int32 totalWindows = 0;
-        if (countReply.FindInt32("result", &totalWindows) != B_OK) return;
+        if (countReply.FindInt32("result", &totalWindows) != B_OK) return -1;
 
         for (int32 idx = 0; idx < totalWindows; ++idx) {
             BMessage titleRequest(B_GET_PROPERTY);
@@ -4194,18 +4474,47 @@ private:
             titleRequest.AddSpecifier("Window", idx);
 
             BMessage titleReply;
-            if (appMessenger.SendMessage(&titleRequest, &titleReply) != B_OK) continue;
+            if (outMessenger.SendMessage(&titleRequest, &titleReply) != B_OK) continue;
 
             const char* windowTitle = nullptr;
-            if (titleReply.FindString("result", &windowTitle) == B_OK && windowTitle != nullptr && title == windowTitle) {
-                BMessage setWorkspaceMsg(B_SET_PROPERTY);
-                setWorkspaceMsg.AddSpecifier("Workspaces");
-                setWorkspaceMsg.AddSpecifier("Window", idx);
-                setWorkspaceMsg.AddInt32("data", 1 << destWorkspace);
-                appMessenger.SendMessage(&setWorkspaceMsg);
-                return;
+            if (titleReply.FindString("result", &windowTitle) == B_OK && windowTitle != nullptr
+                    && title == windowTitle) {
+                return idx;
             }
         }
+        return -1;
+    }
+
+    // Repositions an already-resolved window in place via Haiku's public
+    // window scripting suite -- the same "Frame" property `hey` and other
+    // scripting clients use to move a window, set through the identical
+    // "Window"-by-index specifier chain this file already uses for
+    // "Workspaces" and "Title" below. Fire-and-forget (no reply requested),
+    // so a drag's per-move updates never block this view waiting on the
+    // target app's own message loop.
+    void SendWindowFrame(BMessenger& messenger, int32 windowIndex, BRect newFrame) {
+        BMessage setFrameMsg(B_SET_PROPERTY);
+        setFrameMsg.AddSpecifier("Frame");
+        setFrameMsg.AddSpecifier("Window", windowIndex);
+        setFrameMsg.AddRect("data", newFrame);
+        messenger.SendMessage(&setFrameMsg);
+    }
+
+    // Moves a window to a different workspace via Haiku's public scripting
+    // suite (the same "Window"-by-index specifier this codebase already uses
+    // to close a specific Tracker window), rather than any private app_server
+    // protocol message -- safer, since a bad index here just fails the
+    // request instead of risking a malformed low-level message.
+    void MoveWindowToWorkspace(team_id teamId, const BString& title, int32 destWorkspace) {
+        BMessenger appMessenger;
+        int32 idx = ResolveWindowByTitle(teamId, title, appMessenger);
+        if (idx < 0) return;
+
+        BMessage setWorkspaceMsg(B_SET_PROPERTY);
+        setWorkspaceMsg.AddSpecifier("Workspaces");
+        setWorkspaceMsg.AddSpecifier("Window", idx);
+        setWorkspaceMsg.AddInt32("data", 1 << destWorkspace);
+        appMessenger.SendMessage(&setWorkspaceMsg);
     }
 };
 
@@ -4229,12 +4538,22 @@ public:
         int gridRows = static_cast<int>(std::ceil(static_cast<float>(wsCount) / gridCols));
         if (gridRows < 1) gridRows = 1;
 
-        float cellW = 220.0f, cellH = 140.0f, gap = 10.0f;
-        float panelWidth  = gridCols * cellW + gap * (gridCols + 1);
-        float panelHeight = gridRows * cellH + gap * (gridRows + 1);
-
         BScreen screen(this);
         BRect screenFrame = screen.Frame();
+
+        // Each cell's own aspect ratio matches the real screen's, not a
+        // fixed 220x140 -- ComputeMiniDesktopRect() (WorkspacePreviewView's
+        // own) fits the screen into a cell by scale-to-fit-then-center, and
+        // any mismatch between the cell's shape and the screen's leaves a
+        // visible letterbox gap on two sides. Matching them here means
+        // there's essentially nothing left to letterbox: the mini desktop
+        // fills its cell edge to edge instead of floating in a black
+        // border, without changing the underlying screen mapping at all.
+        float cellW = 220.0f, gap = 10.0f;
+        float cellH = (screenFrame.Width() > 0.0f)
+            ? cellW * (screenFrame.Height() / screenFrame.Width()) : 140.0f;
+        float panelWidth  = gridCols * cellW + gap * (gridCols + 1);
+        float panelHeight = gridRows * cellH + gap * (gridRows + 1);
 
         float targetX = anchorScreenPoint.x - (panelWidth / 2.0f);
         if (targetX < 10.0f) targetX = 10.0f;
