@@ -77,7 +77,7 @@
 #include <NavMenu.h> 
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.50"
+#define APP_LOCAL_VERSION "v1.0.49"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow; 
@@ -478,6 +478,10 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
 
     bool isTrackerApp = (hasAppInfo && (strcmp(info.signature, "application/x-vnd.Benjamin-TRAK") == 0 ||
                          strcmp(info.signature, "application/x-vnd.Be-TRAK") == 0));
+    // Pe isn't in the main Haiku source tree, so there's no known signature
+    // to check against -- match its app name instead, the same way the
+    // Rakarrack guard above does.
+    bool isPeApp = (hasAppInfo && BString(info.ref.name).ICompare("Pe") == 0);
 
     // 2. Query raw App Server window order stack directly
     int32 currentWorkspace = current_workspace();
@@ -494,14 +498,10 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
             // B_NORMAL_WINDOW_FEEL only -- the same filter every other
             // window-enumeration path in this file already applies (the
             // occlusion check, WorkspacePreviewView, the taskbar's own
-            // window counting). This one was missing it, which is exactly
-            // why floating palette/utility windows -- WebPositive's
-            // Downloads panel, PE's HTML palette, and the like, none of
-            // them B_NORMAL_WINDOW_FEEL -- were showing up as if they were
-            // real windows to switch to. SDL mode only ever displays
-            // fCurrentWindowsList[0], so it happened to hide this by
-            // accident (whichever entry landed first was usually the real
-            // window) rather than by any actual filtering of its own.
+            // window counting). Dropped the B_NOT_ZOOMABLE heuristic this
+            // used to also check: confirmed against real testing not to
+            // distinguish WebPositive's/Pe's own Settings/Find/Save/
+            // Downloads windows from their real content window after all.
             if (wInfo->team == team && wInfo->feel == B_NORMAL_WINDOW_FEEL) {
                 BString subTitle(wInfo->name);
 
@@ -514,11 +514,30 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
                     bool isTrackerBackgroundWindow = isTrackerApp &&
                         (((subTitle == "Desktop" || subTitle.EndsWith("/Desktop")) && wInfo->feel == 1024)
                             || subTitle == "Tracker status");
-                    if (!isTrackerBackgroundWindow) {
-                        // Every real window -- Tracker's folders included --
-                        // gets its own entry carrying its own server_token,
-                        // so TitleListPreviewWindow can list and activate
-                        // each one individually instead of Tracker's windows
+                    // Pe's own utility dialogs -- its Find bar and its
+                    // "Open" file picker -- aren't real editor windows, so
+                    // they're excluded by name the same way Tracker's
+                    // background windows are above.
+                    bool isPeUtilityWindow = isPeApp &&
+                        (subTitle == "Find" || subTitle == "Pe: Open");
+                    // Tracker and Pe both keep every one of their windows as
+                    // its own entry -- being able to pick a specific folder
+                    // (Tracker) or a specific open document (Pe) is the whole
+                    // point there, and it's confirmed working for Tracker.
+                    // Every other app is capped to its first (frontmost, per
+                    // get_window_order()) qualifying window -- the same
+                    // "just take index 0" SDL mode always did, confirmed to
+                    // reliably land on the real content window rather than
+                    // a Settings/Find/Save dialog, not by filtering those
+                    // out individually (two attempts at that -- feel,
+                    // B_NOT_ZOOMABLE -- didn't hold up) but by never
+                    // looking past the first one at all.
+                    if (!isTrackerBackgroundWindow && !isPeUtilityWindow
+                        && (isTrackerApp || isPeApp || outList.empty())) {
+                        // Every real window -- Tracker's folders and Pe's
+                        // documents included -- gets its own entry carrying
+                        // its own server_token, so TitleListPreviewWindow can
+                        // list and activate each one individually instead of
                         // being folded into a single combined summary line.
                         outList.push_back(TrackedWindowInfo(subTitle, BRect(), wInfo->server_token));
                     }
@@ -3713,8 +3732,16 @@ public:
             SetHighColor(hovered ? rgb_color{255, 255, 255, 255} : rgb_color{220, 220, 225, 255});
             BString truncTitle = fEntries[i].title;
             font.TruncateString(&truncTitle, B_TRUNCATE_END, bounds.Width() - 16.0f);
+            // Centered, not left-aligned at a fixed offset -- matches the
+            // window itself now auto-sizing to the text (see
+            // TitleListPreviewWindow::ResizeAndReposition()), so a short
+            // title sits centered in its own tightly-fit box instead of
+            // hugging the left edge of what's still a wide, fixed panel.
+            float textWidth = font.StringWidth(truncTitle.String());
+            float textLeft = (bounds.Width() - textWidth) / 2.0f;
+            if (textLeft < 4.0f) textLeft = 4.0f;
             DrawString(truncTitle.String(),
-                BPoint(8.0f, rowRect.top + fh.ascent + ((fRowHeight - (fh.ascent + fh.descent)) / 2.0f)));
+                BPoint(textLeft, rowRect.top + fh.ascent + ((fRowHeight - (fh.ascent + fh.descent)) / 2.0f)));
         }
 
         // Drop the picture clip before the border stroke -- StrokeRoundRect
@@ -3786,7 +3813,13 @@ private:
     BPoint fAnchorScreenPoint; // for horizontal centering -- see ResizeAndReposition()
     team_id fTeam;
     float fRowHeight;
-    static constexpr float kPanelWidth = 240.0f;
+    // Width auto-sizes to the widest title (see ResizeAndReposition()),
+    // clamped to this range -- small for a short one-word title, but capped
+    // well before it could grow into an unwieldy banner for a long path or
+    // sentence-length title; Draw()'s own TruncateString() takes over past
+    // the cap instead of growing the panel further.
+    static constexpr float kMinPanelWidth = 100.0f;
+    static constexpr float kMaxPanelWidth = 320.0f;
 
 public:
     TitleListPreviewWindow(BPoint anchorScreenPoint, HaikuRect anchorIconRect,
@@ -3803,7 +3836,7 @@ public:
         font.GetHeight(&fh);
         fRowHeight = fh.ascent + fh.descent + fh.leading + 10.0f;
 
-        ResizeAndReposition(entries.size());
+        ResizeAndReposition(entries);
 
         fView = new TitleListPreviewView(Bounds(), team, entries, fRowHeight);
         AddChild(fView);
@@ -3823,29 +3856,48 @@ public:
 
     team_id Team() const { return fTeam; }
 
-    // Sizes and positions this window for a given row count, anchored the
-    // same way the constructor originally placed it (horizontally centered
-    // on fAnchorScreenPoint, opened above/below fAnchorIconRect depending on
-    // dock location). Pulled out of the constructor so a later refresh with
-    // a *different* row count (see MessageReceived's 'tlup' case) can call
-    // it again -- without this, a popup first built while Tracker still had
-    // only one window enumerated would stay sized for one row forever, and
-    // a second row added by a later refresh would be drawn (and hit-tested)
-    // entirely outside the window's own actual bounds: invisible, or
-    // visible but unclickable depending on exactly where it falls. That's
-    // confirmed to be exactly what "the top title flickers off before I can
-    // click it, but the bottom one works" looks like -- the bottom row was
-    // there from the start and fits; a row added afterward doesn't.
-    void ResizeAndReposition(size_t rowCount) {
-        if (rowCount == 0) rowCount = 1;
+    // Sizes and positions this window for a given set of entries, anchored
+    // the same way the constructor originally placed it (horizontally
+    // centered on fAnchorScreenPoint, opened above/below fAnchorIconRect
+    // depending on dock location). Pulled out of the constructor so a later
+    // refresh with a *different* row count or different titles (see
+    // MessageReceived's 'tlup' case) can call it again -- without this, a
+    // popup first built while Tracker still had only one window enumerated
+    // would stay sized for one row forever, and a second row added by a
+    // later refresh would be drawn (and hit-tested) entirely outside the
+    // window's own actual bounds: invisible, or visible but unclickable
+    // depending on exactly where it falls. That's confirmed to be exactly
+    // what "the top title flickers off before I can click it, but the
+    // bottom one works" looks like -- the bottom row was there from the
+    // start and fits; a row added afterward doesn't.
+    //
+    // Width auto-sizes to the widest title actually present, measured with
+    // the exact same font Draw() renders with, then clamped to
+    // [kMinPanelWidth, kMaxPanelWidth] -- a short single-word title gets a
+    // small, tightly-fit box instead of the old fixed 240px regardless of
+    // content, while a long path or sentence-length title stops growing the
+    // panel at the cap and lets Draw()'s own TruncateString() take over.
+    void ResizeAndReposition(const std::vector<TrackedWindowInfo>& entries) {
+        size_t rowCount = entries.empty() ? 1 : entries.size();
         float panelH = fRowHeight * (float)rowCount + 2.0f; // +2 for the 1px stroke on each edge
+
+        BFont font(be_plain_font);
+        font.SetSize(11.0f);
+        float widestTitle = 0.0f;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            float w = font.StringWidth(entries[i].title.String());
+            if (w > widestTitle) widestTitle = w;
+        }
+        float panelW = widestTitle + 16.0f; // matches Draw()'s own left+right margin budget
+        if (panelW < kMinPanelWidth) panelW = kMinPanelWidth;
+        if (panelW > kMaxPanelWidth) panelW = kMaxPanelWidth;
 
         BScreen screen(this);
         BRect screenFrame = screen.Frame();
 
-        float targetX = fAnchorScreenPoint.x - (kPanelWidth / 2.0f);
+        float targetX = fAnchorScreenPoint.x - (panelW / 2.0f);
         if (targetX < 10.0f) targetX = 10.0f;
-        if (targetX + kPanelWidth > screenFrame.right - 10.0f) targetX = screenFrame.right - 10.0f - kPanelWidth;
+        if (targetX + panelW > screenFrame.right - 10.0f) targetX = screenFrame.right - 10.0f - panelW;
 
         // Bottom dock: open upward above the icon. Top dock: open downward below it.
         float targetY;
@@ -3858,7 +3910,7 @@ public:
         if (targetY + panelH > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelH;
 
         MoveTo(targetX, targetY);
-        ResizeTo(kPanelWidth, panelH);
+        ResizeTo(panelW, panelH);
     }
 
     // Thread-safe from any thread -- unlike the constructor's own direct
@@ -3889,10 +3941,10 @@ public:
                 std::vector<TrackedWindowInfo>* entries = static_cast<std::vector<TrackedWindowInfo>*>(ptr);
                 // Resize *before* handing the new entries to the view --
                 // see ResizeAndReposition's own comment for why a changed
-                // row count needs this every refresh, not just at
-                // construction. B_FOLLOW_ALL on fView means ResizeTo() here
-                // already resizes it to match; no separate call needed.
-                ResizeAndReposition(entries->size());
+                // row count or title set needs this every refresh, not just
+                // at construction. B_FOLLOW_ALL on fView means ResizeTo()
+                // here already resizes it to match; no separate call needed.
+                ResizeAndReposition(*entries);
                 if (fView != nullptr) {
                     fView->UpdateEntries(*entries);
                 }
@@ -8363,10 +8415,13 @@ void SyncDockWithRunningDeskbarApps() {
 		    // =========================================================================
 		    // HOVER TITLE SYSTEM TEXT OVERLAY (Inside the loop)
 		    // =========================================================================
+		  // Also gates the thumbnail preview popup below -- both share this same
+		  // hover-proximity detection and fShouldDrawList lifecycle, so thumbnails
+		  // need this block to run even with both title-overlay modes off.
 		  // Suppressed while the Tracker right-click popup is open, so navigating its
 		  // folder submenus near the icon doesn't also trigger the hover title overlay's
 		  // restore-minimized-window behavior.
-		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL) && !fTrackerMenuIsActive) {
+		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL || fShowWindowThumbnails) && !fTrackerMenuIsActive) {
 			bool cursorNearIcon = (gDockLocation == kDockLocationTop)
 			    ? (fMouseY >= iconBounds.top && fMouseY <= (iconBounds.bottom + 40.0f))
 			    : (fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom);
