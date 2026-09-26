@@ -4534,10 +4534,54 @@ static void OpenTrash() {
     OpenUri("trash:///");
 }
 
-// Haiku: `trash --empty`. GIO's own trash implementation keeps the
-// files/ and info/ directories consistent.
+// Removes everything inside `dir` (not `dir` itself), without following
+// symlinks out of it.
+static void RemoveDirectoryContents(const std::string& dir) {
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) return;
+    std::vector<std::string> names;
+    while (struct dirent* e = readdir(d)) {
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) names.push_back(e->d_name);
+    }
+    closedir(d);
+    for (const auto& name : names) {
+        std::string path = dir + "/" + name;
+        struct stat st;
+        if (lstat(path.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            chmod(path.c_str(), st.st_mode | S_IRWXU); // trashed read-only folders
+            RemoveDirectoryContents(path);
+            rmdir(path.c_str());
+        } else {
+            unlink(path.c_str());
+        }
+    }
+}
+
+// Haiku: `trash --empty`. On Linux the trash is shared with the file
+// manager, so prefer the desktop's own tool -- it keeps Dolphin's /
+// Plasma's view of the trash in sync. `gio trash --empty` needs gvfs and
+// silently does nothing without it (the usual case on KDE), so it's only
+// used when gvfs is actually installed. Last resort: empty the
+// freedesktop trash directory ourselves.
 static void EmptyTrash() {
-    RunDetached("gio trash --empty");
+    for (const char* tool : {"ktrash6", "ktrash5"}) {
+        if (HaveProgram(tool)) {
+            RunDetached(std::string(tool) + " --empty");
+            return;
+        }
+    }
+    bool haveGvfs = FileExists("/usr/lib/gvfsd-trash") || FileExists("/usr/libexec/gvfsd-trash") ||
+        FileExists("/usr/lib/gvfs/gvfsd-trash");
+    if (haveGvfs && HaveProgram("gio")) {
+        RunDetached("gio trash --empty");
+        return;
+    }
+    std::string trash = std::string(g_get_user_data_dir()) + "/Trash";
+    if (trash.size() <= strlen("/Trash")) return; // no data dir: never touch "/Trash"
+    RemoveDirectoryContents(trash + "/files");
+    RemoveDirectoryContents(trash + "/info");
+    unlink((trash + "/directorysizes").c_str());
 }
 
 // ---- Power profile (Haiku: PowerStatus --toggle) ---------------------------
