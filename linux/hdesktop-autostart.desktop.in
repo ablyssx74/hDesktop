@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=hDesktop
+Comment=Start the hDesktop dock with the session
+Exec=hdesktop
+Icon=user-desktop
+Terminal=false
+X-GNOME-Autostart-enabled=true

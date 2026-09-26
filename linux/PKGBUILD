@@ -1,0 +1,32 @@
+# Maintainer: Kris Beazley <hDesktop@epluribusunix.net>
+# Build and install on Arch / CachyOS:  cd linux && makepkg -si
+pkgname=hdesktop-git
+pkgver=1.0.51
+pkgrel=1
+pkgdesc="hDesktop OpenGL dock for Wayland (KDE Plasma, Hyprland, Sway, niri, labwc...)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ablyssx74/hDesktop"
+license=('MIT')
+depends=('wayland' 'libglvnd' 'mesa' 'cairo' 'pango' 'librsvg' 'gdk-pixbuf2' 'glib2' 'libpulse' 'curl' 'libxkbcommon')
+makedepends=('git')
+optdepends=('pavucontrol: mixer opened by clicking the volume bar'
+            'power-profiles-daemon: "Power saving" toggle in the CPU menu')
+provides=('hdesktop')
+conflicts=('hdesktop')
+source=("hdesktop::git+https://github.com/ablyssx74/hDesktop.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd hdesktop
+  printf "%s.r%s.%s" "$(tr -d 'v\n' < VERSION)" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd hdesktop
+  make -f Makefile.linux
+}
+
+package() {
+  cd hdesktop
+  make -f Makefile.linux PREFIX=/usr DESTDIR="$pkgdir" install
+}

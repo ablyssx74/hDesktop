@@ -1,0 +1,83 @@
+# Linux / Wayland build of hDesktop.
+#
+#   make -f Makefile.linux              build ./hdesktop_linux
+#   sudo make -f Makefile.linux install install into $(PREFIX) (default /usr)
+#
+# Requires (Arch / CachyOS package names):
+#   wayland libglvnd mesa cairo pango librsvg gdk-pixbuf2 glib2 libpulse curl libxkbcommon
+#
+# KDE Plasma note: KWin only hands its window-management protocol to clients
+# that ship a .desktop file listing it (X-KDE-Wayland-Interfaces), so the
+# taskbar part of the dock needs `make install` there -- running the binary
+# straight from the build tree works for everything else.
+
+CXX      ?= g++
+PREFIX   ?= /usr
+DESTDIR  ?=
+TARGET    = hdesktop_linux
+BIN_NAME  = hdesktop
+
+PROTO_DIR = linux/protocols
+GEN_DIR   = build/linux
+
+PROTOCOLS = \
+	xdg-shell \
+	wlr-layer-shell-unstable-v1 \
+	wlr-foreign-toplevel-management-unstable-v1 \
+	plasma-window-management \
+	org-kde-plasma-virtual-desktop \
+	ext-workspace-v1 \
+	xdg-activation-v1 \
+	fractional-scale-v1 \
+	viewporter
+
+PKGS = wayland-client wayland-egl wayland-cursor egl opengl cairo pangocairo \
+       librsvg-2.0 gdk-pixbuf-2.0 gio-unix-2.0 libpulse libpulse-mainloop-glib libcurl \
+       xkbcommon
+
+PROTO_HEADERS = $(patsubst %,$(GEN_DIR)/%-client-protocol.h,$(PROTOCOLS))
+PROTO_SOURCES = $(patsubst %,$(GEN_DIR)/%-protocol.c,$(PROTOCOLS))
+PROTO_OBJECTS = $(PROTO_SOURCES:.c=.o)
+
+CXXFLAGS ?= -O2
+CXXFLAGS += -std=c++20 -Wall -Wextra -Wno-unused-parameter -I$(GEN_DIR) \
+            $(shell pkg-config --cflags $(PKGS))
+CFLAGS   ?= -O2
+LIBS      = $(shell pkg-config --libs $(PKGS)) -lpthread
+
+all: $(TARGET)
+
+$(GEN_DIR):
+	mkdir -p $@
+
+$(GEN_DIR)/%-client-protocol.h: $(PROTO_DIR)/%.xml | $(GEN_DIR)
+	wayland-scanner client-header $< $@
+
+$(GEN_DIR)/%-protocol.c: $(PROTO_DIR)/%.xml | $(GEN_DIR)
+	wayland-scanner private-code $< $@
+
+$(GEN_DIR)/%-protocol.o: $(GEN_DIR)/%-protocol.c $(PROTO_HEADERS)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(GEN_DIR)/hdesktop_linux.o: hdesktop_linux.cpp $(PROTO_HEADERS)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(TARGET): $(GEN_DIR)/hdesktop_linux.o $(PROTO_OBJECTS)
+	$(CXX) $^ -o $@ $(LDFLAGS) $(LIBS)
+
+install: $(TARGET)
+	install -Dm755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(BIN_NAME)
+	sed 's|@BINDIR@|$(PREFIX)/bin|g' linux/hdesktop.desktop.in > $(GEN_DIR)/hdesktop.desktop
+	install -Dm644 $(GEN_DIR)/hdesktop.desktop $(DESTDIR)$(PREFIX)/share/applications/hdesktop.desktop
+	install -Dm644 linux/hdesktop-autostart.desktop.in $(DESTDIR)$(PREFIX)/share/hdesktop/hdesktop-autostart.desktop
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/$(BIN_NAME)
+	rm -f $(DESTDIR)$(PREFIX)/share/applications/hdesktop.desktop
+	rm -rf $(DESTDIR)$(PREFIX)/share/hdesktop
+
+clean:
+	rm -rf $(GEN_DIR) $(TARGET)
+
+.PHONY: all install uninstall clean
+.SECONDARY: $(PROTO_SOURCES)
