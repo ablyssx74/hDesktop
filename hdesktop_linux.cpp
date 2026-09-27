@@ -180,6 +180,7 @@ struct Settings {
     bool   clock24h = false;
     int    dockLocation = kDockLocationBottom;
     float  baseIconSize = 48.0f;
+    float  iconZoom = 1.8f;           // peak hover magnification (1.0 = none); 1.8 was the fixed value
     float  dockAlpha = 0.32f;
     int    effectDurationMs = 750;
     int    openEffect = kEffectSpin;
@@ -222,6 +223,7 @@ static void SaveConfiguration() {
     g_key_file_set_boolean(kf, g, "clock_24h", gSettings.clock24h);
     g_key_file_set_integer(kf, g, "dock_location", gSettings.dockLocation);
     g_key_file_set_double(kf, g, "base_icon_size", gSettings.baseIconSize);
+    g_key_file_set_double(kf, g, "icon_zoom", gSettings.iconZoom);
     g_key_file_set_double(kf, g, "dock_alpha", gSettings.dockAlpha);
     g_key_file_set_integer(kf, g, "effect_duration", gSettings.effectDurationMs);
     g_key_file_set_string(kf, g, "open_effect", kEffectNames[gSettings.openEffect]);
@@ -293,6 +295,7 @@ static void LoadConfiguration() {
     getBool("clock_24h", gSettings.clock24h);
     getInt("dock_location", gSettings.dockLocation);
     getFloat("base_icon_size", gSettings.baseIconSize);
+    getFloat("icon_zoom", gSettings.iconZoom);
     getFloat("dock_alpha", gSettings.dockAlpha);
     getInt("effect_duration", gSettings.effectDurationMs);
     std::string effect;
@@ -322,6 +325,7 @@ static void LoadConfiguration() {
     // Same clamps the Haiku sliders enforce.
     gSettings.dockLocation = (gSettings.dockLocation == kDockLocationTop) ? kDockLocationTop : kDockLocationBottom;
     gSettings.baseIconSize = std::clamp(gSettings.baseIconSize, 32.0f, 72.0f);
+    gSettings.iconZoom = std::clamp(gSettings.iconZoom, 1.0f, 2.5f);
     gSettings.dockAlpha = std::clamp(gSettings.dockAlpha, 0.0f, 1.0f);
     gSettings.effectDurationMs = std::clamp(gSettings.effectDurationMs, 200, 1500);
     if (gSettings.titlePopup && gSettings.titleLabel) gSettings.titleLabel = false;
@@ -4789,8 +4793,11 @@ private:
     }
 
     // Haiku: targetWindowHeight = ceil(iconSize * 2 + 50), full screen width,
-    // pinned to the chosen screen edge.
-    int PanelHeight() const { return static_cast<int>(std::ceil(gSettings.baseIconSize * 2.0f + 50.0f)); }
+    // pinned to the chosen screen edge. Grows only when the zoom slider goes
+    // past its old fixed 1.8, so the biggest zoomed icon never gets clipped.
+    int PanelHeight() const {
+        return static_cast<int>(std::ceil(gSettings.baseIconSize * (std::max(gSettings.iconZoom, 1.8f) + 0.2f) + 50.0f));
+    }
 
     void ApplyGeometrySettings() {
         bool top = gSettings.dockLocation == kDockLocationTop;
@@ -4939,8 +4946,8 @@ private:
     // TEXTURES
     // =====================================================================
     int IconPixels(float logical) const {
-        // Rasterized at the full 1.8x hover size so zooming stays crisp.
-        return std::max(8, static_cast<int>(std::ceil(logical * 1.8f * scale)));
+        // Rasterized at the full hover-zoom size so zooming stays crisp.
+        return std::max(8, static_cast<int>(std::ceil(logical * gSettings.iconZoom * scale)));
     }
 
     void InvalidateTextures() {
@@ -5023,7 +5030,7 @@ private:
     }
 
     void EnsureTrayTexture(TrayItem* it, float logicalSize) {
-        int px = std::max(8, static_cast<int>(std::ceil(logicalSize * 1.8f * scale)));
+        int px = std::max(8, static_cast<int>(std::ceil(logicalSize * gSettings.iconZoom * scale)));
         int key = px * 1000003 + static_cast<int>(it->revision % 1000003);
         if (it->texture.id != 0 && it->textureKey == key) return;
         DeleteTexture(it->texture);
@@ -5091,7 +5098,7 @@ private:
         float d = std::sqrt(dx * dx + dy * dy);
         if (d >= 180.0f) return 1.0f;
         float ratio = d / 180.0f;
-        return 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+        return 1.0f + (gSettings.iconZoom - 1.0f) * std::exp(-ratio * ratio);
     }
 
     float DockEdgeY(float insetFromEdge) const {
@@ -5464,7 +5471,10 @@ private:
                         HRect dot{cx - 2.5f, dotY - 1.5f, cx + 2.5f, dotY + 1.5f};
                         DrawFilledRoundedRect(dot, 1.5f, 0.15f, 0.15f, 0.15f, std::max(0.6f, gSettings.dockAlpha));
                     }
-                    if (fHoverActive && s.scale > 1.4f && s.bounds.left <= fLayoutMouseX && fLayoutMouseX <= s.bounds.right) {
+                    // "Close enough to be the hovered icon": halfway up the zoom
+                    // curve, or simply under the pointer when zoom is (nearly) off.
+                    bool zoomedEnough = gSettings.iconZoom < 1.2f || s.scale > 1.0f + (gSettings.iconZoom - 1.0f) * 0.5f;
+                    if (fHoverActive && zoomedEnough && s.bounds.left <= fLayoutMouseX && fLayoutMouseX <= s.bounds.right) {
                         labelApp = &app;
                         hoveredLabelIcon = s.bounds;
                     }
@@ -7332,6 +7342,9 @@ private:
         slider("Icon Size", 32, 72, "Small", "Large",
             []() { return static_cast<double>(gSettings.baseIconSize); },
             [](double v) { gSettings.baseIconSize = static_cast<float>(std::lround(v)); });
+        slider("Icon Zoom Size (%)", 100, 250, "None", "Large",
+            []() { return static_cast<double>(std::lround(gSettings.iconZoom * 100.0f)); },
+            [](double v) { gSettings.iconZoom = static_cast<float>(std::lround(v)) / 100.0f; });
 
         y += 6;
         button("Close", RGBA{0.45, 0.47, 0.55, 1}, [this]() { Close(); });
