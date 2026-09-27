@@ -60,7 +60,7 @@ $(GEN_DIR)/%-protocol.o: $(GEN_DIR)/%-protocol.c $(PROTO_HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Tracker.svg compiled in as a byte array (od + sed: no xxd needed)
-$(GEN_DIR)/tracker-icon.h: Tracker.svg | $(GEN_DIR)
+$(GEN_DIR)/tracker-icon.h: linux/Tracker.svg | $(GEN_DIR)
 	{ echo 'static const unsigned char kTrackerSvg[] = {'; \
 	  od -An -v -tx1 $< | sed 's/\([0-9a-f][0-9a-f]\)/0x\1,/g'; \
 	  echo '};'; } > $@

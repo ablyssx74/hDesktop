@@ -23,6 +23,9 @@ pkgver() {
 
 build() {
   cd hdesktop
+  # makepkg reuses src/ between runs; start from a clean build tree so no
+  # stale objects or generated headers from an older checkout get reused.
+  make -f Makefile.linux clean
   make -f Makefile.linux
 }
 

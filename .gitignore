@@ -1,3 +1,8 @@
 build/
 hdesktop_linux
 *.o
+# makepkg leftovers (cd linux && makepkg -si)
+linux/src/
+linux/pkg/
+linux/hdesktop/
+*.pkg.tar.zst
