@@ -153,10 +153,21 @@ bool fEffectCloseExplodeEnabled = false;
 
 void SaveConfiguration();
 float fBaseIconSize = 48.0f;
+// Peak hover magnification of the dock icons/widgets (1.0 = no zoom). 1.8
+// was the fixed value before this became a Config slider.
+float fIconZoom = 1.8f;
 float maxDockHeight = 160.0f;
 float fDockAlpha = 0.32f;
 uint32 fSpinDurationMs = 750;
 const char* const kSettingsIconSizeKey = "base_icon_size";
+const char* const kSettingsIconZoomKey = "icon_zoom";
+
+// Height of the dock's SDL window. Room for the largest zoomed icon plus the
+// hover labels above it -- the original fixed 2x icon size, grown only when
+// the zoom slider goes past its old 1.8 default.
+static float DockWindowHeightFor(float iconSize) {
+    return std::ceil(iconSize * (std::max(fIconZoom, 1.8f) + 0.2f) + 50.0f);
+}
 const char* const kSettingsAlphaKey = "dock_alpha";
 const char* const kSettingsSpinDurationKey = "spin_duration";
 
@@ -220,6 +231,7 @@ enum {
     MSG_EFFECT_SPEED_SLIDER_CHANGED = 'efsc',
     MSG_ALPHA_SLIDER_CHANGED = 'alsc',
     MSG_ICON_SIZE_CHANGED = 'isic',
+    MSG_ICON_ZOOM_CHANGED = 'izsc',
     MSG_EFFECT_OPEN_NONE_TOGGLED = 'efon',
     MSG_EFFECT_BOUNCE_TOGGLED = 'efbn',
     MSG_EFFECT_SPIN_TOGGLED = 'efsp',
@@ -1346,6 +1358,7 @@ private:
     BSlider*   fEffectSpeedSlider;
     BSlider*   fAlphaSlider;
     BSlider*   fIconSizeSlider;
+    BSlider*   fIconZoomSlider;
     BButton*   fAboutButton;
 
 public:
@@ -1595,6 +1608,16 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fIconSizeSlider->SetValue(static_cast<int32>(fBaseIconSize));
         AddChild(fIconSizeSlider);
         fIconSizeSlider->Show();
+
+        // Icon Zoom Size Slider Row -- peak hover magnification, in percent
+        // (100 = no zoom, 180 = the original fixed zoom).
+        BRect zoomSliderRect(35.0f, 687.0f, frame.Width() - 35.0f, 737.0f);
+        fIconZoomSlider = new BSlider(zoomSliderRect, "zoom_slider", "Icon Zoom Size",
+            new BMessage(MSG_ICON_ZOOM_CHANGED), 100, 250);
+        fIconZoomSlider->SetHighColor(rgb_color{220, 225, 235, 255});
+        fIconZoomSlider->SetLimitLabels("None", "Large");
+        fIconZoomSlider->SetValue(static_cast<int32>(std::lround(fIconZoom * 100.0f)));
+        AddChild(fIconZoomSlider);
     }
 
 
@@ -1670,7 +1693,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
 		// 6. BALANCED BACKING CONTAINER
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 682.0f);
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 752.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -1814,6 +1837,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->SetTarget(this);
         fAlphaSlider->SetTarget(this);
         fIconSizeSlider->SetTarget(this);
+        fIconZoomSlider->SetTarget(this);
     }
 
     virtual void MessageReceived(BMessage* message) {
@@ -2263,6 +2287,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 break;
             }
 
+            case MSG_ICON_ZOOM_CHANGED: {
+                fIconZoom = static_cast<float>(fIconZoomSlider->Value()) / 100.0f;
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
            case 'abou': {
 			    BAlert* aboutAlert = new BAlert("About hdesktop",
 			        "hdesktop SDL Dock\n"
@@ -2292,13 +2323,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 class HaikuConfigWindow : public BWindow {
 public:
     HaikuConfigWindow(BRect centralAnchor)
-        : BWindow(BRect(0, 0, 560, 744), "hdesktop Configuration",
+        : BWindow(BRect(0, 0, 560, 814), "hdesktop Configuration",
                 B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 
-        ResizeTo(560.0f, 797.0f);
+        ResizeTo(560.0f, 867.0f);
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 797.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 867.0f) / 2.0f;
         MoveTo(targetX, targetY);
 
         ConfigView* configView = new ConfigView(Bounds());
@@ -5877,7 +5908,7 @@ void SyncDockWithRunningDeskbarApps() {
                     float ratio = distance2D / 180.0f;
 
                     // Smooth Gaussian bell-curve falloff transitions perfectly in all directions
-                    scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    scale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 float finalSize = baseSize * scale;
@@ -5920,7 +5951,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float ratio = distanceTrash2D / 180.0f;
 
                 // Smooth Gaussian bell-curve falloff transitions cleanly in all 360 degrees
-                trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                trashScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
             }
 
             float finalTrashSize = baseTrashSize * trashScale;
@@ -5965,7 +5996,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            float ratio = distanceTray2D / 180.0f;
 
 	            // Smooth Gaussian bell-curve falloff transitions cleanly in all directions
-	            trayScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	            trayScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
 	        }
 
 	        dynamicWidths.push_back(baselineTrayWidth * trayScale);
@@ -5996,7 +6027,7 @@ void SyncDockWithRunningDeskbarApps() {
                 // FIX: Base magnification entirely on the unified 180.0f radial distance circle
                 if (fCursorIsInsideHitbox && distanceClock2D < 180.0f) {
                     float ratio = distanceClock2D / 180.0f;
-                    clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    clockScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 dynamicWidths.push_back(baselineClockLayoutWidth * clockScale);
@@ -6027,7 +6058,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float volScale = 1.0f;
                 if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
                     float ratio = distanceVol2D / 180.0f;
-                    volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    volScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
@@ -6056,7 +6087,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float cpuScale = 1.0f;
                 if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
                     float ratio = distanceCpu2D / 180.0f;
-                    cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    cpuScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
@@ -6085,7 +6116,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float workspaceScale = 1.0f;
                 if (fCursorIsInsideHitbox && distanceWorkspace2D < 180.0f) {
                     float ratio = distanceWorkspace2D / 180.0f;
-                    workspaceScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    workspaceScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 float finalWorkspaceWidth = scaledWorkspaceWidth * workspaceScale;
@@ -6266,7 +6297,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 764.0f;
+									    float winHeight = 834.0f;
 
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
@@ -7342,9 +7373,9 @@ void SyncDockWithRunningDeskbarApps() {
 
 
 		// Keep exploding shards from flying above the actual SDL window's visible bounds
-		float fExplosionWindowTopBoundary = fHeight - std::ceil(fBaseIconSize * 2.0f + 50.0f);
+		float fExplosionWindowTopBoundary = fHeight - DockWindowHeightFor(fBaseIconSize);
 		float fExplosionMinY = fExplosionWindowTopBoundary + 8.0f; // small safety margin (bottom-anchored dock)
-		float fExplosionWindowBottomBoundary = std::ceil(fBaseIconSize * 2.0f + 50.0f);
+		float fExplosionWindowBottomBoundary = DockWindowHeightFor(fBaseIconSize);
 		float fExplosionMaxY = fExplosionWindowBottomBoundary - 8.0f; // small safety margin (top-anchored dock)
 
         // =========================================================================
@@ -7562,7 +7593,7 @@ void SyncDockWithRunningDeskbarApps() {
                     float ratio = distance2D / 180.0f;
 
                     // Smooth Gaussian bell-curve falloff transitions perfectly in all directions
-                    scale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    scale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 float finalSize = baseSize * scale;
@@ -7605,7 +7636,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float ratio = distanceTrash2D / 180.0f;
 
                 // Smooth Gaussian bell-curve falloff transitions cleanly in all 360 degrees
-                trashScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                trashScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
             }
 
             float finalTrashSize = baseTrashSize * trashScale;
@@ -7650,7 +7681,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            float ratio = distanceTray2D / 180.0f;
 
 	            // Smooth Gaussian bell-curve falloff transitions cleanly in all directions
-	            trayScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+	            trayScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
 	        }
 
 	        dynamicWidths.push_back(baselineTrayWidth * trayScale);
@@ -7681,7 +7712,7 @@ void SyncDockWithRunningDeskbarApps() {
                 // FIX: Base magnification entirely on the unified 180.0f radial distance circle
                 if (fCursorIsInsideHitbox && distanceClock2D < 180.0f) {
                     float ratio = distanceClock2D / 180.0f;
-                    clockScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    clockScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 dynamicWidths.push_back(baselineClockLayoutWidth * clockScale);
@@ -7712,7 +7743,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float volScale = 1.0f;
                 if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
                     float ratio = distanceVol2D / 180.0f;
-                    volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    volScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
@@ -7741,7 +7772,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float cpuScale = 1.0f;
                 if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
                     float ratio = distanceCpu2D / 180.0f;
-                    cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    cpuScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
@@ -7770,7 +7801,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float workspaceScale = 1.0f;
                 if (fCursorIsInsideHitbox && distanceWorkspace2D < 180.0f) {
                     float ratio = distanceWorkspace2D / 180.0f;
-                    workspaceScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                    workspaceScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
                 }
 
                 float finalWorkspaceWidth = scaledWorkspaceWidth * workspaceScale;
@@ -8158,7 +8189,7 @@ void SyncDockWithRunningDeskbarApps() {
                     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
                 }
 
-                if (scale > 1.4f && item.textTexture.id != 0) {
+                if (scale > 1.0f + (fIconZoom - 1.0f) * 0.5f && item.textTexture.id != 0) {
                     int tw = 0, th = 0;
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, item.textTexture.id);
                     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
@@ -9962,6 +9993,7 @@ void SaveConfiguration() {
             settingsMsg.AddInt32("dock_location", gDockLocation);
 
 			settingsMsg.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
+            settingsMsg.AddFloat(kSettingsIconZoomKey, fIconZoom);
             settingsMsg.AddFloat(kSettingsAlphaKey, fDockAlpha);
             settingsMsg.AddInt32(kSettingsSpinDurationKey, static_cast<int32>(fSpinDurationMs));
 
@@ -10025,6 +10057,9 @@ void LoadConfiguration() {
                 }
 
                 if (settingsMsg.FindFloat(kSettingsIconSizeKey, &valFloat) == B_OK) fBaseIconSize = valFloat;
+                if (settingsMsg.FindFloat(kSettingsIconZoomKey, &valFloat) == B_OK) {
+                    fIconZoom = std::max(1.0f, std::min(2.5f, valFloat));
+                }
                 if (settingsMsg.FindFloat(kSettingsAlphaKey, &valFloat) == B_OK) fDockAlpha = valFloat;
                 if (settingsMsg.FindInt32(kSettingsSpinDurationKey, &valInt32) == B_OK) fSpinDurationMs = static_cast<uint32>(valInt32);
 
@@ -10962,7 +10997,7 @@ int main(int argc, char* argv[]) {
             if (liveIconSize <= 0.0f) liveIconSize = 48.0f; // Fail-safe default
 
             // Apply your dynamic scaling height equation
-            int targetWindowHeight = static_cast<int>(std::ceil(liveIconSize * 2.0f + 50.0f));
+            int targetWindowHeight = static_cast<int>(DockWindowHeightFor(liveIconSize));
             int targetWindowWidth  = screenWidth;
             int targetWindowY      = HiddenScreenOffsetFor(targetWindowHeight);
 
