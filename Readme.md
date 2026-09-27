@@ -46,7 +46,7 @@ What maps to what on Linux:
 | Volume | PulseAudio API (PipeWire's `pipewire-pulse`) |
 | CPU / memory / process menus | `/proc` |
 | Trash | freedesktop Trash (`~/.local/share/Trash`) |
-| Tracker folder menus | "Places" submenus that browse the file system |
+| Tracker folder menus | "Browse…" menu over your home folder: hover a folder to open it as a submenu, click a folder or file to open it |
 
 Not ported (yet): live window thumbnails and the drag-windows-between-workspaces
 preview, which have no generic Wayland equivalent.

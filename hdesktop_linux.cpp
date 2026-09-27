@@ -2155,7 +2155,7 @@ struct MenuItem {
     bool enabled = true;
     bool header = false;          // dim, non-clickable section title
     int check = kCheckNone;
-    std::function<void()> action;
+    std::function<void()> action;                     // with a submenu too: runs on click, hover opens the submenu
     std::function<std::vector<MenuItem>()> submenu;
     unsigned liveMs = 0;          // re-run `submenu` this often while it's open (live CPU/memory menus)
     // BCpuBarMenuItem / BMemoryBarMenuItem style rows.
@@ -2468,8 +2468,10 @@ public:
             }
             ScrollToRow(fHovered);
             Redraw();
-        } else if ((sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right) && fHovered >= 0) {
+        } else if ((sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) && fHovered >= 0) {
             Activate(fHovered);
+        } else if (sym == XKB_KEY_Right && Selectable(fHovered) && fItems[fHovered].submenu) {
+            OpenSubmenuAt(fHovered);
         } else if (sym == XKB_KEY_Left && fParent) {
             fParent->CloseChild();
         }
@@ -2686,11 +2688,8 @@ private:
     void Activate(int row) {
         if (!Selectable(row)) return;
         MenuItem& it = fItems[row];
-        if (it.submenu) {
-            if (!fChild || fChildIndex != row) {
-                CloseChild();
-                OpenSubmenu(row);
-            }
+        if (it.submenu && !it.action) {
+            OpenSubmenuAt(row);
             return;
         }
         if (!it.action) return;
@@ -2698,6 +2697,12 @@ private:
         // Close first, then run -- an action often opens another surface.
         if (fGrabbing) gMenus.CloseAll();
         RunLater(action);
+    }
+
+    void OpenSubmenuAt(int row) {
+        if (fChild && fChildIndex == row) return;
+        CloseChild();
+        OpenSubmenu(row);
     }
 
     std::vector<MenuItem> fItems;
@@ -2773,64 +2778,93 @@ void MenuManager::CloseHover() {
     }
 }
 
-// Tracker's BNavMenu, rebuilt on plain directories: folders open as lazily
-// populated submenus, files and folders both open in the default handler.
+static std::string XdgUserDir(GUserDirectory which, const char* fallback) {
+    const char* d = g_get_user_special_dir(which);
+    if (d && *d) return d;
+    return HomeDir() + "/" + fallback;
+}
+
+// Folder icons for the XDG special directories, like Tracker's special
+// folder icons (home, Desktop, ...). Plain "folder" otherwise.
+static std::string FolderIconFor(const std::string& path) {
+    static const std::vector<std::pair<GUserDirectory, const char*>> kSpecial = {
+        {G_USER_DIRECTORY_DESKTOP, "user-desktop"},
+        {G_USER_DIRECTORY_DOCUMENTS, "folder-documents"},
+        {G_USER_DIRECTORY_DOWNLOAD, "folder-download"},
+        {G_USER_DIRECTORY_MUSIC, "folder-music"},
+        {G_USER_DIRECTORY_PICTURES, "folder-pictures"},
+        {G_USER_DIRECTORY_PUBLIC_SHARE, "folder-publicshare"},
+        {G_USER_DIRECTORY_TEMPLATES, "folder-templates"},
+        {G_USER_DIRECTORY_VIDEOS, "folder-videos"},
+    };
+    if (path == HomeDir()) return "user-home";
+    for (const auto& sp : kSpecial) {
+        const char* d = g_get_user_special_dir(sp.first);
+        if (d && path == d && path != HomeDir()) return sp.second;
+    }
+    return "folder";
+}
+
+// Tracker's BNavMenu, rebuilt on plain directories: hovering a folder opens
+// its contents as a submenu, clicking a folder opens it in the file manager,
+// clicking a file opens it in its preferred application. Folders are listed
+// first, hidden files are left out, and long folders scroll.
 static std::vector<MenuItem> BuildNavMenu(const std::string& dir) {
     std::vector<MenuItem> items;
-    {
-        MenuItem open;
-        open.label = "Open this folder";
-        open.iconName = "folder-open";
-        open.action = [dir]() { OpenPath(dir); };
-        items.push_back(open);
-        items.push_back(MenuItem::Separator());
-    }
     DIR* d = opendir(dir.c_str());
-    if (d == nullptr) return items;
-    struct Entry { std::string name; bool isDir; };
+    if (d == nullptr) {
+        items.push_back(MenuItem::Header("Can't read this folder"));
+        return items;
+    }
+    struct Entry { std::string name; bool isDir; std::string sortKey; };
     std::vector<Entry> entries;
     while (struct dirent* e = readdir(d)) {
         if (e->d_name[0] == '.') continue; // hidden files, like Tracker's default
-        std::string full = dir + "/" + e->d_name;
-        entries.push_back({e->d_name, IsDirectory(full)});
+        std::string full = (dir == "/" ? "" : dir) + "/" + e->d_name;
+        bool isDir = (e->d_type == DT_DIR) ||
+                     ((e->d_type == DT_LNK || e->d_type == DT_UNKNOWN) && IsDirectory(full));
+        // Case-insensitive, locale-aware order, as Tracker sorts names
+        char* folded = g_utf8_casefold(e->d_name, -1);
+        char* key = g_utf8_collate_key_for_filename(folded, -1);
+        entries.push_back({e->d_name, isDir, key});
+        g_free(key);
+        g_free(folded);
     }
     closedir(d);
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         if (a.isDir != b.isDir) return a.isDir;
-        return g_utf8_collate(a.name.c_str(), b.name.c_str()) < 0;
+        return a.sortKey < b.sortKey;
     });
-    const size_t kMaxEntries = 60;
+    // Folders like /usr/bin hold thousands of entries; past this many the
+    // last row opens the folder itself instead.
+    const size_t kMaxEntries = 1000;
     for (size_t i = 0; i < entries.size() && i < kMaxEntries; ++i) {
         const Entry& e = entries[i];
         std::string full = (dir == "/" ? "" : dir) + "/" + e.name;
         MenuItem item;
         item.label = e.name;
+        item.action = [full]() { OpenPath(full); };
         if (e.isDir) {
-            item.iconName = "folder";
+            item.iconName = FolderIconFor(full);
             item.submenu = [full]() { return BuildNavMenu(full); };
         } else {
-            char* type = g_content_type_guess(full.c_str(), nullptr, 0, nullptr);
+            char* type = g_content_type_guess(e.name.c_str(), nullptr, 0, nullptr);
             GIcon* gicon = type ? g_content_type_get_icon(type) : nullptr;
             item.iconName = AppDatabase::IconNameFor(gicon);
             if (gicon) g_object_unref(gicon);
             g_free(type);
-            item.action = [full]() { OpenPath(full); };
         }
         items.push_back(item);
     }
     if (entries.size() > kMaxEntries) {
+        items.push_back(MenuItem::Separator());
         MenuItem more;
-        more.label = "More...";
+        more.label = "Open folder to see " + std::to_string(entries.size() - kMaxEntries) + " more\u2026";
+        more.iconName = "folder-open";
         more.action = [dir]() { OpenPath(dir); };
         items.push_back(more);
     }
     return items;
-}
-
-static std::string XdgUserDir(GUserDirectory which, const char* fallback) {
-    const char* d = g_get_user_special_dir(which);
-    if (d && *d) return d;
-    return HomeDir() + "/" + fallback;
 }
 
 static std::vector<MenuItem> BuildPlacesMenu() {
@@ -2841,6 +2875,7 @@ static std::vector<MenuItem> BuildPlacesMenu() {
         m.label = label;
         m.iconName = icon;
         m.submenu = [path]() { return BuildNavMenu(path); };
+        m.action = [path]() { OpenPath(path); };
         items.push_back(m);
     };
     addPlace("Home", "user-home", HomeDir());
@@ -6430,11 +6465,15 @@ private:
         prefs.iconName = "preferences-system";
         prefs.action = []() { ShowConfigPanel(); };
         items.push_back(prefs);
-        MenuItem places;
-        places.label = "Places";
-        places.iconName = "folder";
-        places.submenu = []() { return BuildPlacesMenu(); };
-        items.push_back(places);
+        // Tracker's "Browse" nav menu over the home folder: hover to walk
+        // into it, click to open home in the file manager.
+        MenuItem browse;
+        browse.label = "Browse\u2026";
+        browse.iconName = "user-home";
+        std::string home = HomeDir();
+        browse.submenu = [home]() { return BuildNavMenu(home); };
+        browse.action = [home]() { OpenPath(home); };
+        items.push_back(browse);
         items.push_back(MenuItem::Separator());
         MenuItem about;
         about.label = "About hDesktop";
