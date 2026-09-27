@@ -765,6 +765,10 @@ public:
     BCpuBarMenuItem(const char* label, BMessage* message, double cpuPercent, BBitmap* icon = nullptr)
         : BMenuItem(label, message), fCpuPercent(cpuPercent), fIcon(icon) {}
 
+    // Cascading row (a team whose threads open in a submenu); the label is the submenu's name.
+    BCpuBarMenuItem(BMenu* submenu, double cpuPercent, BBitmap* icon = nullptr)
+        : BMenuItem(submenu), fCpuPercent(cpuPercent), fIcon(icon) {}
+
     virtual ~BCpuBarMenuItem() override {
         delete fIcon; // Safely release bitmap memory when item is removed
     }
@@ -807,9 +811,11 @@ protected:
             menu->SetDrawingMode(B_OP_COPY);
         }
 
-        // 3. Render the Process Name string
+        // 3. Render the Process Name string (clipped before the percentage column)
+        BString name(Label());
+        menu->TruncateString(&name, B_TRUNCATE_END, textColumnLeft - nameColumnLeft - 8.0f);
         menu->MovePenTo(nameColumnLeft, fontBaseline);
-        menu->DrawString(Label());
+        menu->DrawString(name.String());
 
         // 4. Format and render the numeric percentage string
         char pctStr[16];
@@ -914,6 +920,133 @@ private:
 };
 
 
+// =========================================================================
+// LIVE-PULSING SUBSYSTEM: ONE TEAM'S THREADS (PROCESSCONTROLLER-STYLE CASCADE)
+// Row 0 force-kills the whole team ('kthr'); every thread row below the
+// separator kills just that thread ('kthd') after a confirmation alert.
+// =========================================================================
+class BTeamThreadsMenu : public BMenu {
+public:
+    BTeamThreadsMenu(team_id team, const char* name)
+        : BMenu(name), fTeam(-1), fLastUpdateTime(0) {
+        SetFlags(Flags() | B_PULSE_NEEDED);
+
+        system_info sysInfo;
+        fCpuCount = (get_system_info(&sysInfo) == B_OK) ? sysInfo.cpu_count : 1;
+        if (fCpuCount < 1) fCpuCount = 1;
+
+        SetTeam(team, name);
+    }
+
+    // Point this submenu at another team (the parent list reuses rows by index).
+    void SetTeam(team_id team, const char* name) {
+        if (team == fTeam) return;
+        fTeam = team;
+        fTeamName = name;
+
+        RemoveItems(0, CountItems(), true);
+        fThreadHistory.clear();
+
+        BMessage* killTeamMsg = new BMessage('kthr');
+        killTeamMsg->AddInt32("target_thread", team);
+        killTeamMsg->AddString("target_name", name);
+
+        char killLabel[B_OS_NAME_LENGTH + 32];
+        std::snprintf(killLabel, sizeof(killLabel), "Force Kill \xE2\x80\x9C%s\xE2\x80\x9D\xE2\x80\xA6", name);
+        AddItem(new BMenuItem(killLabel, killTeamMsg));
+        AddSeparatorItem();
+
+        // Populate right away so the menu window is sized correctly when it opens
+        fLastUpdateTime = system_time();
+        _RefreshThreads();
+    }
+
+    virtual void AttachedToWindow() override {
+        BMenu::AttachedToWindow();
+        Window()->SetPulseRate(500000); // Pulse every half second
+    }
+
+    virtual void Pulse() override {
+        BMenu::Pulse();
+        _RefreshThreads();
+        Invalidate();
+    }
+
+private:
+    enum { kFirstThreadRow = 2, kMaxThreadRows = 60 };
+
+    void _RefreshThreads() {
+        bigtime_t currentTime = system_time();
+        bigtime_t totalTimeDelta = (currentTime - fLastUpdateTime) * fCpuCount;
+        fLastUpdateTime = currentTime;
+
+        std::map<thread_id, bigtime_t> nextHistory;
+        int32 index = kFirstThreadRow;
+
+        // Threads stay in the kernel's (creation) order so rows don't jump under the cursor
+        thread_info thInfo;
+        int32 thCookie = 0;
+        while (get_next_thread_info(fTeam, &thCookie, &thInfo) == B_OK) {
+            bigtime_t threadTime = thInfo.user_time + thInfo.kernel_time;
+
+            double cpu = 0.0;
+            auto history = fThreadHistory.find(thInfo.thread);
+            if (history != fThreadHistory.end() && totalTimeDelta > 0 && threadTime >= history->second) {
+                cpu = (static_cast<double>(threadTime - history->second) /
+                       static_cast<double>(totalTimeDelta)) * 100.0;
+            }
+            nextHistory[thInfo.thread] = threadTime;
+
+            if (index >= kFirstThreadRow + kMaxThreadRows) continue; // still sample, just don't list
+
+            char rowText[B_OS_NAME_LENGTH + 24];
+            std::snprintf(rowText, sizeof(rowText), "%s (%d)", thInfo.name, static_cast<int>(thInfo.thread));
+
+            BCpuBarMenuItem* item = dynamic_cast<BCpuBarMenuItem*>(ItemAt(index));
+            if (item) {
+                item->UpdateMetrics(cpu, rowText);
+                if (item->Message()) {
+                    item->Message()->ReplaceInt32("target_thread_id", thInfo.thread);
+                    item->Message()->ReplaceString("target_name", thInfo.name);
+                }
+            } else {
+                // Drop a stale "no threads" placeholder before appending real rows
+                if (ItemAt(index) != nullptr) delete RemoveItem(index);
+
+                BMessage* killThreadMsg = new BMessage('kthd');
+                killThreadMsg->AddInt32("target_thread_id", thInfo.thread);
+                killThreadMsg->AddString("target_name", thInfo.name);
+                killThreadMsg->AddString("team_name", fTeamName.String());
+                AddItem(new BCpuBarMenuItem(rowText, killThreadMsg, cpu), index);
+            }
+            index++;
+        }
+        fThreadHistory.swap(nextHistory);
+
+        if (index == kFirstThreadRow) {
+            // The team has exited (or can't be read): leave a single disabled note
+            if (ItemAt(index) == nullptr) {
+                BMenuItem* none = new BMenuItem("No threads (team has exited)", nullptr);
+                none->SetEnabled(false);
+                AddItem(none, index);
+            }
+            index++;
+        }
+
+        // Trim rows for threads that have exited
+        while (CountItems() > index) {
+            delete RemoveItem(index);
+        }
+    }
+
+    team_id fTeam;
+    BString fTeamName;
+    int32 fCpuCount;
+    bigtime_t fLastUpdateTime;
+    std::map<thread_id, bigtime_t> fThreadHistory;
+};
+
+
 class BRealtimeCpuMenu : public BMenu {
 public:
     BRealtimeCpuMenu(const char* title) : BMenu(title) {
@@ -971,12 +1104,9 @@ public:
             fProcessHistoryMap[tInfo.team].mainThreadId = 0;
             fProcessHistoryMap[tInfo.team].lastTimeSample = currentTeamTotalTime;
 
-            BMessage* killThMsg = new BMessage('kthr');
-            killThMsg->AddInt32("target_thread", tInfo.team);
-            killThMsg->AddString("target_name", cleanName);
-
+            // Each team row cascades into its live thread list (Force Kill sits at the top of it).
             // Pass the icon to initialize item sizes perfectly on swipe one
-            AddItem(new BCpuBarMenuItem(cleanName, killThMsg, 0.0, processIcon));
+            AddItem(new BCpuBarMenuItem(new BTeamThreadsMenu(tInfo.team, cleanName), 0.0, processIcon));
 
             index++;
             if (index >= 45) break;
@@ -1078,6 +1208,13 @@ void BRealtimeCpuMenu::Pulse() {
         }
     }
 
+    // Rows are reused by index, so hold the list still while one of the thread
+    // submenus is open -- otherwise the open submenu could be pointed at another team.
+    for (int32 i = 0; i < CountItems(); i++) {
+        BMenu* sub = ItemAt(i)->Submenu();
+        if (sub != nullptr && sub->Window() != nullptr) return;
+    }
+
     // 4. Update existing graphical bars or create new ones complete with system icons!
     int32 index = 0;
     for (const auto& entry : currentPassList) {
@@ -1087,8 +1224,9 @@ void BRealtimeCpuMenu::Pulse() {
         BCpuBarMenuItem* item = dynamic_cast<BCpuBarMenuItem*>(ItemAt(index));
         if (item) {
             item->UpdateMetrics(entry.calculatedCpu, rowText);
-            if (item->Message()) {
-                item->Message()->ReplaceInt32("target_thread", entry.teamId);
+            BTeamThreadsMenu* threads = dynamic_cast<BTeamThreadsMenu*>(item->Submenu());
+            if (threads) {
+                threads->SetTeam(entry.teamId, entry.name);
             }
         } else {
             // Locate and extract the dynamic system icon for this newly listed process team
@@ -1113,12 +1251,8 @@ void BRealtimeCpuMenu::Pulse() {
                 }
             }
 
-            // Configure the message tracking hooks
-            BMessage* killThMsg = new BMessage('kthr');
-            killThMsg->AddInt32("target_thread", entry.teamId);
-            killThMsg->AddString("target_name", entry.name);
-
-            AddItem(new BCpuBarMenuItem(rowText, killThMsg, entry.calculatedCpu, processIcon));
+            AddItem(new BCpuBarMenuItem(new BTeamThreadsMenu(entry.teamId, entry.name),
+                entry.calculatedCpu, processIcon));
         }
 
         index++;
@@ -10440,6 +10574,37 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
 
                         if (userChoice == 1) {
                             kill_team(targetTeam);
+                        }
+                    }
+                    break;
+                }
+
+                case 'kthd': {
+                    thread_id targetThread = -1;
+                    const char* threadName = "Unknown";
+                    const char* teamName = "Unknown";
+
+                    if (actionMsg->FindInt32("target_thread_id", &targetThread) == B_OK) {
+                        actionMsg->FindString("target_name", &threadName);
+                        actionMsg->FindString("team_name", &teamName);
+
+                        char alertText[320];
+                        std::snprintf(alertText, sizeof(alertText),
+                            "Are you sure you want to kill the thread '%s' (Thread ID: %d) of '%s'?\n\n"
+                            "Killing a single thread can leave the application unstable.",
+                            threadName, static_cast<int>(targetThread), teamName);
+
+                        BAlert* confirmationBox = new BAlert("Kill Thread", alertText,
+                            "Cancel", "Kill Thread", nullptr,
+                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+
+                        confirmationBox->SetShortcut(0, B_ESCAPE);
+                        confirmationBox->CenterOnScreen();
+
+                        int32 userChoice = confirmationBox->Go();
+
+                        if (userChoice == 1) {
+                            kill_thread(targetThread);
                         }
                     }
                     break;

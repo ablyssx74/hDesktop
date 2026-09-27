@@ -2447,6 +2447,7 @@ private:
     void Measure() {
         fHasLeftColumn = false;
         bool hasBars = false;
+        bool hasSubmenus = false;
         double maxLabel = 0;
         double h = kPadY * 2;
         for (const auto& it : fItems) {
@@ -2454,6 +2455,7 @@ private:
             if (it.separator) continue;
             if (it.icon || !it.iconName.empty() || it.check != kCheckNone) fHasLeftColumn = true;
             if (it.barPercent >= 0) hasBars = true;
+            if (it.submenu) hasSubmenus = true;
             double tw = 0;
             MeasureText(it.label, kFontSize, it.header, &tw, nullptr);
             maxLabel = std::max(maxLabel, tw);
@@ -2462,7 +2464,7 @@ private:
         double w;
         if (hasBars) {
             fNameColumnW = std::clamp(maxLabel + 16, 120.0, 280.0);
-            w = left + fNameColumnW + kValueColumnW + kBarW + kPadX + 4;
+            w = left + fNameColumnW + kValueColumnW + kBarW + kPadX + 4 + (hasSubmenus ? 14 : 0);
         } else if (fCentered) {
             w = std::clamp(maxLabel + 16, 100.0, 320.0);
         } else {
@@ -4429,6 +4431,70 @@ struct ProcessInfo {
     uid_t uid = 0;
     uint64_t cpuTicks = 0;
     double cpuPercent = 0;
+};
+
+struct ThreadInfo {
+    pid_t tid = 0;
+    std::string name;
+    char state = '?';
+    double cpuPercent = 0;
+};
+
+// One process's threads, from /proc/<pid>/task/<tid>/{comm,stat} -- the same
+// source `top -H` uses. CPU% is measured since the previous call, on the same
+// scale as ProcessSampler (share of all CPUs).
+class ThreadSampler {
+public:
+    explicit ThreadSampler(pid_t pid) : fPid(pid) {}
+
+    std::vector<ThreadInfo> Sample() {
+        std::vector<ThreadInfo> out;
+        uint64_t nowMs = NowMs();
+        double elapsedTicks = (fLastMs == 0) ? 0 : (nowMs - fLastMs) / 1000.0 * sysconf(_SC_CLK_TCK);
+        long cpus = std::max(1L, sysconf(_SC_NPROCESSORS_ONLN));
+        std::map<pid_t, uint64_t> current;
+        std::string taskDir = "/proc/" + std::to_string(fPid) + "/task";
+        DIR* d = opendir(taskDir.c_str());
+        if (d == nullptr) return out;
+        while (struct dirent* e = readdir(d)) {
+            if (!isdigit(static_cast<unsigned char>(e->d_name[0]))) continue;
+            ThreadInfo t;
+            t.tid = atoi(e->d_name);
+            std::string base = taskDir + "/" + e->d_name;
+            std::string stat = ReadFile(base + "/stat");
+            size_t lp = stat.find('('), rp = stat.rfind(')');
+            if (lp == std::string::npos || rp == std::string::npos || rp + 2 >= stat.size()) continue;
+            t.name = Trim(ReadFile(base + "/comm"));
+            if (t.name.empty()) t.name = stat.substr(lp + 1, rp - lp - 1);
+            // After ")": state(3) ... utime(14) stime(15)
+            std::vector<std::string> fields;
+            size_t pos = rp + 2;
+            while (pos < stat.size() && fields.size() < 14) {
+                size_t sp = stat.find(' ', pos);
+                if (sp == std::string::npos) sp = stat.size();
+                fields.push_back(stat.substr(pos, sp - pos));
+                pos = sp + 1;
+            }
+            if (fields.size() < 13) continue;
+            t.state = fields[0].empty() ? '?' : fields[0][0];
+            uint64_t ticks = strtoull(fields[11].c_str(), nullptr, 10) + strtoull(fields[12].c_str(), nullptr, 10);
+            auto prev = fPrev.find(t.tid);
+            if (prev != fPrev.end() && elapsedTicks > 0 && ticks >= prev->second) {
+                t.cpuPercent = (ticks - prev->second) / (elapsedTicks * cpus) * 100.0;
+            }
+            current[t.tid] = ticks;
+            out.push_back(t);
+        }
+        closedir(d);
+        fPrev = std::move(current);
+        fLastMs = nowMs;
+        return out;
+    }
+
+private:
+    pid_t fPid;
+    std::map<pid_t, uint64_t> fPrev;
+    uint64_t fLastMs = 0;
 };
 
 class ProcessSampler {
@@ -6414,17 +6480,61 @@ private:
             pid_t pid = p.pid;
             std::string name = p.name;
             bool mine = (p.uid == getuid());
-            m.enabled = mine;
-            m.action = [pid, name]() {
-                ShowAlert("Force Terminate",
-                    "Are you sure you want to force terminate the process '" + name + "' (PID: " +
-                    std::to_string(pid) + ")?\n\nUnsaved progress inside this application will be lost.",
-                    {"Cancel", "Force Kill"}, [pid](int choice) {
-                        if (choice == 1) kill(pid, SIGKILL);
-                    }, 0);
-            };
+            auto threads = std::make_shared<ThreadSampler>(pid);
+            threads->Sample(); // prime the CPU deltas
+            m.submenu = [pid, name, mine, threads]() { return ThreadItems(pid, name, mine, *threads); };
+            m.liveMs = 1000;
             items.push_back(m);
             if (items.size() >= 30) break;
+        }
+        return items;
+    }
+
+    // One process's threads (ProcessController's team submenu). Linux has no
+    // way to kill a single thread from outside its process -- any signal takes
+    // the whole process down -- so thread rows are view-only here, and the
+    // only action is the process-level Force Kill at the top.
+    static std::vector<MenuItem> ThreadItems(pid_t pid, const std::string& name, bool mine, ThreadSampler& sampler) {
+        std::vector<MenuItem> items;
+        MenuItem killItem;
+        killItem.label = mine ? "Force Kill \u201c" + name + "\u201d\u2026" : "Force Kill (not your process)";
+        killItem.iconName = "process-stop";
+        killItem.enabled = mine;
+        killItem.action = [pid, name]() {
+            ShowAlert("Force Terminate",
+                "Are you sure you want to force terminate the process '" + name + "' (PID: " +
+                std::to_string(pid) + ")?\n\nUnsaved progress inside this application will be lost.",
+                {"Cancel", "Force Kill"}, [pid](int choice) {
+                    if (choice == 1) kill(pid, SIGKILL);
+                }, 0);
+        };
+        items.push_back(killItem);
+        items.push_back(MenuItem::Separator());
+
+        auto threads = sampler.Sample();
+        std::stable_sort(threads.begin(), threads.end(), [](const ThreadInfo& a, const ThreadInfo& b) {
+            if (a.cpuPercent != b.cpuPercent) return a.cpuPercent > b.cpuPercent;
+            return a.tid < b.tid;
+        });
+        char header[96];
+        snprintf(header, sizeof(header), "Threads: %zu (view only on Linux)", threads.size());
+        items.push_back(MenuItem::Header(header));
+        const size_t kMaxThreads = 40;
+        for (size_t i = 0; i < threads.size() && i < kMaxThreads; ++i) {
+            const ThreadInfo& t = threads[i];
+            MenuItem row;
+            row.label = t.name + "  (" + std::to_string(t.tid) + ")";
+            row.barPercent = t.cpuPercent;
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%3.1f%%", t.cpuPercent);
+            row.valueText = buf;
+            items.push_back(row); // no action: view only
+        }
+        if (threads.size() > kMaxThreads) {
+            MenuItem more;
+            more.label = "\u2026and " + std::to_string(threads.size() - kMaxThreads) + " more";
+            more.enabled = false;
+            items.push_back(more);
         }
         return items;
     }
