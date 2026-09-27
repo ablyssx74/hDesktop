@@ -360,6 +360,10 @@ struct TaskbarItem {
     std::string appName;
     HaikuTexture icon;
     bool isMinimized;
+    // Whether any of the app's normal windows is actually showing on the
+    // current workspace (set by RenderFrame). Unlike isMinimized, not forced
+    // false just because the app is the active one.
+    bool hasVisibleWindows = true;
     bool* openStateFlag;
     bool* minimizeStateFlag;
     team_id teamId;
@@ -5303,6 +5307,13 @@ void SyncDockWithRunningDeskbarApps() {
         activeTeamId = activeAppInfo.team;
     }
 
+    // Remember which app was really in front, ignoring hDesktop itself --
+    // clicking (or with Auto-Raise, just hovering) the dock can make the dock
+    // the active app, so a taskbar click can't ask the roster at that moment.
+    if (activeTeamId >= 0 && (be_app == nullptr || activeTeamId != be_app->Team())) {
+        fLastForegroundTeam = activeTeamId;
+    }
+
     BList teamList;
     be_roster->GetAppList(&teamList);
 
@@ -5382,6 +5393,7 @@ void SyncDockWithRunningDeskbarApps() {
             for (const auto& oldWin : oldTaskbarWindows) {
                 if (oldWin.teamId == id) {
                     openApp.isMinimized = oldWin.isMinimized;
+                    openApp.hasVisibleWindows = oldWin.hasVisibleWindows;
                     foundOldInstance = true;
                     break;
                 }
@@ -6604,8 +6616,21 @@ void SyncDockWithRunningDeskbarApps() {
                 isButtonLatchedMap[actionKey] = true;
                 // =========================================================================
 
+                // Only an app that's already in front gets minimized. One that is
+                // merely visible -- e.g. partly covered by another app's window --
+                // is brought to the front instead, so a single click always
+                // focuses it rather than minimizing it first.
+                bool isForegroundApp = (activeTaskWin.teamId == fLastForegroundTeam);
+                {
+                    app_info frontInfo;
+                    if (be_roster->GetActiveAppInfo(&frontInfo) == B_OK
+                        && (be_app == nullptr || frontInfo.team != be_app->Team())) {
+                        isForegroundApp = (frontInfo.team == activeTaskWin.teamId);
+                    }
+                }
+
                 // READ TRUTH FROM RENDERFRAME WORKSPACE BITMASK
-	            if (activeTaskWin.isMinimized == false) {
+	            if (isForegroundApp && activeTaskWin.hasVisibleWindows) {
 
 	                BPrivate::AppServerLink link;
 	                link.StartMessage(AS_MINIMIZE_TEAM);
@@ -8369,6 +8394,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    } else if (totalTeamWindows > 0) {
 		        appIsGenuinelyMinimized = (normalVisibleWindows == 0);
 		    }
+		    activeTaskWin.hasVisibleWindows = !appIsGenuinelyMinimized;
 
 		    // 2. NATIVE FOREGROUND FOCUS CHECKING
 		    app_info activeAppInfo;
@@ -9953,6 +9979,7 @@ private:
 	float fPreMuteVolumeLevel = 0.5f;
 	uint32 fLastTrackerMenuCloseTime;
 	uint32 fLastHoverListRefreshTime;
+	team_id fLastForegroundTeam = -1; // last app in front other than hDesktop -- see SyncDockWithRunningDeskbarApps()
 	bool fTrackerMenuIsActive = false;
 
 //@private
