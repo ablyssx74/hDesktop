@@ -328,7 +328,7 @@ static void LoadConfiguration() {
     gSettings.iconZoom = std::clamp(gSettings.iconZoom, 1.0f, 2.5f);
     gSettings.dockAlpha = std::clamp(gSettings.dockAlpha, 0.0f, 1.0f);
     gSettings.effectDurationMs = std::clamp(gSettings.effectDurationMs, 200, 1500);
-    if (gSettings.titlePopup && gSettings.titleLabel) gSettings.titleLabel = false;
+    gSettings.titleLabel = false; // Label Mode was retired; the popup list is the title overlay
 }
 
 // =========================================================================
@@ -981,293 +981,34 @@ bool IconTheme::LoadWithPixbuf(cairo_t* cr, const std::string& path, int pxSize)
 static IconTheme* gIconTheme = nullptr;
 
 // =========================================================================
-// HVIF RENDERER (Haiku Vector Icon Format)
+// BUILT-IN TRACKER ICON
 // =========================================================================
-// Draws Haiku's own vector icons -- the "ncif" data Icon-O-Matic exports --
-// with cairo, following Haiku's FlatIconImporter / IconRenderer: a 64x64
-// unit canvas, styles (solid colors and gradients), paths (plain, no-curve
-// or command-packed) and shapes (a style plus paths, with an optional
-// transform, level-of-detail range and stroke/contour/affine transformers).
-// Used for the Tracker icon, so it looks the same whatever the icon theme.
-#include "TrackerIcon.cpp"
+// Haiku's Tracker icon (Tracker.svg, exported from Icon-O-Matic), compiled
+// into the binary so the Tracker taskbar icon looks the same whatever the
+// icon theme. The Makefile turns the SVG into the kTrackerSvg byte array.
+#include "tracker-icon.h"
 
-namespace hvif {
-
-class Reader {
-public:
-    Reader(const unsigned char* data, size_t size) : fData(data), fSize(size) {}
-    bool Ok() const { return fOk; }
-    uint8_t U8() {
-        if (fPos >= fSize) { fOk = false; return 0; }
-        return fData[fPos++];
-    }
-    double Coord() {
-        uint8_t v = U8();
-        if (v & 128) {
-            uint8_t low = U8();
-            return (((v & 127) << 8) | low) / 102.0 - 128.0;
-        }
-        return v - 32.0;
-    }
-    // 24-bit float: 1 sign bit, 6 exponent bits (bias 32), 17 mantissa bits.
-    double Float24() {
-        uint32_t a = U8(), b = U8(), c = U8();
-        uint32_t v = (a << 16) | (b << 8) | c;
-        if (v == 0) return 0.0;
-        uint32_t sign = (v & 0x800000) >> 23;
-        int32_t exponent = static_cast<int32_t>((v & 0x7e0000) >> 17) - 32;
-        uint32_t mantissa = (v & 0x01ffff) << 6;
-        uint32_t bits = (sign << 31) | (static_cast<uint32_t>(exponent + 127) << 23) | mantissa;
-        float f;
-        memcpy(&f, &bits, sizeof(f));
-        return f;
-    }
-    void Matrix(cairo_matrix_t* m) {
-        double v[6];
-        for (double& x : v) x = Float24();
-        cairo_matrix_init(m, v[0], v[1], v[2], v[3], v[4], v[5]);
-    }
-
-private:
-    const unsigned char* fData;
-    size_t fSize;
-    size_t fPos = 0;
-    bool fOk = true;
-};
-
-struct Stop { double offset, r, g, b, a; };
-struct Style {
-    bool gradient = false;
-    int gradientType = 0;          // 0 linear, 1 circular, 2 diamond, 3 conic, 4 xy, 5 sqrt-xy
-    bool hasMatrix = false;
-    cairo_matrix_t matrix;
-    double r = 0, g = 0, b = 0, a = 1;
-    std::vector<Stop> stops;
-};
-struct Point { double x, y, inX, inY, outX, outY; };
-struct Path { std::vector<Point> points; bool closed = false; };
-struct Shape {
-    int style = 0;
-    std::vector<int> paths;
-    cairo_matrix_t matrix;
-    double minScale = 0.0, maxScale = 1e9;
-    std::vector<cairo_matrix_t> affines; // affine transformers
-    int outline = 0;                     // 0 fill, 1 stroke, 2 contour (grow)
-    double width = 0;
-    int join = 0, cap = 0;
-    double miter = 4;
-};
-
-static Point MakePoint(double x, double y) { return Point{x, y, x, y, x, y}; }
-
-static bool Parse(const unsigned char* data, size_t size,
-    std::vector<Style>& styles, std::vector<Path>& paths, std::vector<Shape>& shapes) {
-    Reader in(data, size);
-    if (size < 4 || memcmp(data, "ncif", 4) != 0) return false;
-    for (int i = 0; i < 4; ++i) in.U8();
-
-    int styleCount = in.U8();
-    for (int i = 0; i < styleCount && in.Ok(); ++i) {
-        Style s;
-        switch (in.U8()) {
-            case 1: s.r = in.U8() / 255.0; s.g = in.U8() / 255.0; s.b = in.U8() / 255.0; s.a = in.U8() / 255.0; break;
-            case 3: s.r = in.U8() / 255.0; s.g = in.U8() / 255.0; s.b = in.U8() / 255.0; break;
-            case 4: s.r = s.g = s.b = in.U8() / 255.0; s.a = in.U8() / 255.0; break;
-            case 5: s.r = s.g = s.b = in.U8() / 255.0; break;
-            case 2: {
-                s.gradient = true;
-                s.gradientType = in.U8();
-                uint8_t flags = in.U8();
-                int stopCount = in.U8();
-                s.hasMatrix = (flags & 0x02) != 0;
-                if (s.hasMatrix) in.Matrix(&s.matrix);
-                bool alpha = !(flags & 0x04);
-                bool grays = (flags & 0x10) != 0;
-                for (int k = 0; k < stopCount; ++k) {
-                    Stop st;
-                    st.offset = in.U8() / 255.0;
-                    if (grays) {
-                        st.r = st.g = st.b = in.U8() / 255.0;
-                    } else {
-                        st.r = in.U8() / 255.0; st.g = in.U8() / 255.0; st.b = in.U8() / 255.0;
-                    }
-                    st.a = alpha ? in.U8() / 255.0 : 1.0;
-                    s.stops.push_back(st);
-                }
-                break;
-            }
-            default: return false;
-        }
-        styles.push_back(s);
-    }
-
-    int pathCount = in.U8();
-    for (int i = 0; i < pathCount && in.Ok(); ++i) {
-        Path p;
-        uint8_t flags = in.U8();
-        p.closed = (flags & 0x02) != 0;
-        int count = in.U8();
-        if (flags & 0x04) {
-            // Command-packed: 2 bits per point (h-line, v-line, line, curve), LSB first
-            std::vector<uint8_t> commands((count + 3) / 4);
-            for (auto& c : commands) c = in.U8();
-            Point prev = MakePoint(0, 0);
-            for (int k = 0; k < count; ++k) {
-                int command = (commands[k / 4] >> ((k % 4) * 2)) & 3;
-                Point pt;
-                if (command == 0) { double x = in.Coord(); pt = MakePoint(x, prev.y); }
-                else if (command == 1) { double y = in.Coord(); pt = MakePoint(prev.x, y); }
-                else if (command == 2) { double x = in.Coord(); double y = in.Coord(); pt = MakePoint(x, y); }
-                else {
-                    pt.x = in.Coord(); pt.y = in.Coord();
-                    pt.inX = in.Coord(); pt.inY = in.Coord();
-                    pt.outX = in.Coord(); pt.outY = in.Coord();
-                }
-                p.points.push_back(pt);
-                prev = pt;
-            }
-        } else if (flags & 0x08) {
-            for (int k = 0; k < count; ++k) {
-                double x = in.Coord();
-                double y = in.Coord();
-                p.points.push_back(MakePoint(x, y));
-            }
-        } else {
-            for (int k = 0; k < count; ++k) {
-                Point pt;
-                pt.x = in.Coord(); pt.y = in.Coord();
-                pt.inX = in.Coord(); pt.inY = in.Coord();
-                pt.outX = in.Coord(); pt.outY = in.Coord();
-                p.points.push_back(pt);
-            }
-        }
-        paths.push_back(p);
-    }
-
-    int shapeCount = in.U8();
-    for (int i = 0; i < shapeCount && in.Ok(); ++i) {
-        if (in.U8() != 10) return false; // only path-source shapes exist
-        Shape s;
-        cairo_matrix_init_identity(&s.matrix);
-        s.style = in.U8();
-        int count = in.U8();
-        for (int k = 0; k < count; ++k) s.paths.push_back(in.U8());
-        uint8_t flags = in.U8();
-        if (flags & 0x02) {
-            in.Matrix(&s.matrix);
-        } else if (flags & 0x20) {
-            double tx = in.Coord();
-            double ty = in.Coord();
-            cairo_matrix_init_translate(&s.matrix, tx, ty);
-        }
-        if (flags & 0x08) {
-            s.minScale = in.U8() / 63.75;
-            s.maxScale = in.U8() / 63.75;
-        }
-        if (flags & 0x10) {
-            int transformers = in.U8();
-            for (int k = 0; k < transformers; ++k) {
-                switch (in.U8()) {
-                    case 20: { cairo_matrix_t m; in.Matrix(&m); s.affines.push_back(m); break; }
-                    case 21: s.outline = 2; s.width = in.U8() - 128.0; s.join = in.U8(); s.miter = in.U8(); break;
-                    case 22: for (int n = 0; n < 9; ++n) in.Float24(); break; // perspective: not drawn
-                    case 23: {
-                        s.outline = 1;
-                        s.width = in.U8() - 128.0;
-                        uint8_t options = in.U8();
-                        s.join = options & 15;
-                        s.cap = options >> 4;
-                        s.miter = in.U8();
-                        break;
-                    }
-                    default: return false;
-                }
-            }
-        }
-        shapes.push_back(s);
-    }
-    return in.Ok();
-}
-
-static cairo_pattern_t* MakePattern(const Style& s) {
-    if (!s.gradient) return cairo_pattern_create_rgba(s.r, s.g, s.b, s.a);
-    // Haiku's gradient space: linear runs -64..64 along x, the radial kinds
-    // span radius 0..64; the style's matrix places that in shape space.
-    cairo_pattern_t* p = (s.gradientType == 0)
-        ? cairo_pattern_create_linear(-64, 0, 64, 0)
-        : cairo_pattern_create_radial(0, 0, 0, 0, 0, 64);
-    for (const Stop& st : s.stops) cairo_pattern_add_color_stop_rgba(p, st.offset, st.r, st.g, st.b, st.a);
-    cairo_pattern_set_extend(p, CAIRO_EXTEND_PAD);
-    if (s.hasMatrix) {
-        cairo_matrix_t inv = s.matrix;
-        if (cairo_matrix_invert(&inv) == CAIRO_STATUS_SUCCESS) cairo_pattern_set_matrix(p, &inv);
-    }
-    return p;
-}
-
-static void AddPath(cairo_t* cr, const Path& p) {
-    const auto& pts = p.points;
-    if (pts.empty()) return;
-    cairo_move_to(cr, pts[0].x, pts[0].y);
-    for (size_t i = 1; i < pts.size(); ++i) {
-        cairo_curve_to(cr, pts[i - 1].outX, pts[i - 1].outY, pts[i].inX, pts[i].inY, pts[i].x, pts[i].y);
-    }
-    if (p.closed) {
-        cairo_curve_to(cr, pts.back().outX, pts.back().outY, pts[0].inX, pts[0].inY, pts[0].x, pts[0].y);
-        cairo_close_path(cr);
-    }
-}
-
-// Renders an HVIF icon into a new px x px surface (nullptr if it can't be read).
-[[maybe_unused]] static cairo_surface_t* Render(const unsigned char* data, size_t size, int px) {
-    std::vector<Style> styles;
-    std::vector<Path> paths;
-    std::vector<Shape> shapes;
-    if (!Parse(data, size, styles, paths, shapes)) return nullptr;
-
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, px, px);
-    cairo_t* cr = cairo_create(surface);
-    const double scale = px / 64.0;
-    for (const Shape& shape : shapes) {
-        if (shape.style < 0 || shape.style >= static_cast<int>(styles.size())) continue;
-        if (scale < shape.minScale || scale > shape.maxScale) continue; // level-of-detail range
-        cairo_save(cr);
-        cairo_scale(cr, scale, scale);
-        cairo_transform(cr, &shape.matrix);
-        cairo_pattern_t* pattern = MakePattern(styles[shape.style]);
-        cairo_set_source(cr, pattern); // gradients live in shape space
-        for (const cairo_matrix_t& m : shape.affines) cairo_transform(cr, &m);
-        cairo_new_path(cr);
-        for (int index : shape.paths) {
-            if (index >= 0 && index < static_cast<int>(paths.size())) AddPath(cr, paths[index]);
-        }
-        static const cairo_line_join_t kJoins[] = {
-            CAIRO_LINE_JOIN_MITER, CAIRO_LINE_JOIN_MITER, CAIRO_LINE_JOIN_ROUND,
-            CAIRO_LINE_JOIN_BEVEL, CAIRO_LINE_JOIN_MITER};
-        static const cairo_line_cap_t kCaps[] = {CAIRO_LINE_CAP_BUTT, CAIRO_LINE_CAP_SQUARE, CAIRO_LINE_CAP_ROUND};
-        cairo_set_line_join(cr, kJoins[std::clamp(shape.join, 0, 4)]);
-        cairo_set_line_cap(cr, kCaps[std::clamp(shape.cap, 0, 2)]);
-        cairo_set_miter_limit(cr, std::max(1.0, shape.miter));
-        if (shape.outline == 1) {
-            cairo_set_line_width(cr, std::abs(shape.width));
-            cairo_stroke(cr);
-        } else if (shape.outline == 2 && shape.width > 0) {
-            // Contour: the filled shape grown outward by `width`
-            cairo_set_line_width(cr, shape.width * 2);
-            cairo_fill_preserve(cr);
-            cairo_stroke(cr);
-        } else {
-            cairo_fill(cr);
-        }
-        cairo_pattern_destroy(pattern);
-        cairo_restore(cr);
-    }
+// Rasterizes in-memory SVG data into a px x px surface (nullptr on failure).
+static cairo_surface_t* RenderSvgData(const unsigned char* data, size_t size, int px) {
+    if (px <= 0) return nullptr;
+    GError* err = nullptr;
+    RsvgHandle* handle = rsvg_handle_new_from_data(data, size, &err);
+    g_clear_error(&err);
+    if (handle == nullptr) return nullptr;
+    cairo_surface_t* out = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, px, px);
+    cairo_t* cr = cairo_create(out);
+    RsvgRectangle viewport = {0, 0, static_cast<double>(px), static_cast<double>(px)};
+    bool ok = rsvg_handle_render_document(handle, cr, &viewport, &err);
+    g_clear_error(&err);
     cairo_destroy(cr);
-    cairo_surface_flush(surface);
-    return surface;
+    g_object_unref(handle);
+    if (!ok) {
+        cairo_surface_destroy(out);
+        return nullptr;
+    }
+    cairo_surface_flush(out);
+    return out;
 }
-
-} // namespace hvif
 
 // Draws a generic "application" placeholder so an app without any icon still
 // gets a visible, clickable dock tile.
@@ -5196,6 +4937,7 @@ struct DockApp {
     bool minimized = false;       // dimmed: nothing of it visible on this workspace
     bool foreground = false;
     bool closing = false;         // gone, kept only for the close effect
+    bool tracker = false;         // the permanent Tracker icon (the default file manager)
     HRect bounds;
     HRect lastIconRectSent;
 };
@@ -5430,7 +5172,27 @@ private:
     // =====================================================================
     // TASKBAR SYNC (SyncDockWithRunningDeskbarApps)
     // =====================================================================
-    static std::string GroupKeyFor(const Toplevel* t) {
+    static constexpr const char* kTrackerKey = "hdesktop:tracker";
+
+    // The app that opens folders (Dolphin, Nautilus, Thunar, ...). Its windows
+    // group under the Tracker icon, as Tracker's own windows do on Haiku. Apps
+    // that merely register for folders (code editors) don't count: then the
+    // first installed file manager is used.
+    static AppEntry* FileManagerEntry() {
+        AppEntry* entry = nullptr;
+        if (GAppInfo* info = g_app_info_get_default_for_type("inode/directory", FALSE)) {
+            if (const char* id = g_app_info_get_id(info)) entry = gApps->ById(id);
+            g_object_unref(info);
+        }
+        if (entry && entry->isFileManager) return entry;
+        for (const auto& e : gApps->Entries()) {
+            if (e->isFileManager) return e.get();
+        }
+        return entry;
+    }
+
+    std::string GroupKeyFor(const Toplevel* t) const {
+        if (fFileManager && !t->appId.empty() && gApps->Resolve(t->appId) == fFileManager) return kTrackerKey;
         if (!t->appId.empty()) return ToLower(t->appId);
         if (t->pid) return "pid:" + std::to_string(t->pid);
         return "title:" + t->title;
@@ -5445,9 +5207,20 @@ private:
             return nullptr;
         };
 
+        fFileManager = FileManagerEntry();
+
+        // The Tracker icon is permanent and always first, with or without windows.
+        {
+            DockApp tracker;
+            for (const auto& old : fApps) if (old.tracker) tracker = old;
+            tracker.windows.clear();
+            tracker.key = kTrackerKey;
+            tracker.tracker = true;
+            next.push_back(tracker);
+        }
         // Keep the existing order; append newcomers in first-seen order.
         for (auto& old : fApps) {
-            if (old.closing) continue;
+            if (old.closing || old.tracker) continue;
             DockApp copy = old;
             copy.windows.clear();
             next.push_back(copy);
@@ -5471,7 +5244,7 @@ private:
         std::vector<DockApp> result;
         uint64_t now = NowMs();
         for (auto& app : next) {
-            if (!app.windows.empty()) {
+            if (!app.windows.empty() || app.tracker) {
                 result.push_back(app);
                 continue;
             }
@@ -5495,7 +5268,11 @@ private:
 
         for (auto& app : result) {
             if (app.closing) continue;
-            if (!app.windows.empty()) {
+            if (app.tracker) {
+                app.entry = fFileManager;
+                app.appId = fFileManager ? fFileManager->id : std::string();
+                app.displayName = "Tracker";
+            } else if (!app.windows.empty()) {
                 if (app.appId.empty()) app.appId = app.windows.front()->appId;
                 app.entry = gApps->Resolve(app.appId);
                 app.displayName = app.entry ? app.entry->name
@@ -5509,8 +5286,9 @@ private:
             }
             app.foreground = anyActive;
             // Haiku: minimized == no normal visible windows on this workspace,
-            // unless the app is the foreground one.
-            app.minimized = !anyActive && !anyVisible;
+            // unless the app is the foreground one. A Tracker with no windows
+            // at all isn't dimmed (on Haiku it always has the Desktop).
+            app.minimized = !anyActive && !anyVisible && !(app.tracker && app.windows.empty());
         }
         fApps = std::move(result);
         fInitialSyncDone = true;
@@ -5554,6 +5332,16 @@ private:
         int key = IconPixels(gSettings.baseIconSize);
         if (app.icon.id != 0 && app.iconKey == key) return;
         DeleteTexture(app.icon);
+        if (app.tracker) {
+            // Haiku's own Tracker icon, whatever the icon theme
+            cairo_surface_t* s = RenderSvgData(kTrackerSvg, sizeof(kTrackerSvg), key);
+            if (s) {
+                app.icon = UploadTexture(s, gSettings.baseIconSize, gSettings.baseIconSize);
+                cairo_surface_destroy(s);
+                app.iconKey = key;
+                return;
+            }
+        }
         std::vector<std::string> names;
         for (Toplevel* t : app.windows) if (!t->themedIcon.empty()) { names.push_back(t->themedIcon); break; }
         if (app.entry) names.push_back(app.entry->iconName);
@@ -6073,7 +5861,11 @@ private:
                     // curve, or simply under the pointer when zoom is (nearly) off.
                     bool zoomedEnough = gSettings.iconZoom < 1.2f || s.scale > 1.0f + (gSettings.iconZoom - 1.0f) * 0.5f;
                     if (fHoverActive && zoomedEnough && s.bounds.left <= fLayoutMouseX && fLayoutMouseX <= s.bounds.right) {
-                        labelApp = &app;
+                        if (app.windows.empty()) {
+                            hoveredLabel = app.displayName; // the Tracker with no windows open
+                        } else {
+                            labelApp = &app;
+                        }
                         hoveredLabelIcon = s.bounds;
                     }
                     break;
@@ -6691,6 +6483,11 @@ private:
         }
         if (button != kButtonLeft) return;
         gMenus.CloseHover();
+        if (app.tracker && app.windows.empty()) {
+            OpenPath(HomeDir()); // opens in the file manager
+            if (gSettings.openEffect != kEffectNone) TriggerEffect("app:" + app.key);
+            return;
+        }
         if (app.foreground && !app.minimized) {
             // Haiku: AS_MINIMIZE_TEAM when the app is already up front.
             for (Toplevel* t : app.windows) gToplevels.Minimize(t);
@@ -6774,15 +6571,6 @@ private:
         prefs.iconName = "preferences-system";
         prefs.action = []() { ShowConfigPanel(); };
         items.push_back(prefs);
-        // Tracker's "Browse" nav menu over the home folder: hover to walk
-        // into it, click to open home in the file manager.
-        MenuItem browse;
-        browse.label = "Browse\u2026";
-        browse.iconName = "user-home";
-        std::string home = HomeDir();
-        browse.submenu = [home]() { return BuildNavMenu(home); };
-        browse.action = [home]() { OpenPath(home); };
-        items.push_back(browse);
         items.push_back(MenuItem::Separator());
         MenuItem about;
         about.label = "About hDesktop";
@@ -6808,7 +6596,22 @@ private:
             }
             items.push_back(MenuItem::Separator());
         }
-        if (app.entry && app.entry->isFileManager) {
+        if (app.tracker) {
+            // Tracker's nav menus: hover a folder to walk into it, click it
+            // (or a file) to open it.
+            auto folder = [](const std::string& label, const std::string& icon, const std::string& path) {
+                MenuItem m;
+                m.label = label;
+                m.iconName = icon;
+                m.submenu = [path]() { return BuildNavMenu(path); };
+                m.action = [path]() { OpenPath(path); };
+                return m;
+            };
+            items.push_back(folder("/", "drive-harddisk", "/"));
+            items.push_back(folder("Home", "user-home", HomeDir()));
+            if (app.windows.empty()) return items;
+            items.push_back(MenuItem::Separator());
+        } else if (app.entry && app.entry->isFileManager) {
             // Tracker's right-click BNavMenu over the file system.
             MenuItem browse;
             browse.label = "Browse";
@@ -7052,6 +6855,7 @@ private:
     int fRegionX = -1, fRegionY = -1, fRegionW = -1, fRegionH = -1;
 
     std::vector<DockApp> fApps;
+    AppEntry* fFileManager = nullptr;
     bool fInitialSyncDone = false;
     DockLayout fLayout;
 
@@ -7914,13 +7718,7 @@ private:
         check("Keep Dock Above Windows", &gSettings.keepAboveWindows, 40, false);
         check("Show CPU Graph", &gSettings.showCpuGraph, 317);
         check("Title Overlays: Popup List", &gSettings.titlePopup, 40, false);
-        size_t popupIdx = fWidgets.size() - 1;
         check("Show Workspace Switcher", &gSettings.workspaceSwitcher, 317, true, gWorkspaces.Available());
-        check("Title Overlays: Label Mode", &gSettings.titleLabel);
-        size_t labelIdx = fWidgets.size() - 1;
-        // The two title overlay modes are mutually exclusive.
-        fWidgets[popupIdx].setBool = [](bool v) { gSettings.titlePopup = v; if (v) gSettings.titleLabel = false; };
-        fWidgets[labelIdx].setBool = [](bool v) { gSettings.titleLabel = v; if (v) gSettings.titlePopup = false; };
         check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
         check("24-Hour Clock", &gSettings.clock24h);
         check("Check for Updates", &gSettings.checkForUpdates);
