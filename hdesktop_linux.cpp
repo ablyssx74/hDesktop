@@ -1173,7 +1173,8 @@ struct Output {
     uint32_t globalName = 0;
     std::string name;
     int scale = 1;
-    int width = 0, height = 0;
+    int width = 0, height = 0;   // current mode, in pixels
+    int32_t transform = WL_OUTPUT_TRANSFORM_NORMAL;
 };
 
 struct WaylandState {
@@ -1518,7 +1519,10 @@ static const wl_seat_listener kSeatListener = {
 static std::function<void()> gOnOutputsChanged;
 
 static const wl_output_listener kOutputListener = {
-    .geometry = [](void*, wl_output*, int32_t, int32_t, int32_t, int32_t, int32_t, const char*, const char*, int32_t) {},
+    .geometry = [](void* data, wl_output*, int32_t, int32_t, int32_t, int32_t, int32_t, const char*, const char*,
+        int32_t transform) {
+        static_cast<Output*>(data)->transform = transform;
+    },
     .mode = [](void* data, wl_output*, uint32_t flags, int32_t w, int32_t h, int32_t) {
         auto* o = static_cast<Output*>(data);
         if (flags & WL_OUTPUT_MODE_CURRENT) { o->width = w; o->height = h; }
@@ -2046,19 +2050,24 @@ public:
         height = h;
         xdgSurface = xdg_wm_base_get_xdg_surface(gWl.wmBase, surface);
         xdg_surface_add_listener(xdgSurface, &kXdgSurfaceListener, this);
-        xdg_positioner* pos = xdg_wm_base_create_positioner(gWl.wmBase);
-        xdg_positioner_set_size(pos, w, h);
-        xdg_positioner_set_anchor_rect(pos, a.x, a.y, std::max(1, a.w), std::max(1, a.h));
-        xdg_positioner_set_anchor(pos, a.anchor);
-        xdg_positioner_set_gravity(pos, a.gravity);
-        xdg_positioner_set_constraint_adjustment(pos, a.constraints);
-        if (a.offsetX || a.offsetY) xdg_positioner_set_offset(pos, a.offsetX, a.offsetY);
+        fAnchor = a;
+        xdg_positioner* pos = MakePositioner(w, h);
         popup = xdg_surface_get_popup(xdgSurface, parentXdg, pos);
         xdg_positioner_destroy(pos);
         xdg_popup_add_listener(popup, &kPopupListener, this);
         if (parentLayer) zwlr_layer_surface_v1_get_popup(parentLayer, popup);
         if (grabSerial != 0 && gWl.seat) xdg_popup_grab(popup, gWl.seat, grabSerial);
         wl_surface_commit(surface);
+        return true;
+    }
+
+    // Asks the compositor for a new size at the same anchor (xdg_popup.reposition,
+    // xdg_wm_base v3). Returns false when the compositor can't do that.
+    bool Resize(int w, int h) {
+        if (popup == nullptr || xdg_popup_get_version(popup) < XDG_POPUP_REPOSITION_SINCE_VERSION) return false;
+        xdg_positioner* pos = MakePositioner(w, h);
+        xdg_popup_reposition(popup, pos, ++fRepositionToken);
+        xdg_positioner_destroy(pos);
         return true;
     }
 
@@ -2070,6 +2079,21 @@ public:
     }
 
 private:
+    xdg_positioner* MakePositioner(int w, int h) const {
+        const PopupAnchor& a = fAnchor;
+        xdg_positioner* pos = xdg_wm_base_create_positioner(gWl.wmBase);
+        xdg_positioner_set_size(pos, w, h);
+        xdg_positioner_set_anchor_rect(pos, a.x, a.y, std::max(1, a.w), std::max(1, a.h));
+        xdg_positioner_set_anchor(pos, a.anchor);
+        xdg_positioner_set_gravity(pos, a.gravity);
+        xdg_positioner_set_constraint_adjustment(pos, a.constraints);
+        if (a.offsetX || a.offsetY) xdg_positioner_set_offset(pos, a.offsetX, a.offsetY);
+        return pos;
+    }
+
+    PopupAnchor fAnchor;
+    uint32_t fRepositionToken = 0;
+
     static const xdg_surface_listener kXdgSurfaceListener;
     static const xdg_popup_listener kPopupListener;
 };
@@ -2184,6 +2208,22 @@ private:
 
 static MenuManager gMenus;
 
+// Logical height of the screen the dock is on (0 if not known yet) -- menus
+// taller than this get capped and scroll, like BMenu does on Haiku.
+static int MenuScreenHeight() {
+    Surface* dock = SurfaceFromWl(gActivationSurface);
+    Output* out = nullptr;
+    if (dock && !dock->enteredOutputs.empty()) out = *dock->enteredOutputs.begin();
+    if (out == nullptr) out = FindOutput(gSettings.output);
+    if (out == nullptr && !gWl.outputs.empty()) out = gWl.outputs.front().get();
+    if (out == nullptr || out->height <= 0) return 0;
+    bool rotated = out->transform == WL_OUTPUT_TRANSFORM_90 || out->transform == WL_OUTPUT_TRANSFORM_270 ||
+                   out->transform == WL_OUTPUT_TRANSFORM_FLIPPED_90 || out->transform == WL_OUTPUT_TRANSFORM_FLIPPED_270;
+    double px = rotated ? out->width : out->height;
+    double scale = dock ? dock->scale : out->scale;
+    return static_cast<int>(px / std::max(1.0, scale));
+}
+
 class PopupMenu : public PopupSurface {
 public:
     PopupMenu(std::vector<MenuItem> items, PopupMenu* parent, bool grabbing, bool centered)
@@ -2194,6 +2234,7 @@ public:
     ~PopupMenu() override {
         if (fLiveTimer) g_source_remove(fLiveTimer);
         if (fSubmenuTimer) g_source_remove(fSubmenuTimer);
+        if (fScrollTimer) g_source_remove(fScrollTimer);
         fChild.reset();
     }
 
@@ -2211,21 +2252,21 @@ public:
         }
     }
 
-    // Swaps in fresh items while keeping the popup's size (an xdg_popup can't
-    // simply grow) -- rows beyond the original count are dropped, missing rows
-    // are left blank, which is how the live CPU/memory menus refresh.
+    // Swaps in fresh items (the live CPU/memory menus refresh this way). The
+    // popup keeps its width; its height follows the row count up to the screen
+    // cap, and anything past that scrolls.
     void ApplyLiveUpdate(std::vector<MenuItem> items) {
         if (fChild) return; // don't reshuffle rows under an open submenu
-        fItems = std::move(items);
-        if (fItems.size() > fRowCount) fItems.resize(fRowCount);
-        if (fHovered >= static_cast<int>(fItems.size())) fHovered = -1;
-        Redraw();
+        ReplaceItems(std::move(items));
     }
 
     void ReplaceItems(std::vector<MenuItem> items) {
         fItems = std::move(items);
-        if (fItems.size() > fRowCount) fItems.resize(fRowCount);
         if (fHovered >= static_cast<int>(fItems.size())) fHovered = -1;
+        fContentH = ContentHeight();
+        int want = static_cast<int>(std::ceil(std::min(fContentH, MaxHeight())));
+        if (configured && want != height) Resize(width, want); // the configure reply brings the new size
+        ClampScroll();
         Redraw();
     }
 
@@ -2242,10 +2283,19 @@ public:
         RoundedRectPath(cr, 1, 1, w - 2, h - 2, 5.5);
         cairo_clip(cr);
 
-        double y = kPadY;
+        ClampScroll(); // the compositor may have resized us
+        if (Scrollable()) DrawScrollArrows(cr);
+        cairo_rectangle(cr, 0, ViewTop(), w, ViewBottom() - ViewTop());
+        cairo_clip(cr);
+
+        double y = ViewTop() + kPadY - fScroll;
         for (size_t i = 0; i < fItems.size(); ++i) {
             const MenuItem& it = fItems[i];
             double rh = RowHeight(it);
+            if (y + rh <= ViewTop() || y >= ViewBottom()) { // off screen: skip the drawing
+                y += rh;
+                continue;
+            }
             if (it.separator) {
                 cairo_set_source_rgba(cr, 60 / 255.0, 62 / 255.0, 72 / 255.0, 1.0);
                 cairo_rectangle(cr, 8, std::floor(y + rh / 2), w - 16, 1);
@@ -2368,6 +2418,13 @@ public:
 
     void PointerMotion(double x, double y) override {
         fPointerInside = true;
+        // Hovering an arrow strip scrolls, like BMenu's scroll arrows
+        int dir = 0;
+        if (Scrollable()) {
+            if (y < ViewTop()) dir = -1;
+            else if (y >= ViewBottom()) dir = 1;
+        }
+        SetAutoScroll(dir);
         int row = RowAt(y);
         if (row != fHovered) {
             fHovered = row;
@@ -2378,11 +2435,17 @@ public:
     void PointerEnter(double x, double y) override { PointerMotion(x, y); }
     void PointerLeave() override {
         fPointerInside = false;
+        SetAutoScroll(0);
         if (!fChild && fHovered != -1) {
             fHovered = -1;
             Redraw();
         }
         if (onPointerLeave) onPointerLeave();
+    }
+
+    void PointerAxis(double dy) override {
+        // dy > 0 is wheel up (toward the top of the list)
+        ScrollBy(-dy * kRowH * 3);
     }
 
     void PointerButton(int button, bool pressed, uint32_t serial) override {
@@ -2403,6 +2466,7 @@ public:
                     + (sym == XKB_KEY_Down ? step : -step) + n * 2) % n;
                 if (Selectable(idx)) { fHovered = idx; break; }
             }
+            ScrollToRow(fHovered);
             Redraw();
         } else if ((sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right) && fHovered >= 0) {
             Activate(fHovered);
@@ -2437,6 +2501,8 @@ private:
     static constexpr double kLeftColumn = 30.0;
     static constexpr double kValueColumnW = 54.0;
     static constexpr double kBarW = 80.0;
+    static constexpr double kArrowH = 16.0;   // scroll arrow strips at the top and bottom
+    static constexpr double kScreenMargin = 24.0;
 
     static double RowHeight(const MenuItem& it) { return it.separator ? kSepH : kRowH; }
 
@@ -2471,11 +2537,93 @@ private:
             w = std::clamp(left + maxLabel + kPadX + 22, 150.0, 420.0);
         }
         fWidth = static_cast<int>(std::ceil(w));
-        fHeight = static_cast<int>(std::ceil(h));
-        fRowCount = fItems.size();
+        fContentH = h;
+        fHeight = static_cast<int>(std::ceil(std::min(h, MaxHeight())));
+    }
+
+    double ContentHeight() const {
+        double h = kPadY * 2;
+        for (const auto& it : fItems) h += RowHeight(it);
+        return h;
+    }
+
+    static double MaxHeight() {
+        int screen = MenuScreenHeight();
+        if (screen <= 0) return 1e9; // unknown: the compositor's resize constraint still applies
+        return std::max(kRowH * 6, screen - kScreenMargin * 2);
+    }
+
+    // ---- Scrolling ------------------------------------------------------
+    bool Scrollable() const { return height > 0 && fContentH > height + 0.5; }
+    double ViewTop() const { return Scrollable() ? kArrowH : 0.0; }
+    double ViewBottom() const { return Scrollable() ? height - kArrowH : static_cast<double>(height); }
+    double MaxScroll() const { return std::max(0.0, fContentH - (ViewBottom() - ViewTop())); }
+
+    void ClampScroll() { fScroll = std::clamp(fScroll, 0.0, MaxScroll()); }
+
+    void ScrollBy(double delta) {
+        double before = fScroll;
+        fScroll += delta;
+        ClampScroll();
+        if (fScroll == before) return;
+        CloseChild(); // its anchor row just moved
+        if (fPointerInside) {
+            fHovered = RowAt(gWl.pointerY);
+            ScheduleSubmenu();
+        }
+        Redraw();
+    }
+
+    void ScrollToRow(int row) {
+        if (row < 0 || !Scrollable()) return;
+        double top = kPadY;
+        for (int i = 0; i < row; ++i) top += RowHeight(fItems[i]);
+        double viewH = ViewBottom() - ViewTop();
+        if (top < fScroll) fScroll = top - kPadY;
+        else if (top + RowHeight(fItems[row]) > fScroll + viewH) fScroll = top + RowHeight(fItems[row]) + kPadY - viewH;
+        ClampScroll();
+    }
+
+    void SetAutoScroll(int dir) {
+        if (dir == fScrollDir) return;
+        fScrollDir = dir;
+        if (fScrollTimer) { g_source_remove(fScrollTimer); fScrollTimer = 0; }
+        if (dir == 0) return;
+        fScrollTimer = g_timeout_add(30, [](gpointer p) -> gboolean {
+            auto* self = static_cast<PopupMenu*>(p);
+            self->ScrollBy(self->fScrollDir * 8.0);
+            return G_SOURCE_CONTINUE;
+        }, this);
+    }
+
+    void DrawScrollArrows(cairo_t* cr) {
+        const double w = width, h = height;
+        auto arrow = [&](double cy, bool up, bool active, bool hot) {
+            if (hot && active) {
+                cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, 0.35);
+                cairo_rectangle(cr, 1, up ? 1 : h - kArrowH, w - 2, kArrowH - 1);
+                cairo_fill(cr);
+            }
+            double cx = w / 2, d = up ? -1 : 1;
+            cairo_new_path(cr);
+            cairo_move_to(cr, cx - 5, cy - 2.5 * d);
+            cairo_line_to(cr, cx, cy + 2.5 * d);
+            cairo_line_to(cr, cx + 5, cy - 2.5 * d);
+            cairo_close_path(cr);
+            cairo_set_source_rgba(cr, 220 / 255.0, 220 / 255.0, 225 / 255.0, active ? 0.9 : 0.25);
+            cairo_fill(cr);
+        };
+        arrow(kArrowH / 2, true, fScroll > 0.5, fScrollDir < 0);
+        arrow(h - kArrowH / 2, false, fScroll < MaxScroll() - 0.5, fScrollDir > 0);
+        cairo_set_source_rgba(cr, 60 / 255.0, 62 / 255.0, 72 / 255.0, 1.0);
+        cairo_rectangle(cr, 6, kArrowH - 1, w - 12, 1);
+        cairo_rectangle(cr, 6, h - kArrowH, w - 12, 1);
+        cairo_fill(cr);
     }
 
     int RowAt(double y) const {
+        if (y < ViewTop() || y >= ViewBottom()) return -1;
+        y = y - ViewTop() + fScroll;
         double top = kPadY;
         for (size_t i = 0; i < fItems.size(); ++i) {
             double rh = RowHeight(fItems[i]);
@@ -2485,10 +2633,11 @@ private:
         return -1;
     }
 
+    // Row's top edge in surface coordinates (after scrolling).
     double RowTop(int row) const {
-        double top = kPadY;
+        double top = ViewTop() + kPadY - fScroll;
         for (int i = 0; i < row && i < static_cast<int>(fItems.size()); ++i) top += RowHeight(fItems[i]);
-        return top;
+        return std::clamp(top, 0.0, std::max(0.0, height - kRowH));
     }
 
     void ScheduleSubmenu() {
@@ -2521,7 +2670,8 @@ private:
         a.h = static_cast<int>(kRowH);
         a.anchor = XDG_POSITIONER_ANCHOR_TOP_RIGHT;
         a.gravity = XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT;
-        a.constraints = XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X | XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y;
+        a.constraints = XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X | XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y |
+                        XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y;
         a.offsetY = -static_cast<int>(kPadY);
         PopupMenu* raw = child.get();
         uint32_t serial = fGrabbing ? gWl.lastInputSerial : 0;
@@ -2551,7 +2701,6 @@ private:
     }
 
     std::vector<MenuItem> fItems;
-    size_t fRowCount = 0;
     PopupMenu* fParent = nullptr;
     std::unique_ptr<PopupMenu> fChild;
     int fChildIndex = -1;
@@ -2565,6 +2714,10 @@ private:
     guint fSubmenuTimer = 0;
     guint fLiveTimer = 0;
     std::function<std::vector<MenuItem>()> fLiveSource;
+    double fContentH = 0;     // full height of all rows; more than `height` means we scroll
+    double fScroll = 0;
+    int fScrollDir = 0;       // auto-scroll while hovering an arrow strip
+    guint fScrollTimer = 0;
 };
 
 void MenuManager::Open(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor, std::vector<MenuItem> items,
@@ -2573,7 +2726,9 @@ void MenuManager::Open(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& an
     CloseHover();
     if (items.empty()) return;
     auto menu = std::make_unique<PopupMenu>(std::move(items), nullptr, true, false);
-    if (!menu->CreatePopup(parentLayer, nullptr, anchor, menu->MeasuredWidth(), menu->MeasuredHeight(), serial)) return;
+    PopupAnchor a = anchor;
+    a.constraints |= XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y;
+    if (!menu->CreatePopup(parentLayer, nullptr, a, menu->MeasuredWidth(), menu->MeasuredHeight(), serial)) return;
     menu->onDismissed = [this]() { CloseAll(); };
     if (liveSource) menu->SetLiveSource(std::move(liveSource), liveIntervalMs);
     fRoot = std::move(menu);
@@ -2585,7 +2740,9 @@ void MenuManager::OpenHover(zwlr_layer_surface_v1* parentLayer, const PopupAncho
     CloseHover();
     if (items.empty() || fRoot) return;
     auto menu = std::make_unique<PopupMenu>(std::move(items), nullptr, false, centered);
-    if (!menu->CreatePopup(parentLayer, nullptr, anchor, menu->MeasuredWidth(), menu->MeasuredHeight(), 0)) return;
+    PopupAnchor a = anchor;
+    a.constraints |= XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y;
+    if (!menu->CreatePopup(parentLayer, nullptr, a, menu->MeasuredWidth(), menu->MeasuredHeight(), 0)) return;
     menu->onDismissed = [this]() { CloseHover(); };
     fHover = std::move(menu);
     if (onStateChanged) onStateChanged();
@@ -6427,7 +6584,6 @@ private:
                     }, 1);
             };
             items.push_back(m);
-            if (items.size() >= 45) break;
         }
         if (items.empty()) {
             MenuItem none;
@@ -6480,12 +6636,11 @@ private:
             pid_t pid = p.pid;
             std::string name = p.name;
             bool mine = (p.uid == getuid());
+            // Sampled only once the submenu opens; the first pass primes the CPU deltas
             auto threads = std::make_shared<ThreadSampler>(pid);
-            threads->Sample(); // prime the CPU deltas
             m.submenu = [pid, name, mine, threads]() { return ThreadItems(pid, name, mine, *threads); };
             m.liveMs = 1000;
             items.push_back(m);
-            if (items.size() >= 30) break;
         }
         return items;
     }
@@ -6516,12 +6671,14 @@ private:
             if (a.cpuPercent != b.cpuPercent) return a.cpuPercent > b.cpuPercent;
             return a.tid < b.tid;
         });
+        if (threads.empty()) {
+            items.push_back(MenuItem::Header("No threads (process has exited)"));
+            return items;
+        }
         char header[96];
         snprintf(header, sizeof(header), "Threads: %zu (view only on Linux)", threads.size());
         items.push_back(MenuItem::Header(header));
-        const size_t kMaxThreads = 40;
-        for (size_t i = 0; i < threads.size() && i < kMaxThreads; ++i) {
-            const ThreadInfo& t = threads[i];
+        for (const ThreadInfo& t : threads) {
             MenuItem row;
             row.label = t.name + "  (" + std::to_string(t.tid) + ")";
             row.barPercent = t.cpuPercent;
@@ -6529,12 +6686,6 @@ private:
             snprintf(buf, sizeof(buf), "%3.1f%%", t.cpuPercent);
             row.valueText = buf;
             items.push_back(row); // no action: view only
-        }
-        if (threads.size() > kMaxThreads) {
-            MenuItem more;
-            more.label = "\u2026and " + std::to_string(threads.size() - kMaxThreads) + " more";
-            more.enabled = false;
-            items.push_back(more);
         }
         return items;
     }
