@@ -59,7 +59,7 @@ $(GEN_DIR)/%-protocol.c: $(PROTO_DIR)/%.xml | $(GEN_DIR)
 $(GEN_DIR)/%-protocol.o: $(GEN_DIR)/%-protocol.c $(PROTO_HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(GEN_DIR)/hdesktop_linux.o: hdesktop_linux.cpp $(PROTO_HEADERS)
+$(GEN_DIR)/hdesktop_linux.o: hdesktop_linux.cpp TrackerIcon.cpp $(PROTO_HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(TARGET): $(GEN_DIR)/hdesktop_linux.o $(PROTO_OBJECTS)
