@@ -1788,9 +1788,29 @@ static void OpenUri(const std::string& uri) {
     char* scheme = g_uri_parse_scheme(uri.c_str());
     if (scheme && strcmp(scheme, "file") != 0) {
         handler = g_app_info_get_default_for_uri_scheme(scheme);
+        // trash:/// and friends: file managers handle these even when no app claims the scheme
+        if (handler == nullptr) handler = g_app_info_get_default_for_type("inode/directory", FALSE);
+    } else {
+        // Local path: pick the default app for what it actually is. GIO sniffs
+        // the contents, so extension-less files (VERSION, Makefile) resolve too.
+        GFile* file = g_file_new_for_uri(uri.c_str());
+        GFileInfo* info = g_file_query_info(file, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE,
+            G_FILE_QUERY_INFO_NONE, nullptr, nullptr);
+        std::string type = (info && g_file_info_get_content_type(info)) ? g_file_info_get_content_type(info) : "";
+        if (type.empty() || type == "application/x-zerosize") {
+            // Empty (or unreadable) file: go by its name, as file managers do
+            char* path = g_file_get_path(file);
+            char* guessed = path ? g_content_type_guess(path, nullptr, 0, nullptr) : nullptr;
+            if (guessed) type = guessed;
+            g_free(guessed);
+            g_free(path);
+        }
+        handler = g_app_info_get_default_for_type(type.empty() ? "inode/directory" : type.c_str(), FALSE);
+        if (info) g_object_unref(info);
+        g_object_unref(file);
     }
-    if (handler == nullptr) handler = g_app_info_get_default_for_type("inode/directory", FALSE);
     g_free(scheme);
+    // No registered handler: xdg-open (KDE shows its "Open With" dialog)
     if (handler && G_IS_DESKTOP_APP_INFO(handler)) {
         const char* id = g_app_info_get_id(handler);
         AppEntry* entry = id ? gApps->ById(id) : nullptr;
