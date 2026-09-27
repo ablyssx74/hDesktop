@@ -174,6 +174,9 @@ struct Settings {
     bool   titlePopup = true;         // Haiku mode title overlay: clickable window list popup
     bool   titleLabel = false;        // SDL mode title overlay: single label + hover auto-focus
     bool   workspaceSwitcher = true;
+    bool   showClock = true;
+    bool   showVolume = true;
+    bool   showCpuGraph = true;
     bool   clock24h = false;
     int    dockLocation = kDockLocationBottom;
     float  baseIconSize = 48.0f;
@@ -213,6 +216,9 @@ static void SaveConfiguration() {
     g_key_file_set_boolean(kf, g, "title_popup", gSettings.titlePopup);
     g_key_file_set_boolean(kf, g, "title_label", gSettings.titleLabel);
     g_key_file_set_boolean(kf, g, "workspace_switcher", gSettings.workspaceSwitcher);
+    g_key_file_set_boolean(kf, g, "show_clock", gSettings.showClock);
+    g_key_file_set_boolean(kf, g, "show_volume", gSettings.showVolume);
+    g_key_file_set_boolean(kf, g, "show_cpu_graph", gSettings.showCpuGraph);
     g_key_file_set_boolean(kf, g, "clock_24h", gSettings.clock24h);
     g_key_file_set_integer(kf, g, "dock_location", gSettings.dockLocation);
     g_key_file_set_double(kf, g, "base_icon_size", gSettings.baseIconSize);
@@ -281,6 +287,9 @@ static void LoadConfiguration() {
     getBool("title_popup", gSettings.titlePopup);
     getBool("title_label", gSettings.titleLabel);
     getBool("workspace_switcher", gSettings.workspaceSwitcher);
+    getBool("show_clock", gSettings.showClock);
+    getBool("show_volume", gSettings.showVolume);
+    getBool("show_cpu_graph", gSettings.showCpuGraph);
     getBool("clock_24h", gSettings.clock24h);
     getInt("dock_location", gSettings.dockLocation);
     getFloat("base_icon_size", gSettings.baseIconSize);
@@ -5154,16 +5163,20 @@ private:
                 addWidget(kSlotTray, baselineTrayWidth);
             }
             // 4. Clock
-            if (fClockTexture.id != 0) {
+            if (gSettings.showClock && fClockTexture.id != 0) {
                 x += clockSectionPadding;
                 addWidget(kSlotClock, ClockBaseWidth());
             }
             // 5. Volume
-            x += clockSectionPadding * ratio;
-            addWidget(kSlotVolume, 44.0f * ratio);
+            if (gSettings.showVolume) {
+                x += clockSectionPadding * ratio;
+                addWidget(kSlotVolume, 44.0f * ratio);
+            }
             // 6. CPU graph
-            x += clockSectionPadding * ratio;
-            addWidget(kSlotCpu, 60.0f * ratio);
+            if (gSettings.showCpuGraph) {
+                x += clockSectionPadding * ratio;
+                addWidget(kSlotCpu, 60.0f * ratio);
+            }
             // 7. Workspace switcher
             if (ShowWorkspaces()) {
                 x += clockSectionPadding * ratio;
@@ -7242,9 +7255,14 @@ private:
             fWidgets.push_back(w);
             if (newRow) y += 24;
         };
-        check("Enable Auto-Hide", &gSettings.autoHide);
-        check("Enable System Tray", &gSettings.showSystemTray);
-        check("Keep Dock Above Windows", &gSettings.keepAboveWindows);
+        // Dock widget toggles share the first three rows (right-hand column),
+        // like the Haiku config window.
+        check("Enable Auto-Hide", &gSettings.autoHide, 40, false);
+        check("Show Clock", &gSettings.showClock, 317);
+        check("Enable System Tray", &gSettings.showSystemTray, 40, false);
+        check("Show Volume", &gSettings.showVolume, 317);
+        check("Keep Dock Above Windows", &gSettings.keepAboveWindows, 40, false);
+        check("Show CPU Graph", &gSettings.showCpuGraph, 317);
         check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
         check("Title Overlays: Popup List", &gSettings.titlePopup, 40, false);
         size_t popupIdx = fWidgets.size() - 1;
