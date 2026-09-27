@@ -983,7 +983,7 @@ static IconTheme* gIconTheme = nullptr;
 // =========================================================================
 // BUILT-IN TRACKER ICON
 // =========================================================================
-// Haiku's Tracker icon (Tracker.svg, exported from Icon-O-Matic), compiled
+// Haiku's Tracker icon (linux/Tracker.svg, exported from Icon-O-Matic), compiled
 // into the binary so the Tracker taskbar icon looks the same whatever the
 // icon theme. The Makefile turns the SVG into the kTrackerSvg byte array.
 #include "tracker-icon.h"
