@@ -1,7 +1,7 @@
 # Maintainer: Kris Beazley <hDesktop@epluribusunix.net>
 # Build and install on Arch / CachyOS:  cd linux && makepkg -si
 pkgname=hdesktop-git
-pkgver=1.0.51
+pkgver=1.0.51.r148.3ec748a
 pkgrel=1
 pkgdesc="hDesktop OpenGL dock for Wayland (KDE Plasma, Hyprland, Sway, niri, labwc...)"
 arch=('x86_64' 'aarch64')

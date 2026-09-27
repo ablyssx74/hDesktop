@@ -99,7 +99,7 @@
 #include "fractional-scale-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 
-#define APP_LOCAL_VERSION "v1.0.51"
+#define APP_LOCAL_VERSION "v1.0.52"
 
 // Linux input event codes (linux/input-event-codes.h), spelled out so the
 // build doesn't depend on kernel headers being installed.
