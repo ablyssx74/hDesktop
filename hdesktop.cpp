@@ -109,6 +109,11 @@ bool dockAlwaysOnTop;
 bool fShowTitleOverlaysHaiku = true;
 bool fShowTitleOverlaysSDL = false;
 bool fShowWorkspaceSwitcher = true;
+// Dock widgets that can each be turned off from the Config window, the same
+// way as the workspace switcher above. All shown by default.
+bool fShowClock = true;
+bool fShowVolume = true;
+bool fShowCpuGraph = true;
 
 // Which screen edge the dock is pinned to. Left/Right are intentionally not
 // offered in the settings UI yet -- the dock's layout, hit-testing, and
@@ -205,6 +210,9 @@ enum {
     MSG_ADVANCED_TOGGLED = 'advt',
     MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
+    MSG_CLOCK_TOGGLED = 'cktg',
+    MSG_VOLUME_TOGGLED = 'vltg',
+    MSG_CPUGRAPH_TOGGLED = 'cptg',
     MSG_DOCKLOCATION_BOTTOM_TOGGLED = 'dlbt',
     MSG_DOCKLOCATION_TOP_TOGGLED = 'dltp',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
@@ -1329,6 +1337,9 @@ private:
     BCheckBox* fAdvancedCheckbox;
     BSlider*   fThumbnailFpsSlider;
     BCheckBox* fWorkspaceSwitcherCheckbox;
+    BCheckBox* fClockCheckbox;
+    BCheckBox* fVolumeCheckbox;
+    BCheckBox* fCpuGraphCheckbox;
     BMenuField* fDockLocationMenuField;
     BMenuField* fEffectsMenuField;
     BMenuField* fCloseEffectsMenuField;
@@ -1365,6 +1376,30 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAutoRaiseCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoRaiseCheckbox);
+
+        // Rows 1-3, right-hand column: dock widget toggles. They share rows
+        // with Auto-Hide / System Tray / Auto-Raise (the same trick as SDL
+        // Mode on row 4 below) so nothing further down has to be reflowed.
+        BRect clockCheckboxRect(290.0f, 122.0f, 310.0f, 138.0f);
+        fClockCheckbox = new BCheckBox(clockCheckboxRect, "clock_cb", nullptr,
+            new BMessage(MSG_CLOCK_TOGGLED));
+        fClockCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fClockCheckbox->SetValue(fShowClock ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fClockCheckbox);
+
+        BRect volumeCheckboxRect(290.0f, 142.0f, 310.0f, 158.0f);
+        fVolumeCheckbox = new BCheckBox(volumeCheckboxRect, "volume_cb", nullptr,
+            new BMessage(MSG_VOLUME_TOGGLED));
+        fVolumeCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fVolumeCheckbox->SetValue(fShowVolume ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fVolumeCheckbox);
+
+        BRect cpuGraphCheckboxRect(290.0f, 162.0f, 310.0f, 178.0f);
+        fCpuGraphCheckbox = new BCheckBox(cpuGraphCheckboxRect, "cpu_graph_cb", nullptr,
+            new BMessage(MSG_CPUGRAPH_TOGGLED));
+        fCpuGraphCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fCpuGraphCheckbox->SetValue(fShowCpuGraph ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fCpuGraphCheckbox);
 
         // Row 4: Text Overlays -- two mutually exclusive checkboxes sharing
         // one row (Haiku mode's own box at its usual position, SDL mode's
@@ -1647,6 +1682,9 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Enable Auto-Hide", BPoint(62.0f, 134.0f));
         DrawString("Enable System Tray", BPoint(62.0f, 154.0f));
         DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
+        DrawString("Show Clock", BPoint(317.0f, 134.0f));
+        DrawString("Show Volume", BPoint(317.0f, 154.0f));
+        DrawString("Show CPU Graph", BPoint(317.0f, 174.0f));
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("SDL Mode", BPoint(317.0f, 194.0f));
         DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
@@ -1767,6 +1805,9 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAdvancedCheckbox->SetTarget(this);
         fThumbnailFpsSlider->SetTarget(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
+        fClockCheckbox->SetTarget(this);
+        fVolumeCheckbox->SetTarget(this);
+        fCpuGraphCheckbox->SetTarget(this);
         fDockLocationMenuField->Menu()->SetTargetForItems(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
         fCloseEffectsMenuField->Menu()->SetTargetForItems(this);
@@ -1878,6 +1919,27 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
             case MSG_WORKSPACESWITCHER_TOGGLED: {
                 fShowWorkspaceSwitcher = (fWorkspaceSwitcherCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_CLOCK_TOGGLED: {
+                fShowClock = (fClockCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_VOLUME_TOGGLED: {
+                fShowVolume = (fVolumeCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_CPUGRAPH_TOGGLED: {
+                fShowCpuGraph = (fCpuGraphCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 Invalidate();
                 break;
@@ -5168,7 +5230,7 @@ public:
 
     void HandleMouseWheel(int wheelStepY) {
         // 1. Check if the mouse cursor is physically hovering over the volume bar right now
-        bool isMouseOverSlider = (fMouseX >= fCachedVolLeft && fMouseX <= (fCachedVolLeft + fCachedVolWidth) &&
+        bool isMouseOverSlider = fShowVolume && (fMouseX >= fCachedVolLeft && fMouseX <= (fCachedVolLeft + fCachedVolWidth) &&
                                   fMouseY >= fCachedVolTop && fMouseY <= (fCachedVolTop + fCachedVolHeight));
 
         if (isMouseOverSlider) {
@@ -5713,7 +5775,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    // =========================================================================
 	    // CACHED VOLUME SLIDER INTERACTION INTERCEPTOR (SINGLE-CLICK SYNCED)
 	    // =========================================================================
-	    bool isClickOverSlider = (x >= fCachedVolLeft && x <= (fCachedVolLeft + fCachedVolWidth) &&
+	    bool isClickOverSlider = fShowVolume && (x >= fCachedVolLeft && x <= (fCachedVolLeft + fCachedVolWidth) &&
 	                              y >= fCachedVolTop && y <= (fCachedVolTop + fCachedVolHeight));
 
 	    if (isClickOverSlider) {
@@ -5915,7 +5977,7 @@ void SyncDockWithRunningDeskbarApps() {
             // =========================================================================
             // PROCESS SYSTEM CLOCK COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
-            if (fClockTexture.id != 0) {
+            if (fShowClock && fClockTexture.id != 0) {
                 progressiveX += clockSectionPadding;
 
                 float highDpiCompensateFactor = 0.42f;
@@ -5950,51 +6012,61 @@ void SyncDockWithRunningDeskbarApps() {
             // =========================================================================
             float layoutSizeRatio = baseSize / 48.0f;
 
-            // Proportional Separator
-            progressiveX += (clockSectionPadding * layoutSizeRatio);
+            if (fShowVolume) {
+                // Proportional Separator
+                progressiveX += (clockSectionPadding * layoutSizeRatio);
 
-            float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
-            float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
-            float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
+                float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
+                float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
+                float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-            float distanceVolX = std::abs(fMouseX - approxVolCenterX);
-            float distanceVolY = std::abs(fMouseY - approxVolCenterY);
-            float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
+                float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+                float distanceVolY = std::abs(fMouseY - approxVolCenterY);
+                float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
 
-            float volScale = 1.0f;
-            if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
-                float ratio = distanceVol2D / 180.0f;
-                volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                float volScale = 1.0f;
+                if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
+                    float ratio = distanceVol2D / 180.0f;
+                    volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+
+                dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
+                dynamicScales.push_back(volScale);
+                progressiveX += (scaledBaseVolumeWidth * volScale);
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
             }
-
-            dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
-            dynamicScales.push_back(volScale);
-            progressiveX += (scaledBaseVolumeWidth * volScale);
 
             // =========================================================================
             // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
-            // Proportional Separator
-            progressiveX += (clockSectionPadding * layoutSizeRatio);
+            if (fShowCpuGraph) {
+                // Proportional Separator
+                progressiveX += (clockSectionPadding * layoutSizeRatio);
 
-            float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
-            float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
-            float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
+                float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
+                float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
+                float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-            float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
-            float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
-            float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
+                float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+                float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
+                float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
 
-            float cpuScale = 1.0f;
-            if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
-                float ratio = distanceCpu2D / 180.0f;
-                cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                float cpuScale = 1.0f;
+                if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
+                    float ratio = distanceCpu2D / 180.0f;
+                    cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+
+                float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
+                dynamicWidths.push_back(finalCpuWidth);
+                dynamicScales.push_back(cpuScale);
+                progressiveX += finalCpuWidth;
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
             }
-
-            float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
-            dynamicWidths.push_back(finalCpuWidth);
-            dynamicScales.push_back(cpuScale);
-            progressiveX += finalCpuWidth;
 
             // =========================================================================
             // PROCESS WORKSPACE SWITCHER METRICS (2D SMOOTH FIX)
@@ -6085,10 +6157,10 @@ void SyncDockWithRunningDeskbarApps() {
 	    // SYNCHRONIZED: Account for the horizontal width footprint of the System Tray slot
 	    layoutTrackerX += clockSectionPadding + dynamicWidths[traySlotIdx];
 
-	    if (fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
+	    if (fShowClock && fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
 
 	    // Accountability shift step past our volume metrics
-	    layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
+	    if (fShowVolume) layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
 	    layoutTrackerX += clockSectionPadding;
 
 	    fTrashRect.left = layoutTrackerX;
@@ -6975,7 +7047,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    // Establish the universal scaling ratio to keep all components in sync
 	    float sizeRatio = static_cast<float>(fBaseIconSize) / 48.0f;
 
-	    if (fClockTexture.id != 0) {
+	    if (fShowClock && fClockTexture.id != 0) {
 	        // Apply size ratio to match exact rendering dimensions
 	        float dynamicClockW = dynamicWidths[clockSlotIdx] * sizeRatio;
 	        currentX += clockSectionPadding;
@@ -6992,53 +7064,57 @@ void SyncDockWithRunningDeskbarApps() {
 	    // Skip past Volume Slider component space footprint natively (WITH SIZE RATIO)
 	    // -------------------------------------------------------------------------
 	    // Multiplying this by sizeRatio prevents the layout tracking from shifting out of position
-	    currentX += clockSectionPadding + (dynamicWidths[volumeSlotIdx] * sizeRatio);
+	    if (fShowVolume) {
+	        currentX += clockSectionPadding + (dynamicWidths[volumeSlotIdx] * sizeRatio);
+	    }
 
 	    // -------------------------------------------------------------------------
 	    // Evaluate Click Bounds for Graphical LED CPU Monitor Component
 	    // -------------------------------------------------------------------------
-	    currentX += clockSectionPadding;
+	    if (fShowCpuGraph) {
+	        currentX += clockSectionPadding;
 
-	    float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
+	        float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
 
-	    HaikuRect cpuBounds = {
-	        currentX,
-	        dockPlate.top,
-	        currentX + dynamicGraphWidth,
-	        dockPlate.bottom
-	    };
+	        HaikuRect cpuBounds = {
+	            currentX,
+	            dockPlate.top,
+	            currentX + dynamicGraphWidth,
+	            dockPlate.bottom
+	        };
 
-	    if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
-	        if (fCpuMenuIsActive) {
+	        if (x >= cpuBounds.left && x <= cpuBounds.right && y >= cpuBounds.top && y <= cpuBounds.bottom) {
+	            if (fCpuMenuIsActive) {
+	                return;
+	            }
+
+	            if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
+	                fCpuMenuIsActive = true;
+
+	                CpuMenuArgs* args = new CpuMenuArgs();
+	                args->engine = this;
+	                args->winX = 0;
+	                args->winY = 0;
+	                args->mouseX = static_cast<int32>(x);
+	                args->mouseY = static_cast<int32>(y);
+	                args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
+
+	                if (be_app && be_app->Lock()) {
+	                    BWindow* mainNativeWin = be_app->WindowAt(0);
+	                    if (mainNativeWin != nullptr) {
+	                        args->winX = static_cast<int32>(mainNativeWin->Frame().left);
+	                        args->winY = static_cast<int32>(mainNativeWin->Frame().top);
+	                    }
+	                    be_app->Unlock();
+	                }
+
+	                new AsyncCpuMenuRunner(args);
+	            }
 	            return;
 	        }
 
-	        if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
-	            fCpuMenuIsActive = true;
-
-	            CpuMenuArgs* args = new CpuMenuArgs();
-	            args->engine = this;
-	            args->winX = 0;
-	            args->winY = 0;
-	            args->mouseX = static_cast<int32>(x);
-	            args->mouseY = static_cast<int32>(y);
-	            args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
-
-	            if (be_app && be_app->Lock()) {
-	                BWindow* mainNativeWin = be_app->WindowAt(0);
-	                if (mainNativeWin != nullptr) {
-	                    args->winX = static_cast<int32>(mainNativeWin->Frame().left);
-	                    args->winY = static_cast<int32>(mainNativeWin->Frame().top);
-	                }
-	                be_app->Unlock();
-	            }
-
-	            new AsyncCpuMenuRunner(args);
-	        }
-	        return;
+	        currentX += dynamicGraphWidth;
 	    }
-
-	    currentX += dynamicGraphWidth;
 
 	    // -------------------------------------------------------------------------
 	    // Evaluate Click Bounds for Workspace Switcher Grid Component
@@ -7586,7 +7662,7 @@ void SyncDockWithRunningDeskbarApps() {
             // =========================================================================
             // PROCESS SYSTEM CLOCK COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
-            if (fClockTexture.id != 0) {
+            if (fShowClock && fClockTexture.id != 0) {
                 progressiveX += clockSectionPadding;
 
                 float highDpiCompensateFactor = 0.42f;
@@ -7621,51 +7697,61 @@ void SyncDockWithRunningDeskbarApps() {
             // =========================================================================
             float layoutSizeRatio = baseSize / 48.0f;
 
-            // Proportional Separator
-            progressiveX += (clockSectionPadding * layoutSizeRatio);
+            if (fShowVolume) {
+                // Proportional Separator
+                progressiveX += (clockSectionPadding * layoutSizeRatio);
 
-            float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
-            float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
-            float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
+                float scaledBaseVolumeWidth = baseVolumeWidth * layoutSizeRatio;
+                float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
+                float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-            float distanceVolX = std::abs(fMouseX - approxVolCenterX);
-            float distanceVolY = std::abs(fMouseY - approxVolCenterY);
-            float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
+                float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+                float distanceVolY = std::abs(fMouseY - approxVolCenterY);
+                float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
 
-            float volScale = 1.0f;
-            if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
-                float ratio = distanceVol2D / 180.0f;
-                volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                float volScale = 1.0f;
+                if (fCursorIsInsideHitbox && distanceVol2D < 180.0f) {
+                    float ratio = distanceVol2D / 180.0f;
+                    volScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+
+                dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
+                dynamicScales.push_back(volScale);
+                progressiveX += (scaledBaseVolumeWidth * volScale);
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
             }
-
-            dynamicWidths.push_back(scaledBaseVolumeWidth * volScale);
-            dynamicScales.push_back(volScale);
-            progressiveX += (scaledBaseVolumeWidth * volScale);
 
             // =========================================================================
             // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
-            // Proportional Separator
-            progressiveX += (clockSectionPadding * layoutSizeRatio);
+            if (fShowCpuGraph) {
+                // Proportional Separator
+                progressiveX += (clockSectionPadding * layoutSizeRatio);
 
-            float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
-            float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
-            float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
+                float scaledCpuGraphWidth = cpuGraphWidth * layoutSizeRatio;
+                float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
+                float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-            float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
-            float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
-            float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
+                float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+                float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
+                float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
 
-            float cpuScale = 1.0f;
-            if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
-                float ratio = distanceCpu2D / 180.0f;
-                cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                float cpuScale = 1.0f;
+                if (fCursorIsInsideHitbox && distanceCpu2D < 180.0f) {
+                    float ratio = distanceCpu2D / 180.0f;
+                    cpuScale = 1.0f + (1.8f - 1.0f) * std::exp(-ratio * ratio);
+                }
+
+                float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
+                dynamicWidths.push_back(finalCpuWidth);
+                dynamicScales.push_back(cpuScale);
+                progressiveX += finalCpuWidth;
+            } else {
+                dynamicWidths.push_back(0.0f);
+                dynamicScales.push_back(1.0f);
             }
-
-            float finalCpuWidth = scaledCpuGraphWidth * cpuScale;
-            dynamicWidths.push_back(finalCpuWidth);
-            dynamicScales.push_back(cpuScale);
-            progressiveX += finalCpuWidth;
 
             // =========================================================================
             // PROCESS WORKSPACE SWITCHER METRICS (2D SMOOTH FIX)
@@ -8808,7 +8894,7 @@ void SyncDockWithRunningDeskbarApps() {
         // =========================================================================
         // 6. DRAW SYSTEM CLOCK STATUS TEXT (PROPORTIONAL SIZE SCALING)
         // =========================================================================
-        if (fClockTexture.id != 0) {
+        if (fShowClock && fClockTexture.id != 0) {
 
             float clockScale = dynamicScales[clockSlotIdx];
 
@@ -8901,182 +8987,188 @@ void SyncDockWithRunningDeskbarApps() {
         // =========================================================================
         // NEW: DRAW DYNAMIC VOLUME CONTROL SLIDER (DYNAMIC SIZE SCALING & SOLID BLACK)
         // =========================================================================
-        FetchHaikuMixerVolume();
+        if (fShowVolume) {
+            FetchHaikuMixerVolume();
 
-        currentX += clockSectionPadding;
+            currentX += clockSectionPadding;
 
-        float volScale = dynamicScales[volumeSlotIdx];
+            float volScale = dynamicScales[volumeSlotIdx];
 
-        // FIXED TYPE RESOLUTION: Declared as an independent local 'float volSizeRatio' variable
-        // to bypass any surrounding variable declaration scope conflicts completely!
-        float volSizeRatio = baseSize / 48.0f;
+            // FIXED TYPE RESOLUTION: Declared as an independent local 'float volSizeRatio' variable
+            // to bypass any surrounding variable declaration scope conflicts completely!
+            float volSizeRatio = baseSize / 48.0f;
 
-        // Dynamically scale width and height relative to the slider settings
-        float dynamicVolWidth   = dynamicWidths[volumeSlotIdx] * volSizeRatio;
-        float dynamicVolHeight  = 12.0f * volScale * volSizeRatio;
-        float volTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicVolHeight / 2.0f));
+            // Dynamically scale width and height relative to the slider settings
+            float dynamicVolWidth   = dynamicWidths[volumeSlotIdx] * volSizeRatio;
+            float dynamicVolHeight  = 12.0f * volScale * volSizeRatio;
+            float volTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicVolHeight / 2.0f));
 
-        // CACHE PIPELINE: Store the updated, scaled bounds so hit-testing inputs align perfectly
-        fCachedVolLeft   = currentX;
-        fCachedVolTop    = volTop;
-        fCachedVolWidth  = dynamicVolWidth;
-        fCachedVolHeight = dynamicVolHeight;
+            // CACHE PIPELINE: Store the updated, scaled bounds so hit-testing inputs align perfectly
+            fCachedVolLeft   = currentX;
+            fCachedVolTop    = volTop;
+            fCachedVolWidth  = dynamicVolWidth;
+            fCachedVolHeight = dynamicVolHeight;
 
-        HaikuRect volBounds = { currentX, volTop, currentX + dynamicVolWidth, volTop + dynamicVolHeight };
+            HaikuRect volBounds = { currentX, volTop, currentX + dynamicVolWidth, volTop + dynamicVolHeight };
 
-        // 1. RESTORED SOLID BACKGROUND: Swapped 0.9f out for a locked 0.95f dark matte casing trough.
-        DrawFilledRect(volBounds, 0.03f, 0.05f, 0.03f, 0.95f);
+            // 1. RESTORED SOLID BACKGROUND: Swapped 0.9f out for a locked 0.95f dark matte casing trough.
+            DrawFilledRect(volBounds, 0.03f, 0.05f, 0.03f, 0.95f);
 
-        // 2. Draw active volume fill level (Green)
-        HaikuRect activeVolumeFill = {
-            volBounds.left,
-            volBounds.top,
-            volBounds.left + (dynamicVolWidth * fCurrentVolumeLevel),
-            volBounds.bottom
-        };
-        DrawFilledRect(activeVolumeFill, 0.2f, 1.0f, 0.2f, 0.85f);
+            // 2. Draw active volume fill level (Green)
+            HaikuRect activeVolumeFill = {
+                volBounds.left,
+                volBounds.top,
+                volBounds.left + (dynamicVolWidth * fCurrentVolumeLevel),
+                volBounds.bottom
+            };
+            DrawFilledRect(activeVolumeFill, 0.2f, 1.0f, 0.2f, 0.85f);
 
-        // 3. Draw a thin perimeter frame outline edge loop (Soften its opacity to match the theme)
-        glColor4f(0.15f, 0.15f, 0.15f, fDockAlpha * 0.5f);
-        glBegin(GL_LINE_LOOP);
-            glVertex2f(volBounds.left,  volBounds.top);    glVertex2f(volBounds.right, volBounds.top);
-            glVertex2f(volBounds.right, volBounds.bottom); glVertex2f(volBounds.left,  volBounds.bottom);
-        glEnd();
+            // 3. Draw a thin perimeter frame outline edge loop (Soften its opacity to match the theme)
+            glColor4f(0.15f, 0.15f, 0.15f, fDockAlpha * 0.5f);
+            glBegin(GL_LINE_LOOP);
+                glVertex2f(volBounds.left,  volBounds.top);    glVertex2f(volBounds.right, volBounds.top);
+                glVertex2f(volBounds.right, volBounds.bottom); glVertex2f(volBounds.left,  volBounds.bottom);
+            glEnd();
 
-        // Restore universal color state safety pass
-        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+            // Restore universal color state safety pass
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-        currentX += dynamicVolWidth;
+            currentX += dynamicVolWidth;
+        }
 
 
 
         // =========================================================================
         // 6B. DRAW GRAPHICAL PURPLE BOUNCING CPU METERS (DYNAMIC SIZING & SOLID BLACK)
         // =========================================================================
-        glLineWidth(2.0f);
-        currentX += clockSectionPadding;
-
-        float cpuScale = dynamicScales[cpuSlotIdx];
-
         // DYNAMIC SIZING: Calculate a scale ratio relative to your base 48.0f icon setting
+        // (declared outside the toggle below -- the workspace switcher uses it too)
         float sizeRatio = baseSize / 48.0f;
 
-        // Scales the width and height parameters proportionally as you move the slider
-        float dynamicGraphWidth  = dynamicWidths[cpuSlotIdx];
-        float dynamicGraphHeight = 28.0f * cpuScale * sizeRatio;
+        if (fShowCpuGraph) {
+            glLineWidth(2.0f);
+            currentX += clockSectionPadding;
 
-        float graphTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicGraphHeight / 2.0f));
-        HaikuRect cpuGraphBounds = { currentX, graphTop, currentX + dynamicGraphWidth, graphTop + dynamicGraphHeight };
-
-        // RESTORED DARK BLACK BACKGROUND: Opacity locked back to a rich 95% dark charcoal capsule,
-        // ensuring the purple bars pop with maximum contrast even over 100% clear backplates!
-        DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
-
-        UpdateGlobalCpuLoadTracker();
-
-        int numBars = (fCpuHistoryIndex > 0 && fCpuHistoryIndex <= 40) ? fCpuHistoryIndex : 16;
-        float barSpacing = 1.5f * sizeRatio; // Scale bar spacing proportionally
-        float totalSpacingSpace = barSpacing * (numBars + 1);
-        float barWidth = (dynamicGraphWidth - totalSpacingSpace) / numBars;
-
-        static std::vector<float> visualBouncingHeights(40, 0.0f);
-
-        glBegin(GL_QUADS);
-        for (int i = 0; i < numBars; ++i) {
-            float targetLoadFactor = fCpuHistory[i];
-            visualBouncingHeights[i] = (visualBouncingHeights[i] * 0.82f) + (targetLoadFactor * 0.18f);
-
-            float barLeft = cpuGraphBounds.left + barSpacing + (i * (barWidth + barSpacing));
-            float barRight = barLeft + barWidth;
-
-            float barTop = cpuGraphBounds.bottom - (visualBouncingHeights[i] * (dynamicGraphHeight - 2.0f)) - 1.0f;
-
-            // Dynamic Contrast: keep them bright and vivid
-            if (fDockAlpha < 0.35f) {
-                glColor4f(0.68f, 0.25f, 1.00f, 0.95f); // Bright luminous purple
-            } else {
-                glColor4f(0.57f, 0.12f, 0.99f, 0.90f); // Default Neon Purple
-            }
-
-            glVertex2f(barLeft,  barTop);
-            glVertex2f(barRight, barTop);
-            glVertex2f(barRight, cpuGraphBounds.bottom - 1.0f);
-            glVertex2f(barLeft,  cpuGraphBounds.bottom - 1.0f);
-        }
-        glEnd();
-
-        // Restore global color state sanity
-        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-        currentX += dynamicGraphWidth;
+            float cpuScale = dynamicScales[cpuSlotIdx];
 
 
-        // =========================================================================
-        // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
-        // =========================================================================
+            // Scales the width and height parameters proportionally as you move the slider
+            float dynamicGraphWidth  = dynamicWidths[cpuSlotIdx];
+            float dynamicGraphHeight = 28.0f * cpuScale * sizeRatio;
 
-        if (cpuGraphBounds.Contains(fMouseX, fMouseY)) {
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            int latestIndex = (fCpuHistoryIndex == 0) ? 39 : fCpuHistoryIndex - 1;
-            int cpuPercent = static_cast<int>(fCpuHistory[latestIndex] * 100.0f);
+            float graphTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicGraphHeight / 2.0f));
+            HaikuRect cpuGraphBounds = { currentX, graphTop, currentX + dynamicGraphWidth, graphTop + dynamicGraphHeight };
 
-            char textBuffer[32]; snprintf(textBuffer, sizeof(textBuffer), "CPU: %d%%", cpuPercent);
-            std::string currentTooltipStr(textBuffer);
+            // RESTORED DARK BLACK BACKGROUND: Opacity locked back to a rich 95% dark charcoal capsule,
+            // ensuring the purple bars pop with maximum contrast even over 100% clear backplates!
+            DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
 
-            if (currentTooltipStr != fLastCpuTooltipStr) {
-                if (fCpuTooltipTex.id != 0) {
-                    glDeleteTextures(1, &fCpuTooltipTex.id);
-                    fCpuTooltipTex.id = 0;
+            UpdateGlobalCpuLoadTracker();
+
+            int numBars = (fCpuHistoryIndex > 0 && fCpuHistoryIndex <= 40) ? fCpuHistoryIndex : 16;
+            float barSpacing = 1.5f * sizeRatio; // Scale bar spacing proportionally
+            float totalSpacingSpace = barSpacing * (numBars + 1);
+            float barWidth = (dynamicGraphWidth - totalSpacingSpace) / numBars;
+
+            static std::vector<float> visualBouncingHeights(40, 0.0f);
+
+            glBegin(GL_QUADS);
+            for (int i = 0; i < numBars; ++i) {
+                float targetLoadFactor = fCpuHistory[i];
+                visualBouncingHeights[i] = (visualBouncingHeights[i] * 0.82f) + (targetLoadFactor * 0.18f);
+
+                float barLeft = cpuGraphBounds.left + barSpacing + (i * (barWidth + barSpacing));
+                float barRight = barLeft + barWidth;
+
+                float barTop = cpuGraphBounds.bottom - (visualBouncingHeights[i] * (dynamicGraphHeight - 2.0f)) - 1.0f;
+
+                // Dynamic Contrast: keep them bright and vivid
+                if (fDockAlpha < 0.35f) {
+                    glColor4f(0.68f, 0.25f, 1.00f, 0.95f); // Bright luminous purple
+                } else {
+                    glColor4f(0.57f, 0.12f, 0.99f, 0.90f); // Default Neon Purple
                 }
-                fLastCpuTooltipStr = currentTooltipStr;
-                fCpuTooltipTex = RenderTextToTexture(fLastCpuTooltipStr.c_str(), &fCpuTooltipW, &fCpuTooltipH);
+
+                glVertex2f(barLeft,  barTop);
+                glVertex2f(barRight, barTop);
+                glVertex2f(barRight, cpuGraphBounds.bottom - 1.0f);
+                glVertex2f(barLeft,  cpuGraphBounds.bottom - 1.0f);
             }
-
-            float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f;
-            float tooltipH = static_cast<float>(fCpuTooltipH) + 8.0f;
-            float tooltipLeft = cpuGraphBounds.left + (cpuGraphBounds.Width() / 2.0f) - (tooltipW / 2.0f);
-
-            // Bottom-anchored dock: pop the tooltip up above the graph. Top-anchored
-            // dock: there's no room above, so drop it below the graph instead.
-            HaikuRect tooltipBounds;
-            if (gDockLocation == kDockLocationTop) {
-                float tooltipTop = cpuGraphBounds.bottom + 1.0f;
-                tooltipBounds = { tooltipLeft, tooltipTop, tooltipLeft + tooltipW, tooltipTop + tooltipH };
-            } else {
-                // FIX: Brought the box lower down closer to the graph frame edge (changed from -8.0f to -1.0f)
-                float tooltipBottom = cpuGraphBounds.top - 1.0f;
-                tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
-            }
-            DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
-
-            glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
-            glBegin(GL_LINE_LOOP);
-                glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
-                glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
             glEnd();
 
-            if (fCpuTooltipTex.id != 0) {
-                glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
-                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
-                glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
-                glColor4f(0.2f, 1.0f, 0.2f, 1.0f);
-                float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
+            // Restore global color state sanity
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-                glBegin(GL_QUADS);
-                    glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
-                    glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fCpuTooltipW, textY);
-                    // FIXED: Replaced fTrashTooltipH with fCpuTooltipH to fix empty initialization geometry layout bug
-                    glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fCpuTooltipW, textY + fCpuTooltipH);
-                    glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fCpuTooltipH);
+            currentX += dynamicGraphWidth;
+
+
+            // =========================================================================
+            // ADDED: HOVER PROXIMITY TEST AND DYNAMIC PERCENTAGE TEXT LAYER
+            // =========================================================================
+
+            if (cpuGraphBounds.Contains(fMouseX, fMouseY)) {
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                int latestIndex = (fCpuHistoryIndex == 0) ? 39 : fCpuHistoryIndex - 1;
+                int cpuPercent = static_cast<int>(fCpuHistory[latestIndex] * 100.0f);
+
+                char textBuffer[32]; snprintf(textBuffer, sizeof(textBuffer), "CPU: %d%%", cpuPercent);
+                std::string currentTooltipStr(textBuffer);
+
+                if (currentTooltipStr != fLastCpuTooltipStr) {
+                    if (fCpuTooltipTex.id != 0) {
+                        glDeleteTextures(1, &fCpuTooltipTex.id);
+                        fCpuTooltipTex.id = 0;
+                    }
+                    fLastCpuTooltipStr = currentTooltipStr;
+                    fCpuTooltipTex = RenderTextToTexture(fLastCpuTooltipStr.c_str(), &fCpuTooltipW, &fCpuTooltipH);
+                }
+
+                float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f;
+                float tooltipH = static_cast<float>(fCpuTooltipH) + 8.0f;
+                float tooltipLeft = cpuGraphBounds.left + (cpuGraphBounds.Width() / 2.0f) - (tooltipW / 2.0f);
+
+                // Bottom-anchored dock: pop the tooltip up above the graph. Top-anchored
+                // dock: there's no room above, so drop it below the graph instead.
+                HaikuRect tooltipBounds;
+                if (gDockLocation == kDockLocationTop) {
+                    float tooltipTop = cpuGraphBounds.bottom + 1.0f;
+                    tooltipBounds = { tooltipLeft, tooltipTop, tooltipLeft + tooltipW, tooltipTop + tooltipH };
+                } else {
+                    // FIX: Brought the box lower down closer to the graph frame edge (changed from -8.0f to -1.0f)
+                    float tooltipBottom = cpuGraphBounds.top - 1.0f;
+                    tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
+                }
+                DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
+
+                glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
+                glBegin(GL_LINE_LOOP);
+                    glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
+                    glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
                 glEnd();
 
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-                glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
-            }
-        }
+                if (fCpuTooltipTex.id != 0) {
+                    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
+                    glColor4f(0.2f, 1.0f, 0.2f, 1.0f);
+                    float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
 
-        glDisable(GL_BLEND);
+                    glBegin(GL_QUADS);
+                        glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
+                        glTexCoord2f(1.0f, 0.0f); glVertex2f(textX + fCpuTooltipW, textY);
+                        // FIXED: Replaced fTrashTooltipH with fCpuTooltipH to fix empty initialization geometry layout bug
+                        glTexCoord2f(1.0f, 1.0f); glVertex2f(textX + fCpuTooltipW, textY + fCpuTooltipH);
+                        glTexCoord2f(0.0f, 1.0f); glVertex2f(textX, textY + fCpuTooltipH);
+                    glEnd();
+
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                    glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D);
+                }
+            }
+
+            glDisable(GL_BLEND);
+        }
 
 
 
@@ -9864,6 +9956,9 @@ void SaveConfiguration() {
             settingsMsg.AddBool("advanced_options", fShowAdvancedOptions);
             settingsMsg.AddInt32("thumbnail_fps", fThumbnailCaptureFps);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
+            settingsMsg.AddBool("show_clock", fShowClock);
+            settingsMsg.AddBool("show_volume", fShowVolume);
+            settingsMsg.AddBool("show_cpu_graph", fShowCpuGraph);
             settingsMsg.AddInt32("dock_location", gDockLocation);
 
 			settingsMsg.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
@@ -9922,6 +10017,9 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("advanced_options", &valBool) == B_OK) fShowAdvancedOptions = valBool;
                 if (settingsMsg.FindInt32("thumbnail_fps", &valInt32) == B_OK) fThumbnailCaptureFps = valInt32;
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
+                if (settingsMsg.FindBool("show_clock", &valBool) == B_OK) fShowClock = valBool;
+                if (settingsMsg.FindBool("show_volume", &valBool) == B_OK) fShowVolume = valBool;
+                if (settingsMsg.FindBool("show_cpu_graph", &valBool) == B_OK) fShowCpuGraph = valBool;
                 if (settingsMsg.FindInt32("dock_location", &valInt32) == B_OK) {
                     gDockLocation = (valInt32 == kDockLocationTop) ? kDockLocationTop : kDockLocationBottom;
                 }
