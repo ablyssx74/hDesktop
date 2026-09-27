@@ -2136,7 +2136,7 @@ struct MenuItem {
     unsigned liveMs = 0;          // re-run `submenu` this often while it's open (live CPU/memory menus)
     // BCpuBarMenuItem / BMemoryBarMenuItem style rows.
     double barPercent = -1.0;
-    int barPalette = 0;           // 0 = CPU thresholds, 1 = memory thresholds
+    int barPalette = 0;           // 0 = CPU thresholds, 1 = memory used, 2 = memory free, 3 = memory total
     std::string valueText;
 
     static MenuItem Separator() {
@@ -2318,10 +2318,18 @@ public:
                 cairo_rectangle(cr, barX, barY, barW, barH);
                 cairo_fill(cr);
                 RGBA fill;
-                if (it.barPalette == 1) {
-                    if (it.barPercent > 85.0) fill = {50 / 255.0, 205 / 255.0, 50 / 255.0, 1};
-                    else if (it.barPercent > 60.0) fill = {220 / 255.0, 20 / 255.0, 60 / 255.0, 1};
-                    else fill = {1.0, 140 / 255.0, 0, 1};
+                const RGBA green{50 / 255.0, 205 / 255.0, 50 / 255.0, 1};
+                const RGBA orange{1.0, 140 / 255.0, 0, 1};
+                const RGBA red{220 / 255.0, 20 / 255.0, 60 / 255.0, 1};
+                if (it.barPalette == 3) {
+                    fill = green; // total capacity: always full
+                } else if (it.barPalette == 1 || it.barPalette == 2) {
+                    // Free RAM: red <= 40%, orange 41-80%, green above.
+                    // Used memory: the inverse -- green <= 40%, orange, red above 80%.
+                    bool isFree = (it.barPalette == 2);
+                    if (it.barPercent <= 40.0) fill = isFree ? red : green;
+                    else if (it.barPercent <= 80.0) fill = orange;
+                    else fill = isFree ? green : red;
                 } else {
                     if (it.barPercent > 75.0) fill = {50 / 255.0, 205 / 255.0, 50 / 255.0, 1};
                     else if (it.barPercent > 35.0) fill = {1.0, 140 / 255.0, 0, 1};
@@ -6369,11 +6377,11 @@ private:
         double total = m.totalKb / 1024.0;
         double used = (m.totalKb - m.availableKb) / 1024.0;
         double pct = total > 0 ? used / total * 100.0 : 0.0;
-        auto row = [](const std::string& label, double percent) {
+        auto row = [](const std::string& label, double percent, int palette) {
             MenuItem it;
             it.label = label;
             it.barPercent = percent;
-            it.barPalette = 1;
+            it.barPalette = palette;
             char buf[16];
             snprintf(buf, sizeof(buf), "%3.1f%%", percent);
             it.valueText = buf;
@@ -6385,7 +6393,7 @@ private:
         snprintf(a, sizeof(a), "Used Physical Memory: %d MB", static_cast<int>(used));
         snprintf(b, sizeof(b), "Free Available RAM: %d MB", static_cast<int>(total - used));
         snprintf(c, sizeof(c), "Total Installed Capacity: %d MB", static_cast<int>(total));
-        return {row(a, pct), row(b, 100.0 - pct), row(c, 100.0)};
+        return {row(a, pct, 1), row(b, 100.0 - pct, 2), row(c, 100.0, 3)};
     }
 
     std::vector<MenuItem> CpuProcessItems(ProcessSampler& sampler) {

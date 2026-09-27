@@ -661,10 +661,18 @@ public:
 // =========================================================================
 // CUSTOM RENDERING LAYER: LIVE GEOMETRIC REAL-TIME MEMORY USAGE GRAPH BAR
 // =========================================================================
+// Which memory row a bar shows -- each is colored by its own rule, see
+// BMemoryBarMenuItem::DrawContent().
+enum MemoryBarKind {
+    kMemoryBarUsed,   // Used Physical Memory: green <= 40%, orange 41-80%, red above
+    kMemoryBarFree,   // Free Available RAM:   red <= 40%, orange 41-80%, green above
+    kMemoryBarTotal   // Total Installed Capacity: always full, green
+};
+
 class BMemoryBarMenuItem : public BMenuItem {
 public:
-    BMemoryBarMenuItem(const char* label, double fillPercentage)
-        : BMenuItem(label, nullptr), fFillPercentage(fillPercentage) {}
+    BMemoryBarMenuItem(const char* label, double fillPercentage, MemoryBarKind kind)
+        : BMenuItem(label, nullptr), fFillPercentage(fillPercentage), fKind(kind) {}
 
     void UpdateMetrics(double newPercentage, const char* newLabel) {
         fFillPercentage = newPercentage;
@@ -716,13 +724,19 @@ protected:
         menu->SetHighColor(45, 45, 45);
         menu->FillRect(barTrack);
 
-        // Dynamic resource footprint styling thresholds
-        if (fFillPercentage > 85.0) {
-            menu->SetHighColor(50, 205, 50);    // Neon Green
-        } else if (fFillPercentage > 60.0) {
-            menu->SetHighColor(220, 20, 60);    // Crimson Red
+        // Dynamic resource footprint styling thresholds: plenty of free RAM
+        // (or little used) is green, getting tight is orange, low is red.
+        const rgb_color kGreen  = {50, 205, 50, 255};   // Neon Green
+        const rgb_color kOrange = {255, 140, 0, 255};   // Dark Orange
+        const rgb_color kRed    = {220, 20, 60, 255};   // Crimson Red
+        if (fKind == kMemoryBarTotal) {
+            menu->SetHighColor(kGreen);
+        } else if (fFillPercentage <= 40.0) {
+            menu->SetHighColor(fKind == kMemoryBarFree ? kRed : kGreen);
+        } else if (fFillPercentage <= 80.0) {
+            menu->SetHighColor(kOrange);
         } else {
-            menu->SetHighColor(255, 140, 0);   // Dark Orange
+            menu->SetHighColor(fKind == kMemoryBarFree ? kGreen : kRed);
         }
 
         if (fillCap.Width() > 0) {
@@ -739,6 +753,7 @@ protected:
 
 private:
     double fFillPercentage;
+    MemoryBarKind fKind;
 };
 
 
@@ -878,20 +893,20 @@ public:
             std::snprintf(i3, sizeof(i3), "Total Installed Capacity: %d MB", totalMB);
 
             // Update row item text metrics or inject custom green graph bar items seamlessly
-            UpdateOrAddMemoryBarItem(0, i1, overallMemoryUsagePercent);
-            UpdateOrAddMemoryBarItem(1, i2, 100.0 - overallMemoryUsagePercent); // Remaining percentage space
-            UpdateOrAddMemoryBarItem(2, i3, 100.0); // Total capacity sits solid filled
+            UpdateOrAddMemoryBarItem(0, i1, overallMemoryUsagePercent, kMemoryBarUsed);
+            UpdateOrAddMemoryBarItem(1, i2, 100.0 - overallMemoryUsagePercent, kMemoryBarFree); // Remaining percentage space
+            UpdateOrAddMemoryBarItem(2, i3, 100.0, kMemoryBarTotal); // Total capacity sits solid filled
         }
     }
 
 private:
-    void UpdateOrAddMemoryBarItem(int32 idx, const char* label, double percentage) {
+    void UpdateOrAddMemoryBarItem(int32 idx, const char* label, double percentage, MemoryBarKind kind) {
         BMemoryBarMenuItem* item = dynamic_cast<BMemoryBarMenuItem*>(ItemAt(idx));
         if (item) {
             item->UpdateMetrics(percentage, label);
         } else {
             // Instantiate our brand new memory bar object class
-            BMemoryBarMenuItem* newItem = new BMemoryBarMenuItem(label, percentage);
+            BMemoryBarMenuItem* newItem = new BMemoryBarMenuItem(label, percentage, kind);
             AddItem(newItem);
         }
     }
