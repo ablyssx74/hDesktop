@@ -369,7 +369,42 @@ struct TaskbarItem {
     team_id teamId;
     int32 windowIndex;
     float textAlpha = 0.0f;
+
+    // Apps that start a separate team per window (Terminal) are shown as one
+    // grouped icon, like Tracker's many windows under its single team.
+    // teamId is the group's representative (oldest) team; groupTeams lists
+    // every team the icon stands for, teamId included.
+    std::string signature;
+    bool isGroup = false;
+    std::vector<team_id> groupTeams;
+
+    bool HasTeam(team_id team) const {
+        if (team == teamId) return true;
+        for (size_t i = 0; i < groupTeams.size(); ++i) {
+            if (groupTeams[i] == team) return true;
+        }
+        return false;
+    }
+
+    // Teams to act on: the whole group, or just teamId.
+    std::vector<team_id> Teams() const {
+        if (groupTeams.empty()) return std::vector<team_id>(1, teamId);
+        return groupTeams;
+    }
 };
+
+// Signatures whose teams get grouped under a single dock icon.
+static bool IsGroupedAppSignature(const std::string& signature) {
+    return signature == "application/x-vnd.Haiku-Terminal";
+}
+
+// Whether two taskbar entries (e.g. from consecutive roster scans) are the
+// same dock icon -- by team, or by signature for a grouped app whose
+// representative team changed because its oldest window closed.
+static bool IsSameDockEntry(const TaskbarItem& a, const TaskbarItem& b) {
+    if (a.teamId == b.teamId) return true;
+    return a.isGroup && b.isGroup && a.signature == b.signature;
+}
 
 struct DesktopIconItem {
     std::string name;
@@ -587,6 +622,24 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
 
 
 
+
+// Window list for a whole taskbar entry -- every team of a grouped app.
+void GetTrackedWindowsForItem(const TaskbarItem& item, std::vector<TrackedWindowInfo>& outList) {
+    outList.clear();
+    std::vector<team_id> teams = item.Teams();
+    std::vector<TrackedWindowInfo> fallbacks;
+    for (size_t t = 0; t < teams.size(); ++t) {
+        std::vector<TrackedWindowInfo> teamList;
+        GetTrackedWindowsFromTeam(teams[t], teamList);
+        for (size_t w = 0; w < teamList.size(); ++w) {
+            // serverToken < 0 marks the "no real window found" placeholder;
+            // only fall back to those if no member has a real window here.
+            if (teamList[w].serverToken >= 0) outList.push_back(teamList[w]);
+            else fallbacks.push_back(teamList[w]);
+        }
+    }
+    if (outList.empty() && !fallbacks.empty()) outList.push_back(fallbacks[0]);
+}
 
 using BPrivate::BNavMenu;
 // =========================================================================
@@ -5356,12 +5409,35 @@ void SyncDockWithRunningDeskbarApps() {
             BPath path;
             entry.GetPath(&path);
 
-            // Detect brand new apps for launch animations
+            // Detect brand new apps (or new windows of a grouped app) for launch animations
             bool isBrandNewApp = true;
             for (const auto& oldWin : oldTaskbarWindows) {
-                if (oldWin.teamId == id) {
+                if (oldWin.HasTeam(id)) {
                     isBrandNewApp = false;
                     break;
+                }
+            }
+
+            // Grouped apps (Terminal): a further team joins the icon that is
+            // already in the list instead of getting its own.
+            bool isGroupedApp = IsGroupedAppSignature(appSignature);
+            if (isGroupedApp) {
+                TaskbarItem* group = nullptr;
+                for (auto& existing : fTaskbarWindows) {
+                    if (existing.isGroup && existing.signature == appSignature) {
+                        group = &existing;
+                        break;
+                    }
+                }
+                if (group != nullptr) {
+                    group->groupTeams.push_back(id);
+                    if (activeTeamId == id) group->isMinimized = false;
+                    if (isBrandNewApp && id != be_app->Team()) {
+                        fEffectAppTeam = group->teamId;
+                        fEffectAppName = "";
+                        fEffectAnimationStartTime = SDL_GetTicks();
+                    }
+                    continue;
                 }
             }
 
@@ -5374,11 +5450,14 @@ void SyncDockWithRunningDeskbarApps() {
             TaskbarItem openApp;
             openApp.title = appTitle;
             openApp.teamId = id;
+            openApp.signature = appSignature;
+            openApp.isGroup = isGroupedApp;
+            openApp.groupTeams.push_back(id);
 
             // --- TEXTURE CACHING (REUSE INSTEAD OF RELOAD) ---
             bool reusedTexture = false;
             for (const auto& oldWin : oldTaskbarWindows) {
-                if (oldWin.teamId == id && oldWin.icon.id > 0) {
+                if (IsSameDockEntry(oldWin, openApp) && oldWin.icon.id > 0) {
                     openApp.icon = oldWin.icon;
                     reusedTexture = true;
                     break;
@@ -5391,7 +5470,7 @@ void SyncDockWithRunningDeskbarApps() {
 
             bool foundOldInstance = false;
             for (const auto& oldWin : oldTaskbarWindows) {
-                if (oldWin.teamId == id) {
+                if (IsSameDockEntry(oldWin, openApp)) {
                     openApp.isMinimized = oldWin.isMinimized;
                     openApp.hasVisibleWindows = oldWin.hasVisibleWindows;
                     foundOldInstance = true;
@@ -5423,7 +5502,7 @@ void SyncDockWithRunningDeskbarApps() {
         for (const auto& oldWin : oldTaskbarWindows) {
             bool stillRunning = false;
             for (const auto& newWin : fTaskbarWindows) {
-                if (newWin.teamId == oldWin.teamId) {
+                if (IsSameDockEntry(newWin, oldWin)) {
                     stillRunning = true;
                     break;
                 }
@@ -5478,7 +5557,7 @@ void SyncDockWithRunningDeskbarApps() {
 
         bool stillExists = false;
         for (const auto& newWin : fTaskbarWindows) {
-            if (newWin.teamId == oldWin.teamId) {
+            if (IsSameDockEntry(newWin, oldWin)) {
                 stillExists = true;
                 break;
             }
@@ -6501,11 +6580,15 @@ void SyncDockWithRunningDeskbarApps() {
 
 	                else {
 	                    // GENERAL APPLICATIONS: Standard clean closure sequence
-	                    BMessenger targetAppMessenger(NULL, activeTaskWin.teamId);
-	                    if (targetAppMessenger.IsValid()) {
-	                        targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
-	                    } else {
-	                        kill_team(activeTaskWin.teamId);
+	                    // (every team of a grouped app, e.g. all Terminal windows)
+	                    std::vector<team_id> closeTeams = activeTaskWin.Teams();
+	                    for (size_t t = 0; t < closeTeams.size(); ++t) {
+	                        BMessenger targetAppMessenger(NULL, closeTeams[t]);
+	                        if (targetAppMessenger.IsValid()) {
+	                            targetAppMessenger.SendMessage(B_QUIT_REQUESTED);
+	                        } else {
+	                            kill_team(closeTeams[t]);
+	                        }
 	                    }
 	                }
 
@@ -6620,22 +6703,25 @@ void SyncDockWithRunningDeskbarApps() {
                 // merely visible -- e.g. partly covered by another app's window --
                 // is brought to the front instead, so a single click always
                 // focuses it rather than minimizing it first.
-                bool isForegroundApp = (activeTaskWin.teamId == fLastForegroundTeam);
+                bool isForegroundApp = activeTaskWin.HasTeam(fLastForegroundTeam);
                 {
                     app_info frontInfo;
                     if (be_roster->GetActiveAppInfo(&frontInfo) == B_OK
                         && (be_app == nullptr || frontInfo.team != be_app->Team())) {
-                        isForegroundApp = (frontInfo.team == activeTaskWin.teamId);
+                        isForegroundApp = activeTaskWin.HasTeam(frontInfo.team);
                     }
                 }
+                std::vector<team_id> itemTeams = activeTaskWin.Teams();
 
                 // READ TRUTH FROM RENDERFRAME WORKSPACE BITMASK
 	            if (isForegroundApp && activeTaskWin.hasVisibleWindows) {
 
-	                BPrivate::AppServerLink link;
-	                link.StartMessage(AS_MINIMIZE_TEAM);
-	                link.Attach<team_id>(activeTaskWin.teamId);
-	                link.Flush();
+	                for (size_t t = 0; t < itemTeams.size(); ++t) {
+	                    BPrivate::AppServerLink link;
+	                    link.StartMessage(AS_MINIMIZE_TEAM);
+	                    link.Attach<team_id>(itemTeams[t]);
+	                    link.Flush();
+	                }
 
 	                be_roster->ActivateApp(-1);
 	                // FIX 1: Removed activeTaskWin.isMinimized = true;
@@ -6696,12 +6782,12 @@ void SyncDockWithRunningDeskbarApps() {
 	                }
 
 
-	                app_info targetAppInfo;
-	                if (be_roster->GetRunningAppInfo(activeTaskWin.teamId, &targetAppInfo) == B_OK) {
-	                    be_roster->ActivateApp(targetAppInfo.team);
-	                } else {
-	                    be_roster->ActivateApp(activeTaskWin.teamId);
-	                }
+	                // For a grouped app, the team that ends up focused is the one
+	                // used most recently if it belongs to the group; the others
+	                // are brought forward first so it lands on top.
+	                team_id focusTeam = activeTaskWin.HasTeam(fLastForegroundTeam)
+	                    ? fLastForegroundTeam : activeTaskWin.teamId;
+
 	                // Trigger 3D Effect on window focus/activation
 					fEffectAppTeam = activeTaskWin.teamId;
 					fEffectAppName = "";
@@ -6710,9 +6796,24 @@ void SyncDockWithRunningDeskbarApps() {
                     // FIX 2: Group Restore Force Pipeline.
                     // This explicitly flushes window tokens belonging to group-minimized layers
                     // (like Pe or WebPositive) back onto the active workspace array.
+	                for (size_t t = 0; t < itemTeams.size(); ++t) {
+	                    if (itemTeams[t] == focusTeam) continue;
+	                    BPrivate::AppServerLink groupLink;
+	                    groupLink.StartMessage(AS_BRING_TEAM_TO_FRONT);
+	                    groupLink.Attach<team_id>(itemTeams[t]);
+	                    groupLink.Flush();
+	                }
+
+	                app_info targetAppInfo;
+	                if (be_roster->GetRunningAppInfo(focusTeam, &targetAppInfo) == B_OK) {
+	                    be_roster->ActivateApp(targetAppInfo.team);
+	                } else {
+	                    be_roster->ActivateApp(focusTeam);
+	                }
+
 	                BPrivate::AppServerLink link;
 	                link.StartMessage(AS_BRING_TEAM_TO_FRONT);
-	                link.Attach<team_id>(activeTaskWin.teamId);
+	                link.Attach<team_id>(focusTeam);
 	                link.Flush();
 
                     // Force focus routing loop to active window tokens to trigger layout updates
@@ -6723,7 +6824,7 @@ void SyncDockWithRunningDeskbarApps() {
                         for (int32 i = 0; i < systemCount; ++i) {
                             client_window_info* cInfo = get_window_info(systemTokens[i]);
                             if (cInfo != nullptr) {
-                                if (cInfo->team == activeTaskWin.teamId && cInfo->feel == B_NORMAL_WINDOW_FEEL) {
+                                if (cInfo->team == focusTeam && cInfo->feel == B_NORMAL_WINDOW_FEEL) {
                                     // Inject sub-message to force individual window wakeups
                                     BPrivate::AppServerLink winLink;
                                     winLink.StartMessage(AS_BRING_TEAM_TO_FRONT);
@@ -8347,7 +8448,7 @@ void SyncDockWithRunningDeskbarApps() {
 		            client_window_info* info = get_window_info(windowTokens[i]);
 		            if (info == nullptr) continue;
 
-		            if (info->team == activeTaskWin.teamId) {
+		            if (activeTaskWin.HasTeam(info->team)) {
 		                if (isTracker) {
 		                    // TRACKER RULE: Target only active folder panels (layer 3+)
 		                    // Discards desktop backdrop (1024) and right-click popups (1025)
@@ -8401,7 +8502,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    bool isCurrentlyForeground = false;
 
 		    if (be_roster->GetActiveAppInfo(&activeAppInfo) == B_OK) {
-		        if (activeAppInfo.team == activeTaskWin.teamId) {
+		        if (activeTaskWin.HasTeam(activeAppInfo.team)) {
 		            isCurrentlyForeground = true;
 
 		            // If Tracker is currently focused but has no active folder windows open,
@@ -8449,7 +8550,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float animProgress = 0.0f;
                 bool isExploding = false;
 
-                if (fEffectAppTeam != -1 && activeTaskWin.teamId == fEffectAppTeam && fEffectAnimationStartTime > 0) {
+                if (fEffectAppTeam != -1 && activeTaskWin.HasTeam(fEffectAppTeam) && fEffectAnimationStartTime > 0) {
                     uint32 elapsedTicks = SDL_GetTicks() - fEffectAnimationStartTime;
                     if (elapsedTicks < fSpinDurationMs) {
                         animProgress = static_cast<float>(elapsedTicks) / static_cast<float>(fSpinDurationMs);
@@ -8631,7 +8732,7 @@ void SyncDockWithRunningDeskbarApps() {
 
 			    if (teamChanged || refreshDue) {
 			        fHoveredTeam = activeTaskWin.teamId;
-			        GetTrackedWindowsFromTeam(fHoveredTeam, fCurrentWindowsList);
+			        GetTrackedWindowsForItem(activeTaskWin, fCurrentWindowsList);
 			        fLastHoverListRefreshTime = nowTime;
 			    }
 
