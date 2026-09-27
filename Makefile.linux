@@ -59,7 +59,13 @@ $(GEN_DIR)/%-protocol.c: $(PROTO_DIR)/%.xml | $(GEN_DIR)
 $(GEN_DIR)/%-protocol.o: $(GEN_DIR)/%-protocol.c $(PROTO_HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(GEN_DIR)/hdesktop_linux.o: hdesktop_linux.cpp TrackerIcon.cpp $(PROTO_HEADERS)
+# Tracker.svg compiled in as a byte array (od + sed: no xxd needed)
+$(GEN_DIR)/tracker-icon.h: Tracker.svg | $(GEN_DIR)
+	{ echo 'static const unsigned char kTrackerSvg[] = {'; \
+	  od -An -v -tx1 $< | sed 's/\([0-9a-f][0-9a-f]\)/0x\1,/g'; \
+	  echo '};'; } > $@
+
+$(GEN_DIR)/hdesktop_linux.o: hdesktop_linux.cpp $(GEN_DIR)/tracker-icon.h $(PROTO_HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(TARGET): $(GEN_DIR)/hdesktop_linux.o $(PROTO_OBJECTS)
