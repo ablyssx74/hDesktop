@@ -5125,16 +5125,34 @@ private:
         const float baselineTrayWidth = trayItems.empty() ? 0.0f
             : trayItems.size() * trayIcon + (trayItems.size() - 1) * 6.0f * ratio;
 
+        // Zoom is measured against each slot's *resting* (unzoomed) center,
+        // not its zoomed one. Measuring against the zoomed layout fed back on
+        // itself -- a slot growing shifts its neighbours, which changes their
+        // distance to the pointer, which changes their zoom -- and never
+        // settled, which showed up as jitter, worst on the widgets farthest
+        // from the dock's center. Pass 0 lays everything out at rest and
+        // records those centers; pass 1 applies the zoom they imply.
         float total = 0.0f;
         std::vector<DockSlot> slots;
-        for (int pass = 0; pass < 3; ++pass) {
+        std::vector<float> restCenters;
+        size_t zoomSlot = 0;
+        for (int pass = 0; pass < 2; ++pass) {
             slots.clear();
             L.maxDockHeight = baseSize;
             float x = fWidth / 2.0f - total / 2.0f;
             const float left = x;
+            zoomSlot = 0;
+
+            auto zoomFor = [&](float restLayoutCenterX) -> float {
+                if (pass == 0) {
+                    restCenters.push_back(restLayoutCenterX);
+                    return 1.0f;
+                }
+                return MagnifyScale(restCenters[zoomSlot++], iconCenterY);
+            };
 
             auto addSquare = [&](SlotKind kind, int appIndex) {
-                float scale = MagnifyScale(x + baseSize / 2.0f, iconCenterY);
+                float scale = zoomFor(x + baseSize / 2.0f);
                 DockSlot s;
                 s.kind = kind;
                 s.appIndex = appIndex;
@@ -5145,7 +5163,7 @@ private:
                 x += s.width;
             };
             auto addWidget = [&](SlotKind kind, float baseWidth) {
-                float scale = MagnifyScale(x + baseWidth / 2.0f, iconCenterY);
+                float scale = zoomFor(x + baseWidth / 2.0f);
                 DockSlot s;
                 s.kind = kind;
                 s.scale = scale;
@@ -5190,6 +5208,11 @@ private:
                 addWidget(kSlotWorkspaces, 60.0f * ratio);
             }
             total = x - left;
+            // Pass 0 started at the screen center before the width was known;
+            // shift its recorded centers onto the properly centered rest layout.
+            if (pass == 0) {
+                for (float& c : restCenters) c -= total / 2.0f;
+            }
         }
 
         // PASS 2: settle bounds

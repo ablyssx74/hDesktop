@@ -5880,7 +5880,23 @@ void SyncDockWithRunningDeskbarApps() {
         // -------------------------------------------------------------------------
 
         float totalCalculatedWidth = 0.0f;
-        for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
+        // Zoom is measured against each element's *resting* (unzoomed) center,
+        // not its zoomed one. Measuring against the zoomed layout fed back on
+        // itself -- an element growing shifts its neighbours, which changes
+        // their distance to the cursor, which changes their zoom -- and never
+        // settled, which showed up as jitter, worst on the widgets farthest
+        // from the dock's center. Pass 0 lays everything out at rest (scale 1)
+        // and records those centers; pass 1 applies the zoom they imply.
+        std::vector<float> restCenters;
+        for (int convergencePass = 0; convergencePass < 2; ++convergencePass) {
+            size_t zoomSlot = 0;
+            auto ZoomCenterX = [&](float liveCenterX) -> float {
+                if (convergencePass == 0) {
+                    restCenters.push_back(liveCenterX);
+                    return 1.0e9f; // far away -> scale 1 while measuring the rest layout
+                }
+                return (zoomSlot < restCenters.size()) ? restCenters[zoomSlot++] : liveCenterX;
+            };
             dynamicWidths.clear();
             dynamicScales.clear();
             maxDockHeight = baseSize;
@@ -5896,7 +5912,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
                 // Compute independent delta vectors
-                float distanceX = std::abs(fMouseX - approxCenterX);
+                float distanceX = std::abs(fMouseX - ZoomCenterX(approxCenterX));
                 float distanceY = std::abs(fMouseY - approxCenterY);
 
                 // Calculate true 2D hypotenuse distance from the mouse to the center of the icon
@@ -5939,7 +5955,7 @@ void SyncDockWithRunningDeskbarApps() {
             float approxTrashCenterY = DockEdgeY(10.0f + (baseTrashSize / 2.0f));
 
             // Compute separate directional delta vectors
-            float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+            float distanceTrashX = std::abs(fMouseX - ZoomCenterX(approxTrashCenterX));
             float distanceTrashY = std::abs(fMouseY - approxTrashCenterY);
 
             // Calculate true 2D distance using the hypotenuse formula
@@ -5984,7 +6000,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        float approxTrayCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
 	        // Compute independent delta vectors
-	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
+	        float distanceTrayX = std::abs(fMouseX - ZoomCenterX(approxTrayCenterX));
 	        float distanceTrayY = std::abs(fMouseY - approxTrayCenterY);
 
 	        // Calculate true 2D distance using the hypotenuse formula
@@ -6019,7 +6035,7 @@ void SyncDockWithRunningDeskbarApps() {
                 // Calculate spatial center point on the Y axis for the text string element
                 float approxClockCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceClockX = std::abs(fMouseX - approxClockCenterX);
+                float distanceClockX = std::abs(fMouseX - ZoomCenterX(approxClockCenterX));
                 float distanceClockY = std::abs(fMouseY - approxClockCenterY);
                 float distanceClock2D = std::sqrt(distanceClockX * distanceClockX + distanceClockY * distanceClockY);
 
@@ -6051,7 +6067,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
                 float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+                float distanceVolX = std::abs(fMouseX - ZoomCenterX(approxVolCenterX));
                 float distanceVolY = std::abs(fMouseY - approxVolCenterY);
                 float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
 
@@ -6080,7 +6096,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
                 float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+                float distanceCpuX = std::abs(fMouseX - ZoomCenterX(approxCpuCenterX));
                 float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
                 float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
 
@@ -6109,7 +6125,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxWorkspaceCenterX = progressiveX + (scaledWorkspaceWidth / 2.0f);
                 float approxWorkspaceCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceWorkspaceX = std::abs(fMouseX - approxWorkspaceCenterX);
+                float distanceWorkspaceX = std::abs(fMouseX - ZoomCenterX(approxWorkspaceCenterX));
                 float distanceWorkspaceY = std::abs(fMouseY - approxWorkspaceCenterY);
                 float distanceWorkspace2D = std::sqrt(distanceWorkspaceX * distanceWorkspaceX + distanceWorkspaceY * distanceWorkspaceY);
 
@@ -6130,6 +6146,14 @@ void SyncDockWithRunningDeskbarApps() {
 
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
+
+            // Pass 0 started at the screen center before the width was known;
+            // shift its recorded centers onto the properly centered rest layout.
+            if (convergencePass == 0) {
+                for (size_t c = 0; c < restCenters.size(); ++c) {
+                    restCenters[c] -= totalCalculatedWidth / 2.0f;
+                }
+            }
         }
 
 
@@ -7565,7 +7589,23 @@ void SyncDockWithRunningDeskbarApps() {
         // -------------------------------------------------------------------------
 
         float totalCalculatedWidth = 0.0f;
-        for (int convergencePass = 0; convergencePass < 3; ++convergencePass) {
+        // Zoom is measured against each element's *resting* (unzoomed) center,
+        // not its zoomed one. Measuring against the zoomed layout fed back on
+        // itself -- an element growing shifts its neighbours, which changes
+        // their distance to the cursor, which changes their zoom -- and never
+        // settled, which showed up as jitter, worst on the widgets farthest
+        // from the dock's center. Pass 0 lays everything out at rest (scale 1)
+        // and records those centers; pass 1 applies the zoom they imply.
+        std::vector<float> restCenters;
+        for (int convergencePass = 0; convergencePass < 2; ++convergencePass) {
+            size_t zoomSlot = 0;
+            auto ZoomCenterX = [&](float liveCenterX) -> float {
+                if (convergencePass == 0) {
+                    restCenters.push_back(liveCenterX);
+                    return 1.0e9f; // far away -> scale 1 while measuring the rest layout
+                }
+                return (zoomSlot < restCenters.size()) ? restCenters[zoomSlot++] : liveCenterX;
+            };
             dynamicWidths.clear();
             dynamicScales.clear();
             maxDockHeight = baseSize;
@@ -7581,7 +7621,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
                 // Compute independent delta vectors
-                float distanceX = std::abs(fMouseX - approxCenterX);
+                float distanceX = std::abs(fMouseX - ZoomCenterX(approxCenterX));
                 float distanceY = std::abs(fMouseY - approxCenterY);
 
                 // Calculate true 2D hypotenuse distance from the mouse to the center of the icon
@@ -7624,7 +7664,7 @@ void SyncDockWithRunningDeskbarApps() {
             float approxTrashCenterY = DockEdgeY(10.0f + (baseTrashSize / 2.0f));
 
             // Compute separate directional delta vectors
-            float distanceTrashX = std::abs(fMouseX - approxTrashCenterX);
+            float distanceTrashX = std::abs(fMouseX - ZoomCenterX(approxTrashCenterX));
             float distanceTrashY = std::abs(fMouseY - approxTrashCenterY);
 
             // Calculate true 2D distance using the hypotenuse formula
@@ -7669,7 +7709,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        float approxTrayCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
 	        // Compute independent delta vectors
-	        float distanceTrayX = std::abs(fMouseX - approxTrayCenterX);
+	        float distanceTrayX = std::abs(fMouseX - ZoomCenterX(approxTrayCenterX));
 	        float distanceTrayY = std::abs(fMouseY - approxTrayCenterY);
 
 	        // Calculate true 2D distance using the hypotenuse formula
@@ -7704,7 +7744,7 @@ void SyncDockWithRunningDeskbarApps() {
                 // Calculate spatial center point on the Y axis for the text string element
                 float approxClockCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceClockX = std::abs(fMouseX - approxClockCenterX);
+                float distanceClockX = std::abs(fMouseX - ZoomCenterX(approxClockCenterX));
                 float distanceClockY = std::abs(fMouseY - approxClockCenterY);
                 float distanceClock2D = std::sqrt(distanceClockX * distanceClockX + distanceClockY * distanceClockY);
 
@@ -7736,7 +7776,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxVolCenterX = progressiveX + (scaledBaseVolumeWidth / 2.0f);
                 float approxVolCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceVolX = std::abs(fMouseX - approxVolCenterX);
+                float distanceVolX = std::abs(fMouseX - ZoomCenterX(approxVolCenterX));
                 float distanceVolY = std::abs(fMouseY - approxVolCenterY);
                 float distanceVol2D = std::sqrt(distanceVolX * distanceVolX + distanceVolY * distanceVolY);
 
@@ -7765,7 +7805,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxCpuCenterX = progressiveX + (scaledCpuGraphWidth / 2.0f);
                 float approxCpuCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceCpuX = std::abs(fMouseX - approxCpuCenterX);
+                float distanceCpuX = std::abs(fMouseX - ZoomCenterX(approxCpuCenterX));
                 float distanceCpuY = std::abs(fMouseY - approxCpuCenterY);
                 float distanceCpu2D = std::sqrt(distanceCpuX * distanceCpuX + distanceCpuY * distanceCpuY);
 
@@ -7794,7 +7834,7 @@ void SyncDockWithRunningDeskbarApps() {
                 float approxWorkspaceCenterX = progressiveX + (scaledWorkspaceWidth / 2.0f);
                 float approxWorkspaceCenterY = DockEdgeY(10.0f + (baseSize / 2.0f));
 
-                float distanceWorkspaceX = std::abs(fMouseX - approxWorkspaceCenterX);
+                float distanceWorkspaceX = std::abs(fMouseX - ZoomCenterX(approxWorkspaceCenterX));
                 float distanceWorkspaceY = std::abs(fMouseY - approxWorkspaceCenterY);
                 float distanceWorkspace2D = std::sqrt(distanceWorkspaceX * distanceWorkspaceX + distanceWorkspaceY * distanceWorkspaceY);
 
@@ -7815,6 +7855,14 @@ void SyncDockWithRunningDeskbarApps() {
 
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
+
+            // Pass 0 started at the screen center before the width was known;
+            // shift its recorded centers onto the properly centered rest layout.
+            if (convergencePass == 0) {
+                for (size_t c = 0; c < restCenters.size(); ++c) {
+                    restCenters[c] -= totalCalculatedWidth / 2.0f;
+                }
+            }
         }
 
 
