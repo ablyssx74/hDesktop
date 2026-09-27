@@ -980,6 +980,295 @@ bool IconTheme::LoadWithPixbuf(cairo_t* cr, const std::string& path, int pxSize)
 
 static IconTheme* gIconTheme = nullptr;
 
+// =========================================================================
+// HVIF RENDERER (Haiku Vector Icon Format)
+// =========================================================================
+// Draws Haiku's own vector icons -- the "ncif" data Icon-O-Matic exports --
+// with cairo, following Haiku's FlatIconImporter / IconRenderer: a 64x64
+// unit canvas, styles (solid colors and gradients), paths (plain, no-curve
+// or command-packed) and shapes (a style plus paths, with an optional
+// transform, level-of-detail range and stroke/contour/affine transformers).
+// Used for the Tracker icon, so it looks the same whatever the icon theme.
+#include "TrackerIcon.cpp"
+
+namespace hvif {
+
+class Reader {
+public:
+    Reader(const unsigned char* data, size_t size) : fData(data), fSize(size) {}
+    bool Ok() const { return fOk; }
+    uint8_t U8() {
+        if (fPos >= fSize) { fOk = false; return 0; }
+        return fData[fPos++];
+    }
+    double Coord() {
+        uint8_t v = U8();
+        if (v & 128) {
+            uint8_t low = U8();
+            return (((v & 127) << 8) | low) / 102.0 - 128.0;
+        }
+        return v - 32.0;
+    }
+    // 24-bit float: 1 sign bit, 6 exponent bits (bias 32), 17 mantissa bits.
+    double Float24() {
+        uint32_t a = U8(), b = U8(), c = U8();
+        uint32_t v = (a << 16) | (b << 8) | c;
+        if (v == 0) return 0.0;
+        uint32_t sign = (v & 0x800000) >> 23;
+        int32_t exponent = static_cast<int32_t>((v & 0x7e0000) >> 17) - 32;
+        uint32_t mantissa = (v & 0x01ffff) << 6;
+        uint32_t bits = (sign << 31) | (static_cast<uint32_t>(exponent + 127) << 23) | mantissa;
+        float f;
+        memcpy(&f, &bits, sizeof(f));
+        return f;
+    }
+    void Matrix(cairo_matrix_t* m) {
+        double v[6];
+        for (double& x : v) x = Float24();
+        cairo_matrix_init(m, v[0], v[1], v[2], v[3], v[4], v[5]);
+    }
+
+private:
+    const unsigned char* fData;
+    size_t fSize;
+    size_t fPos = 0;
+    bool fOk = true;
+};
+
+struct Stop { double offset, r, g, b, a; };
+struct Style {
+    bool gradient = false;
+    int gradientType = 0;          // 0 linear, 1 circular, 2 diamond, 3 conic, 4 xy, 5 sqrt-xy
+    bool hasMatrix = false;
+    cairo_matrix_t matrix;
+    double r = 0, g = 0, b = 0, a = 1;
+    std::vector<Stop> stops;
+};
+struct Point { double x, y, inX, inY, outX, outY; };
+struct Path { std::vector<Point> points; bool closed = false; };
+struct Shape {
+    int style = 0;
+    std::vector<int> paths;
+    cairo_matrix_t matrix;
+    double minScale = 0.0, maxScale = 1e9;
+    std::vector<cairo_matrix_t> affines; // affine transformers
+    int outline = 0;                     // 0 fill, 1 stroke, 2 contour (grow)
+    double width = 0;
+    int join = 0, cap = 0;
+    double miter = 4;
+};
+
+static Point MakePoint(double x, double y) { return Point{x, y, x, y, x, y}; }
+
+static bool Parse(const unsigned char* data, size_t size,
+    std::vector<Style>& styles, std::vector<Path>& paths, std::vector<Shape>& shapes) {
+    Reader in(data, size);
+    if (size < 4 || memcmp(data, "ncif", 4) != 0) return false;
+    for (int i = 0; i < 4; ++i) in.U8();
+
+    int styleCount = in.U8();
+    for (int i = 0; i < styleCount && in.Ok(); ++i) {
+        Style s;
+        switch (in.U8()) {
+            case 1: s.r = in.U8() / 255.0; s.g = in.U8() / 255.0; s.b = in.U8() / 255.0; s.a = in.U8() / 255.0; break;
+            case 3: s.r = in.U8() / 255.0; s.g = in.U8() / 255.0; s.b = in.U8() / 255.0; break;
+            case 4: s.r = s.g = s.b = in.U8() / 255.0; s.a = in.U8() / 255.0; break;
+            case 5: s.r = s.g = s.b = in.U8() / 255.0; break;
+            case 2: {
+                s.gradient = true;
+                s.gradientType = in.U8();
+                uint8_t flags = in.U8();
+                int stopCount = in.U8();
+                s.hasMatrix = (flags & 0x02) != 0;
+                if (s.hasMatrix) in.Matrix(&s.matrix);
+                bool alpha = !(flags & 0x04);
+                bool grays = (flags & 0x10) != 0;
+                for (int k = 0; k < stopCount; ++k) {
+                    Stop st;
+                    st.offset = in.U8() / 255.0;
+                    if (grays) {
+                        st.r = st.g = st.b = in.U8() / 255.0;
+                    } else {
+                        st.r = in.U8() / 255.0; st.g = in.U8() / 255.0; st.b = in.U8() / 255.0;
+                    }
+                    st.a = alpha ? in.U8() / 255.0 : 1.0;
+                    s.stops.push_back(st);
+                }
+                break;
+            }
+            default: return false;
+        }
+        styles.push_back(s);
+    }
+
+    int pathCount = in.U8();
+    for (int i = 0; i < pathCount && in.Ok(); ++i) {
+        Path p;
+        uint8_t flags = in.U8();
+        p.closed = (flags & 0x02) != 0;
+        int count = in.U8();
+        if (flags & 0x04) {
+            // Command-packed: 2 bits per point (h-line, v-line, line, curve), LSB first
+            std::vector<uint8_t> commands((count + 3) / 4);
+            for (auto& c : commands) c = in.U8();
+            Point prev = MakePoint(0, 0);
+            for (int k = 0; k < count; ++k) {
+                int command = (commands[k / 4] >> ((k % 4) * 2)) & 3;
+                Point pt;
+                if (command == 0) { double x = in.Coord(); pt = MakePoint(x, prev.y); }
+                else if (command == 1) { double y = in.Coord(); pt = MakePoint(prev.x, y); }
+                else if (command == 2) { double x = in.Coord(); double y = in.Coord(); pt = MakePoint(x, y); }
+                else {
+                    pt.x = in.Coord(); pt.y = in.Coord();
+                    pt.inX = in.Coord(); pt.inY = in.Coord();
+                    pt.outX = in.Coord(); pt.outY = in.Coord();
+                }
+                p.points.push_back(pt);
+                prev = pt;
+            }
+        } else if (flags & 0x08) {
+            for (int k = 0; k < count; ++k) {
+                double x = in.Coord();
+                double y = in.Coord();
+                p.points.push_back(MakePoint(x, y));
+            }
+        } else {
+            for (int k = 0; k < count; ++k) {
+                Point pt;
+                pt.x = in.Coord(); pt.y = in.Coord();
+                pt.inX = in.Coord(); pt.inY = in.Coord();
+                pt.outX = in.Coord(); pt.outY = in.Coord();
+                p.points.push_back(pt);
+            }
+        }
+        paths.push_back(p);
+    }
+
+    int shapeCount = in.U8();
+    for (int i = 0; i < shapeCount && in.Ok(); ++i) {
+        if (in.U8() != 10) return false; // only path-source shapes exist
+        Shape s;
+        cairo_matrix_init_identity(&s.matrix);
+        s.style = in.U8();
+        int count = in.U8();
+        for (int k = 0; k < count; ++k) s.paths.push_back(in.U8());
+        uint8_t flags = in.U8();
+        if (flags & 0x02) {
+            in.Matrix(&s.matrix);
+        } else if (flags & 0x20) {
+            double tx = in.Coord();
+            double ty = in.Coord();
+            cairo_matrix_init_translate(&s.matrix, tx, ty);
+        }
+        if (flags & 0x08) {
+            s.minScale = in.U8() / 63.75;
+            s.maxScale = in.U8() / 63.75;
+        }
+        if (flags & 0x10) {
+            int transformers = in.U8();
+            for (int k = 0; k < transformers; ++k) {
+                switch (in.U8()) {
+                    case 20: { cairo_matrix_t m; in.Matrix(&m); s.affines.push_back(m); break; }
+                    case 21: s.outline = 2; s.width = in.U8() - 128.0; s.join = in.U8(); s.miter = in.U8(); break;
+                    case 22: for (int n = 0; n < 9; ++n) in.Float24(); break; // perspective: not drawn
+                    case 23: {
+                        s.outline = 1;
+                        s.width = in.U8() - 128.0;
+                        uint8_t options = in.U8();
+                        s.join = options & 15;
+                        s.cap = options >> 4;
+                        s.miter = in.U8();
+                        break;
+                    }
+                    default: return false;
+                }
+            }
+        }
+        shapes.push_back(s);
+    }
+    return in.Ok();
+}
+
+static cairo_pattern_t* MakePattern(const Style& s) {
+    if (!s.gradient) return cairo_pattern_create_rgba(s.r, s.g, s.b, s.a);
+    // Haiku's gradient space: linear runs -64..64 along x, the radial kinds
+    // span radius 0..64; the style's matrix places that in shape space.
+    cairo_pattern_t* p = (s.gradientType == 0)
+        ? cairo_pattern_create_linear(-64, 0, 64, 0)
+        : cairo_pattern_create_radial(0, 0, 0, 0, 0, 64);
+    for (const Stop& st : s.stops) cairo_pattern_add_color_stop_rgba(p, st.offset, st.r, st.g, st.b, st.a);
+    cairo_pattern_set_extend(p, CAIRO_EXTEND_PAD);
+    if (s.hasMatrix) {
+        cairo_matrix_t inv = s.matrix;
+        if (cairo_matrix_invert(&inv) == CAIRO_STATUS_SUCCESS) cairo_pattern_set_matrix(p, &inv);
+    }
+    return p;
+}
+
+static void AddPath(cairo_t* cr, const Path& p) {
+    const auto& pts = p.points;
+    if (pts.empty()) return;
+    cairo_move_to(cr, pts[0].x, pts[0].y);
+    for (size_t i = 1; i < pts.size(); ++i) {
+        cairo_curve_to(cr, pts[i - 1].outX, pts[i - 1].outY, pts[i].inX, pts[i].inY, pts[i].x, pts[i].y);
+    }
+    if (p.closed) {
+        cairo_curve_to(cr, pts.back().outX, pts.back().outY, pts[0].inX, pts[0].inY, pts[0].x, pts[0].y);
+        cairo_close_path(cr);
+    }
+}
+
+// Renders an HVIF icon into a new px x px surface (nullptr if it can't be read).
+[[maybe_unused]] static cairo_surface_t* Render(const unsigned char* data, size_t size, int px) {
+    std::vector<Style> styles;
+    std::vector<Path> paths;
+    std::vector<Shape> shapes;
+    if (!Parse(data, size, styles, paths, shapes)) return nullptr;
+
+    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, px, px);
+    cairo_t* cr = cairo_create(surface);
+    const double scale = px / 64.0;
+    for (const Shape& shape : shapes) {
+        if (shape.style < 0 || shape.style >= static_cast<int>(styles.size())) continue;
+        if (scale < shape.minScale || scale > shape.maxScale) continue; // level-of-detail range
+        cairo_save(cr);
+        cairo_scale(cr, scale, scale);
+        cairo_transform(cr, &shape.matrix);
+        cairo_pattern_t* pattern = MakePattern(styles[shape.style]);
+        cairo_set_source(cr, pattern); // gradients live in shape space
+        for (const cairo_matrix_t& m : shape.affines) cairo_transform(cr, &m);
+        cairo_new_path(cr);
+        for (int index : shape.paths) {
+            if (index >= 0 && index < static_cast<int>(paths.size())) AddPath(cr, paths[index]);
+        }
+        static const cairo_line_join_t kJoins[] = {
+            CAIRO_LINE_JOIN_MITER, CAIRO_LINE_JOIN_MITER, CAIRO_LINE_JOIN_ROUND,
+            CAIRO_LINE_JOIN_BEVEL, CAIRO_LINE_JOIN_MITER};
+        static const cairo_line_cap_t kCaps[] = {CAIRO_LINE_CAP_BUTT, CAIRO_LINE_CAP_SQUARE, CAIRO_LINE_CAP_ROUND};
+        cairo_set_line_join(cr, kJoins[std::clamp(shape.join, 0, 4)]);
+        cairo_set_line_cap(cr, kCaps[std::clamp(shape.cap, 0, 2)]);
+        cairo_set_miter_limit(cr, std::max(1.0, shape.miter));
+        if (shape.outline == 1) {
+            cairo_set_line_width(cr, std::abs(shape.width));
+            cairo_stroke(cr);
+        } else if (shape.outline == 2 && shape.width > 0) {
+            // Contour: the filled shape grown outward by `width`
+            cairo_set_line_width(cr, shape.width * 2);
+            cairo_fill_preserve(cr);
+            cairo_stroke(cr);
+        } else {
+            cairo_fill(cr);
+        }
+        cairo_pattern_destroy(pattern);
+        cairo_restore(cr);
+    }
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+    return surface;
+}
+
+} // namespace hvif
+
 // Draws a generic "application" placeholder so an app without any icon still
 // gets a visible, clickable dock tile.
 static cairo_surface_t* MakePlaceholderIcon(int pxSize, const std::string& label) {
