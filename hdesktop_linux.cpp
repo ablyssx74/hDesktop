@@ -7255,7 +7255,7 @@ private:
             fWidgets.push_back(w);
             if (newRow) y += 24;
         };
-        // Dock widget toggles share the first three rows (right-hand column),
+        // Dock widget toggles share the first four rows (right-hand column),
         // like the Haiku config window.
         check("Enable Auto-Hide", &gSettings.autoHide, 40, false);
         check("Show Clock", &gSettings.showClock, 317);
@@ -7263,15 +7263,15 @@ private:
         check("Show Volume", &gSettings.showVolume, 317);
         check("Keep Dock Above Windows", &gSettings.keepAboveWindows, 40, false);
         check("Show CPU Graph", &gSettings.showCpuGraph, 317);
-        check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
         check("Title Overlays: Popup List", &gSettings.titlePopup, 40, false);
         size_t popupIdx = fWidgets.size() - 1;
-        check("Label Mode", &gSettings.titleLabel, 317);
+        check("Show Workspace Switcher", &gSettings.workspaceSwitcher, 317, true, gWorkspaces.Available());
+        check("Title Overlays: Label Mode", &gSettings.titleLabel);
         size_t labelIdx = fWidgets.size() - 1;
         // The two title overlay modes are mutually exclusive.
         fWidgets[popupIdx].setBool = [](bool v) { gSettings.titlePopup = v; if (v) gSettings.titleLabel = false; };
         fWidgets[labelIdx].setBool = [](bool v) { gSettings.titleLabel = v; if (v) gSettings.titlePopup = false; };
-        check("Enable Workspace Switcher", &gSettings.workspaceSwitcher, 40, true, gWorkspaces.Available());
+        check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
         check("24-Hour Clock", &gSettings.clock24h);
         check("Check for Updates", &gSettings.checkForUpdates);
 

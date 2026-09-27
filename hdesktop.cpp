@@ -1377,9 +1377,9 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAutoRaiseCheckbox->SetValue(dockAlwaysOnTop ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fAutoRaiseCheckbox);
 
-        // Rows 1-3, right-hand column: dock widget toggles. They share rows
-        // with Auto-Hide / System Tray / Auto-Raise (the same trick as SDL
-        // Mode on row 4 below) so nothing further down has to be reflowed.
+        // Rows 1-4, right-hand column: dock widget toggles (Clock / Volume /
+        // CPU Graph here, Workspace Switcher below). They share rows with the
+        // left-hand checkboxes so nothing further down has to be reflowed.
         BRect clockCheckboxRect(290.0f, 122.0f, 310.0f, 138.0f);
         fClockCheckbox = new BCheckBox(clockCheckboxRect, "clock_cb", nullptr,
             new BMessage(MSG_CLOCK_TOGGLED));
@@ -1401,11 +1401,10 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fCpuGraphCheckbox->SetValue(fShowCpuGraph ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fCpuGraphCheckbox);
 
-        // Row 4: Text Overlays -- two mutually exclusive checkboxes sharing
-        // one row (Haiku mode's own box at its usual position, SDL mode's
-        // further right) rather than a whole new row, so nothing below has
-        // to be reflowed. See fShowTitleOverlaysHaiku/SDL's own comment for
-        // what each mode is.
+        // Rows 4-5, left column: Text Overlays -- two mutually exclusive
+        // checkboxes, Haiku mode on row 4 and SDL mode directly under it on
+        // row 5 (the right-hand column holds the dock widget toggles). See
+        // fShowTitleOverlaysHaiku/SDL's own comment for what each mode is.
         BRect textOverlaysRect(35.0f, 182.0f, 55.0f, 198.0f);
         fTextOverlaysCheckbox = new BCheckBox(textOverlaysRect, "text_overlays_cb", nullptr,
             new BMessage(MSG_TEXTOVERLAYS_TOGGLED));
@@ -1413,15 +1412,16 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fTextOverlaysCheckbox->SetValue(fShowTitleOverlaysHaiku ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysCheckbox);
 
-        BRect textOverlaysSDLRect(290.0f, 182.0f, 310.0f, 198.0f);
+        BRect textOverlaysSDLRect(35.0f, 202.0f, 55.0f, 218.0f);
         fTextOverlaysSDLCheckbox = new BCheckBox(textOverlaysSDLRect, "text_overlays_sdl_cb", nullptr,
             new BMessage(MSG_TEXTOVERLAYS_SDL_TOGGLED));
         fTextOverlaysSDLCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fTextOverlaysSDLCheckbox->SetValue(fShowTitleOverlaysSDL ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysSDLCheckbox);
 
-        // Row 5: Workspace Switcher
-        BRect workspaceSwitcherRect(35.0f, 202.0f, 55.0f, 218.0f);
+        // Row 4, right-hand column: Workspace Switcher -- grouped with the
+        // other dock widget toggles above it (Clock / Volume / CPU Graph).
+        BRect workspaceSwitcherRect(290.0f, 182.0f, 310.0f, 198.0f);
         fWorkspaceSwitcherCheckbox = new BCheckBox(workspaceSwitcherRect, "workspace_switcher_cb", nullptr,
             new BMessage(MSG_WORKSPACESWITCHER_TOGGLED));
         fWorkspaceSwitcherCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -1686,8 +1686,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Show Volume", BPoint(317.0f, 154.0f));
         DrawString("Show CPU Graph", BPoint(317.0f, 174.0f));
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
-        DrawString("SDL Mode", BPoint(317.0f, 194.0f));
-        DrawString("Enable Workspace Switcher", BPoint(62.0f, 214.0f));
+        DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
+        DrawString("Title Overlays: SDL Mode", BPoint(62.0f, 214.0f));
         DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 234.0f));
 
         // Smaller, italicized note under the Thumbnails checkbox -- the row
