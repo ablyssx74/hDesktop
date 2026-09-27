@@ -328,7 +328,7 @@ static void LoadConfiguration() {
     gSettings.iconZoom = std::clamp(gSettings.iconZoom, 1.0f, 2.5f);
     gSettings.dockAlpha = std::clamp(gSettings.dockAlpha, 0.0f, 1.0f);
     gSettings.effectDurationMs = std::clamp(gSettings.effectDurationMs, 200, 1500);
-    if (gSettings.titlePopup && gSettings.titleLabel) gSettings.titleLabel = false;
+    gSettings.titleLabel = false; // Label Mode was retired; the popup list is the title overlay
 }
 
 // =========================================================================
@@ -7718,13 +7718,7 @@ private:
         check("Keep Dock Above Windows", &gSettings.keepAboveWindows, 40, false);
         check("Show CPU Graph", &gSettings.showCpuGraph, 317);
         check("Title Overlays: Popup List", &gSettings.titlePopup, 40, false);
-        size_t popupIdx = fWidgets.size() - 1;
         check("Show Workspace Switcher", &gSettings.workspaceSwitcher, 317, true, gWorkspaces.Available());
-        check("Title Overlays: Label Mode", &gSettings.titleLabel);
-        size_t labelIdx = fWidgets.size() - 1;
-        // The two title overlay modes are mutually exclusive.
-        fWidgets[popupIdx].setBool = [](bool v) { gSettings.titlePopup = v; if (v) gSettings.titleLabel = false; };
-        fWidgets[labelIdx].setBool = [](bool v) { gSettings.titleLabel = v; if (v) gSettings.titlePopup = false; };
         check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
         check("24-Hour Clock", &gSettings.clock24h);
         check("Check for Updates", &gSettings.checkForUpdates);

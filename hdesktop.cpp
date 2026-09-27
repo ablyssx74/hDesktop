@@ -99,13 +99,12 @@ static void DebugLog(const char* fmt, ...) {
 bool autoHideEnabled;
 bool showSystemTray;
 bool dockAlwaysOnTop;
-// Title overlays have two mutually exclusive implementations -- see
-// TitleListPreviewWindow's own comment for what "Haiku mode" replaced and
-// why. Exactly one of these should be true at a time (enforced by the
-// settings checkboxes' own message handlers, not here); both false just
-// means the feature is off entirely. Haiku mode is the default going
-// forward, but SDL mode (the original single-line hover text + auto-focus)
-// stays available as a fallback/choice per the user's own request.
+// Title overlays: Haiku mode (the popup window list -- see
+// TitleListPreviewWindow's own comment for what it replaced and why) is the
+// only mode offered now, and can still be switched off from the Config
+// window. SDL mode (the original single-line hover label + auto-focus) is
+// retired: its checkbox is hidden and it's forced off at load, so an old
+// settings file can't turn it back on.
 bool fShowTitleOverlaysHaiku = true;
 bool fShowTitleOverlaysSDL = false;
 bool fShowWorkspaceSwitcher = true;
@@ -1637,6 +1636,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fTextOverlaysSDLCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fTextOverlaysSDLCheckbox->SetValue(fShowTitleOverlaysSDL ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fTextOverlaysSDLCheckbox);
+        fTextOverlaysSDLCheckbox->Hide(); // SDL (label) mode retired -- see fShowTitleOverlaysSDL
 
         // Row 4, right-hand column: Workspace Switcher -- grouped with the
         // other dock widget toggles above it (Clock / Volume / CPU Graph).
@@ -1916,7 +1916,6 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Show CPU Graph", BPoint(317.0f, 174.0f));
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
-        DrawString("Title Overlays: SDL Mode", BPoint(62.0f, 214.0f));
         DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 234.0f));
 
         // Smaller, italicized note under the Thumbnails checkbox -- the row
@@ -10369,7 +10368,7 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("system_tray", &valBool) == B_OK) showSystemTray = valBool;
                 if (settingsMsg.FindBool("auto_raise", &valBool) == B_OK) dockAlwaysOnTop = valBool;
                 if (settingsMsg.FindBool("text_overlays", &valBool) == B_OK) fShowTitleOverlaysHaiku = valBool;
-                if (settingsMsg.FindBool("text_overlays_sdl", &valBool) == B_OK) fShowTitleOverlaysSDL = valBool;
+                fShowTitleOverlaysSDL = false; // SDL (label) mode retired; ignore any saved value
                 if (settingsMsg.FindBool("window_thumbnails", &valBool) == B_OK) fShowWindowThumbnails = valBool;
                 if (settingsMsg.FindBool("advanced_options", &valBool) == B_OK) fShowAdvancedOptions = valBool;
                 if (settingsMsg.FindInt32("thumbnail_fps", &valInt32) == B_OK) fThumbnailCaptureFps = valInt32;
