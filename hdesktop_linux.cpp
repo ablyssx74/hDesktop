@@ -182,6 +182,7 @@ struct Settings {
     float  baseIconSize = 48.0f;
     float  iconZoom = 1.8f;           // peak hover magnification (1.0 = none); 1.8 was the fixed value
     float  dockAlpha = 0.32f;
+    int    dockColor[3] = {216, 216, 216}; // backplate RGB; Haiku's default panel grey
     int    effectDurationMs = 750;
     int    openEffect = kEffectSpin;
     int    closeEffect = kEffectNone;
@@ -197,6 +198,17 @@ struct Settings {
 };
 
 static Settings gSettings;
+
+// A dark dock color needs light strokes (outline, dividers, running dot) on it.
+static bool DockColorIsDark() {
+    const int* c = gSettings.dockColor;
+    return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255.0 < 0.5;
+}
+static float DockInk() { return DockColorIsDark() ? 0.85f : 0.15f; }
+
+// Text drawn on the dock (clock, CPU graph) goes light when the plate is dark
+// or mostly see-through (then the wallpaper shows, usually dark).
+static bool DockWantsLightText() { return gSettings.dockAlpha < 0.35f || DockColorIsDark(); }
 
 static std::string ConfigDir() {
     return std::string(g_get_user_config_dir()) + "/hdesktop";
@@ -225,6 +237,10 @@ static void SaveConfiguration() {
     g_key_file_set_double(kf, g, "base_icon_size", gSettings.baseIconSize);
     g_key_file_set_double(kf, g, "icon_zoom", gSettings.iconZoom);
     g_key_file_set_double(kf, g, "dock_alpha", gSettings.dockAlpha);
+    char colorHex[8];
+    snprintf(colorHex, sizeof(colorHex), "#%02x%02x%02x", gSettings.dockColor[0], gSettings.dockColor[1],
+        gSettings.dockColor[2]);
+    g_key_file_set_string(kf, g, "dock_color", colorHex);
     g_key_file_set_integer(kf, g, "effect_duration", gSettings.effectDurationMs);
     g_key_file_set_string(kf, g, "open_effect", kEffectNames[gSettings.openEffect]);
     g_key_file_set_string(kf, g, "close_effect", kEffectNames[gSettings.closeEffect]);
@@ -297,6 +313,14 @@ static void LoadConfiguration() {
     getFloat("base_icon_size", gSettings.baseIconSize);
     getFloat("icon_zoom", gSettings.iconZoom);
     getFloat("dock_alpha", gSettings.dockAlpha);
+    std::string colorHex;
+    getString("dock_color", colorHex);
+    unsigned r, gr, b;
+    if (colorHex.size() == 7 && sscanf(colorHex.c_str(), "#%02x%02x%02x", &r, &gr, &b) == 3) {
+        gSettings.dockColor[0] = static_cast<int>(r);
+        gSettings.dockColor[1] = static_cast<int>(gr);
+        gSettings.dockColor[2] = static_cast<int>(b);
+    }
     getInt("effect_duration", gSettings.effectDurationMs);
     std::string effect;
     getString("open_effect", effect);
@@ -5438,7 +5462,7 @@ private:
         strftime(buf, sizeof(buf), gSettings.clock24h ? "%H:%M" : "%I:%M %p", ti);
         std::string str(buf);
         if (!gSettings.clock24h && !str.empty() && str[0] == '0') str.erase(0, 1);
-        bool lightText = gSettings.dockAlpha < 0.35f;
+        bool lightText = DockWantsLightText();
         std::string key = str + (lightText ? "#w" : "#b");
         if (key == fLastClockString && fClockTexture.id != 0) return;
         DeleteTexture(fClockTexture);
@@ -5803,15 +5827,17 @@ private:
 
         // ---- Backplate ----------------------------------------------------
         // Haiku reads the panel color from app_server's appearance settings;
-        // the default Haiku panel grey is kept here.
-        DrawFilledRoundedRect(L.plate, 15.0f, 216 / 255.0f, 216 / 255.0f, 216 / 255.0f, gSettings.dockAlpha);
-        DrawOutlineRoundedRect(L.plate, 15.0f, 0.15f, 0.15f, 0.15f, gSettings.dockAlpha);
+        // here it's the Config window's "Adjust Dock Color" (Haiku grey by default).
+        const float ink = DockInk();
+        DrawFilledRoundedRect(L.plate, 15.0f, gSettings.dockColor[0] / 255.0f, gSettings.dockColor[1] / 255.0f,
+            gSettings.dockColor[2] / 255.0f, gSettings.dockAlpha);
+        DrawOutlineRoundedRect(L.plate, 15.0f, ink, ink, ink, gSettings.dockAlpha);
 
         auto drawDivider = [&](float x) {
             if (x < 0) return;
             float sx = std::floor(x + 0.5f);
             glLineWidth(2.0f);
-            SetColor(0.15f, 0.15f, 0.15f, gSettings.dockAlpha * 0.5f);
+            SetColor(ink, ink, ink, gSettings.dockAlpha * 0.5f);
             glBegin(GL_LINES);
             glVertex2f(sx, L.plate.top + 8.0f);
             glVertex2f(sx, L.plate.bottom - 8.0f);
@@ -5855,7 +5881,7 @@ private:
                         float dotY = top ? L.plate.top + 4.0f : L.plate.bottom - 5.0f;
                         float cx = (s.bounds.left + s.bounds.right) / 2.0f;
                         HRect dot{cx - 2.5f, dotY - 1.5f, cx + 2.5f, dotY + 1.5f};
-                        DrawFilledRoundedRect(dot, 1.5f, 0.15f, 0.15f, 0.15f, std::max(0.6f, gSettings.dockAlpha));
+                        DrawFilledRoundedRect(dot, 1.5f, ink, ink, ink, std::max(0.6f, gSettings.dockAlpha));
                     }
                     // "Close enough to be the hovered icon": halfway up the zoom
                     // curve, or simply under the pointer when zoom is (nearly) off.
@@ -5994,7 +6020,8 @@ private:
         fill.right = s.bounds.left + s.bounds.Width() * gVolume.level;
         if (gVolume.muted) DrawFilledRect(fill, 0.55f, 0.55f, 0.55f, 0.6f);
         else DrawFilledRect(fill, 0.2f, 1.0f, 0.2f, 0.85f);
-        DrawRectOutline(s.bounds, 0.15f, 0.15f, 0.15f, std::max(0.3f, gSettings.dockAlpha * 0.5f));
+        const float ink = DockInk();
+        DrawRectOutline(s.bounds, ink, ink, ink, std::max(0.3f, gSettings.dockAlpha * 0.5f));
         if (fHoverActive && s.bounds.Contains(fLayoutMouseX, fLayoutMouseY)) {
             char buf[32];
             snprintf(buf, sizeof(buf), gVolume.muted ? "Muted" : "Volume: %d%%", static_cast<int>(std::lround(gVolume.level * 100)));
@@ -6011,7 +6038,7 @@ private:
         int numBars = fCpuHistory.empty() ? 16 : std::min<int>(40, fCpuHistory.size());
         float barSpacing = 1.5f * ratio;
         float barWidth = (g.Width() - barSpacing * (numBars + 1)) / numBars;
-        bool light = gSettings.dockAlpha < 0.35f;
+        bool light = DockWantsLightText();
         glBegin(GL_QUADS);
         for (int i = 0; i < numBars; ++i) {
             float target = (i < static_cast<int>(fCpu.coreLoads.size())) ? fCpu.coreLoads[i] : 0.0f;
@@ -7478,6 +7505,319 @@ static void ShowAboutAlert() {
 }
 
 // =========================================================================
+// DOCK COLOR PICKER (Linux only)
+// =========================================================================
+// Opened from the settings panel's "Adjust Dock Color" swatch: a
+// saturation/brightness square with a hue strip, a row of presets (Haiku's
+// panel grey first) and a new/current preview. The dock follows the color
+// live while picking; Cancel (or Escape, or clicking outside) puts the old
+// color back, Apply keeps it. It's a grabbing popup of the settings panel,
+// so it always stacks above it and gets the keyboard.
+static void RedrawConfigPanel();
+
+class ColorPanel : public PopupSurface {
+public:
+    ColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight) {
+        for (int i = 0; i < 3; ++i) fOriginal[i] = gSettings.dockColor[i];
+        RgbToHsv(fOriginal, fH, fS, fV);
+        PopupAnchor a; // centered over the settings panel
+        a.x = 0;
+        a.y = 0;
+        a.w = parentWidth;
+        a.h = parentHeight;
+        a.anchor = XDG_POSITIONER_ANCHOR_NONE;
+        a.gravity = XDG_POSITIONER_GRAVITY_NONE;
+        a.constraints = XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X | XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y;
+        CreatePopup(parent, nullptr, a, kWidth, kHeight, gWl.lastInputSerial);
+    }
+
+    std::function<void()> onDone;
+
+    void Paint(cairo_t* cr) override {
+        const RGBA text{220 / 255.0, 225 / 255.0, 235 / 255.0, 1};
+        const RGBA dim{150 / 255.0, 155 / 255.0, 168 / 255.0, 1};
+        RoundedRectPath(cr, 0.5, 0.5, width - 1, height - 1, 8);
+        cairo_set_source_rgba(cr, 24 / 255.0, 24 / 255.0, 28 / 255.0, 0.98);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 70 / 255.0, 72 / 255.0, 84 / 255.0, 1);
+        cairo_set_line_width(cr, 1);
+        cairo_stroke(cr);
+        DrawText(cr, "Dock Color", 24, 18, 14, true, RGBA{230 / 255.0, 232 / 255.0, 240 / 255.0, 1});
+
+        // Saturation (left to right) / brightness (bottom to top) square
+        int hue[3];
+        HsvToRgb(fH, 1, 1, hue);
+        cairo_rectangle(cr, kSV.left, kSV.top, kSV.Width(), kSV.Height());
+        cairo_set_source_rgb(cr, hue[0] / 255.0, hue[1] / 255.0, hue[2] / 255.0);
+        cairo_fill(cr);
+        cairo_pattern_t* white = cairo_pattern_create_linear(kSV.left, 0, kSV.right, 0);
+        cairo_pattern_add_color_stop_rgba(white, 0, 1, 1, 1, 1);
+        cairo_pattern_add_color_stop_rgba(white, 1, 1, 1, 1, 0);
+        cairo_rectangle(cr, kSV.left, kSV.top, kSV.Width(), kSV.Height());
+        cairo_set_source(cr, white);
+        cairo_fill(cr);
+        cairo_pattern_destroy(white);
+        cairo_pattern_t* black = cairo_pattern_create_linear(0, kSV.top, 0, kSV.bottom);
+        cairo_pattern_add_color_stop_rgba(black, 0, 0, 0, 0, 0);
+        cairo_pattern_add_color_stop_rgba(black, 1, 0, 0, 0, 1);
+        cairo_rectangle(cr, kSV.left, kSV.top, kSV.Width(), kSV.Height());
+        cairo_set_source(cr, black);
+        cairo_fill(cr);
+        cairo_pattern_destroy(black);
+        StrokeFrame(cr, kSV);
+        double mx = kSV.left + fS * kSV.Width(), my = kSV.top + (1 - fV) * kSV.Height();
+        cairo_arc(cr, mx, my, 6, 0, 2 * M_PI);
+        cairo_set_source_rgb(cr, 0, 0, 0);
+        cairo_set_line_width(cr, 3);
+        cairo_stroke_preserve(cr);
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        cairo_set_line_width(cr, 1.5);
+        cairo_stroke(cr);
+        cairo_set_line_width(cr, 1);
+
+        // Hue strip
+        cairo_pattern_t* hues = cairo_pattern_create_linear(0, kHue.top, 0, kHue.bottom);
+        for (int i = 0; i <= 6; ++i) {
+            int c[3];
+            HsvToRgb(i / 6.0, 1, 1, c);
+            cairo_pattern_add_color_stop_rgb(hues, i / 6.0, c[0] / 255.0, c[1] / 255.0, c[2] / 255.0);
+        }
+        cairo_rectangle(cr, kHue.left, kHue.top, kHue.Width(), kHue.Height());
+        cairo_set_source(cr, hues);
+        cairo_fill(cr);
+        cairo_pattern_destroy(hues);
+        StrokeFrame(cr, kHue);
+        double hy = kHue.top + fH * kHue.Height();
+        cairo_rectangle(cr, kHue.left - 3, hy - 3, kHue.Width() + 6, 6);
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgb(cr, 0, 0, 0);
+        cairo_stroke(cr);
+
+        // New / current preview and hex value
+        DrawText(cr, "New", kNew.left, kNew.top - 18, 11, false, dim);
+        FillSwatch(cr, kNew, gSettings.dockColor);
+        DrawText(cr, "Current", kOld.left, kOld.top - 18, 11, false, dim);
+        FillSwatch(cr, kOld, fOriginal);
+        char hex[8];
+        snprintf(hex, sizeof(hex), "#%02X%02X%02X", gSettings.dockColor[0], gSettings.dockColor[1], gSettings.dockColor[2]);
+        DrawText(cr, hex, kNew.left, kOld.bottom + 8, 12, true, text);
+
+        // Presets
+        DrawText(cr, "Presets", kSV.left, kPresetTop - 20, 12, true, text);
+        for (size_t i = 0; i < kPresetCount; ++i) {
+            HRect r = PresetRect(i);
+            FillSwatch(cr, r, kPresets[i]);
+            bool current = true;
+            for (int k = 0; k < 3; ++k) current = current && kPresets[i][k] == gSettings.dockColor[k];
+            if (current || r.Contains(fMouseX, fMouseY)) {
+                RoundedRectPath(cr, r.left - 2.5, r.top - 2.5, r.Width() + 5, r.Height() + 5, 4);
+                cairo_set_source_rgba(cr, 90 / 255.0, 140 / 255.0, 240 / 255.0, current ? 1.0 : 0.6);
+                cairo_set_line_width(cr, 2);
+                cairo_stroke(cr);
+                cairo_set_line_width(cr, 1);
+            }
+        }
+
+        for (int i = 0; i < 3; ++i) {
+            HRect r = ButtonRect(i);
+            bool hovered = r.Contains(fMouseX, fMouseY);
+            bool primary = (i == kApply);
+            RoundedRectPath(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1, 4);
+            if (primary) cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, hovered ? 1.0 : 0.85);
+            else cairo_set_source_rgba(cr, hovered ? 55 / 255.0 : 40 / 255.0, hovered ? 57 / 255.0 : 42 / 255.0,
+                hovered ? 66 / 255.0 : 50 / 255.0, 1);
+            cairo_fill(cr);
+            static const char* const kLabels[] = {"Default", "Cancel", "Apply"};
+            double tw, th;
+            MeasureText(kLabels[i], 12, primary, &tw, &th);
+            DrawText(cr, kLabels[i], r.left + (r.Width() - tw) / 2, r.top + (r.Height() - th) / 2, 12, primary,
+                RGBA{1, 1, 1, 1});
+        }
+    }
+
+    void PointerEnter(double x, double y) override { PointerMotion(x, y); }
+    void PointerLeave() override { fMouseX = fMouseY = -1; Redraw(); }
+
+    void PointerMotion(double x, double y) override {
+        fMouseX = x;
+        fMouseY = y;
+        if (fDrag != kDragNone) DragTo(x, y);
+        Redraw();
+    }
+
+    void PointerButton(int button, bool pressed, uint32_t) override {
+        if (button != kButtonLeft) return;
+        double x = gWl.pointerX, y = gWl.pointerY;
+        if (pressed) {
+            if (Grow(kSV, 4).Contains(x, y)) fDrag = kDragSV;
+            else if (Grow(kHue, 4).Contains(x, y)) fDrag = kDragHue;
+            if (fDrag != kDragNone) {
+                DragTo(x, y);
+                return;
+            }
+            for (size_t i = 0; i < kPresetCount; ++i) {
+                if (PresetRect(i).Contains(x, y)) {
+                    SetRgb(kPresets[i]);
+                    return;
+                }
+            }
+            return;
+        }
+        if (fDrag != kDragNone) {
+            fDrag = kDragNone;
+            return;
+        }
+        if (ButtonRect(kDefault).Contains(x, y)) SetRgb(kPresets[0]);
+        else if (ButtonRect(kCancel).Contains(x, y)) Cancel();
+        else if (ButtonRect(kApply).Contains(x, y)) Apply();
+    }
+
+    void Key(xkb_keysym_t sym, const std::string&) override {
+        if (sym == XKB_KEY_Escape) Cancel();
+        else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) Apply();
+    }
+
+    void Apply() {
+        SaveConfiguration();
+        Finish();
+    }
+
+    void Cancel() {
+        if (fFinished) return;
+        for (int i = 0; i < 3; ++i) gSettings.dockColor[i] = fOriginal[i];
+        Changed();
+        Finish();
+    }
+
+private:
+    static constexpr int kWidth = 440;
+    static constexpr int kHeight = 384;
+    enum { kDefault = 0, kCancel = 1, kApply = 2 };
+    enum { kDragNone, kDragSV, kDragHue };
+    static constexpr HRect kSV{24, 52, 264, 212};
+    static constexpr HRect kHue{280, 52, 302, 212};
+    static constexpr HRect kNew{322, 70, 416, 118};
+    static constexpr HRect kOld{322, 146, 416, 194};
+    static constexpr float kPresetTop = 250;
+    static constexpr size_t kPresetCount = 20;
+    static constexpr int kPresets[kPresetCount][3] = {
+        {216, 216, 216}, {245, 245, 245}, {190, 195, 205}, {140, 142, 150}, {90, 95, 110},
+        {48, 50, 58}, {28, 28, 32}, {0, 0, 0}, {255, 203, 0}, {240, 140, 40},
+        {200, 60, 60}, {220, 110, 160}, {130, 80, 190}, {70, 80, 170}, {60, 120, 210},
+        {110, 170, 230}, {40, 150, 150}, {70, 160, 90}, {130, 140, 60}, {140, 95, 60},
+    };
+
+    static HRect Grow(const HRect& r, float d) { return HRect{r.left - d, r.top - d, r.right + d, r.bottom + d}; }
+
+    static HRect PresetRect(size_t i) {
+        const float w = 32, h = 24, gap = 8;
+        float x = 24 + (i % 10) * (w + gap);
+        float y = kPresetTop + (i / 10) * (h + gap);
+        return HRect{x, y, x + w, y + h};
+    }
+
+    HRect ButtonRect(int i) const {
+        float bw = 100, bh = 30, bottom = height - 20.0f;
+        if (i == kDefault) return HRect{24, bottom - bh, 24 + bw, bottom};
+        float right = width - 24.0f - (i == kCancel ? bw + 10 : 0);
+        return HRect{right - bw, bottom - bh, right, bottom};
+    }
+
+    static void StrokeFrame(cairo_t* cr, const HRect& r) {
+        cairo_rectangle(cr, r.left - 0.5, r.top - 0.5, r.Width() + 1, r.Height() + 1);
+        cairo_set_source_rgba(cr, 90 / 255.0, 92 / 255.0, 104 / 255.0, 1);
+        cairo_stroke(cr);
+    }
+
+    static void FillSwatch(cairo_t* cr, const HRect& r, const int* c) {
+        RoundedRectPath(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1, 3);
+        cairo_set_source_rgb(cr, c[0] / 255.0, c[1] / 255.0, c[2] / 255.0);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, 1);
+        cairo_stroke(cr);
+    }
+
+    void DragTo(double x, double y) {
+        if (fDrag == kDragSV) {
+            fS = std::clamp((x - kSV.left) / kSV.Width(), 0.0, 1.0);
+            fV = 1.0 - std::clamp((y - kSV.top) / kSV.Height(), 0.0, 1.0);
+        } else if (fDrag == kDragHue) {
+            fH = std::clamp((y - kHue.top) / kHue.Height(), 0.0, 1.0);
+        }
+        HsvToRgb(fH, fS, fV, gSettings.dockColor);
+        Changed();
+    }
+
+    void SetRgb(const int* c) {
+        for (int i = 0; i < 3; ++i) gSettings.dockColor[i] = c[i];
+        RgbToHsv(c, fH, fS, fV);
+        Changed();
+    }
+
+    void Changed() {
+        if (gDock) gDock->SettingsChanged();
+        RedrawConfigPanel();
+        Redraw();
+    }
+
+    void Finish() {
+        if (fFinished) return;
+        fFinished = true;
+        if (onDone) onDone();
+    }
+
+    static void HsvToRgb(double h, double s, double v, int* out) {
+        double r, g, b;
+        double hh = std::fmod(h, 1.0) * 6.0;
+        int sector = static_cast<int>(hh);
+        double f = hh - sector, p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+        switch (sector) {
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
+        }
+        out[0] = static_cast<int>(std::lround(r * 255));
+        out[1] = static_cast<int>(std::lround(g * 255));
+        out[2] = static_cast<int>(std::lround(b * 255));
+    }
+
+    static void RgbToHsv(const int* c, double& h, double& s, double& v) {
+        double r = c[0] / 255.0, g = c[1] / 255.0, b = c[2] / 255.0;
+        double mx = std::max({r, g, b}), mn = std::min({r, g, b}), d = mx - mn;
+        v = mx;
+        s = mx > 0 ? d / mx : 0;
+        if (d <= 0) return; // grey: keep the current hue so the strip marker doesn't jump
+        if (mx == r) h = std::fmod((g - b) / d + 6.0, 6.0) / 6.0;
+        else if (mx == g) h = ((b - r) / d + 2.0) / 6.0;
+        else h = ((r - g) / d + 4.0) / 6.0;
+    }
+
+    int fOriginal[3] = {216, 216, 216};
+    double fH = 0, fS = 0, fV = 0;
+    int fDrag = kDragNone;
+    double fMouseX = -1, fMouseY = -1;
+    bool fFinished = false;
+};
+
+static std::unique_ptr<ColorPanel> gColorPanel;
+
+static void ShowColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight) {
+    if (gColorPanel || parent == nullptr) return;
+    gColorPanel = std::make_unique<ColorPanel>(parent, parentWidth, parentHeight);
+    gColorPanel->onDone = []() {
+        if (!gColorPanel) return;
+        ColorPanel* raw = gColorPanel.release();
+        RunLater([raw]() { delete raw; });
+    };
+    // Dismissed by the compositor (a click outside it): same as Cancel.
+    gColorPanel->onDismissed = []() { if (gColorPanel) gColorPanel->Cancel(); };
+}
+
+// =========================================================================
 // SETTINGS PANEL (ConfigView / HaikuConfigWindow)
 // =========================================================================
 class ConfigPanel : public LayerPanel {
@@ -7548,6 +7888,20 @@ public:
                     DrawText(cr, w.label, w.rect.left, w.rect.top, w.small ? 10 : 12, !w.small, w.small ? dim : text,
                         w.rect.Width());
                     break;
+                case Widget::kColor: {
+                    DrawText(cr, w.label, w.rect.left, w.rect.top, 12, true, text);
+                    HRect sw{w.rect.right - 40, w.rect.top, w.rect.right, w.rect.bottom};
+                    RoundedRectPath(cr, sw.left + 0.5, sw.top + 0.5, sw.Width() - 1, sw.Height() - 1, 3);
+                    cairo_set_source_rgb(cr, gSettings.dockColor[0] / 255.0, gSettings.dockColor[1] / 255.0,
+                        gSettings.dockColor[2] / 255.0);
+                    cairo_fill_preserve(cr);
+                    if (hovered) cairo_set_source_rgba(cr, 90 / 255.0, 140 / 255.0, 240 / 255.0, 1);
+                    else cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, 1);
+                    cairo_set_line_width(cr, hovered ? 2 : 1);
+                    cairo_stroke(cr);
+                    cairo_set_line_width(cr, 1);
+                    break;
+                }
                 case Widget::kSegmented: {
                     int count = static_cast<int>(w.options.size());
                     float segW = w.rect.Width() / count;
@@ -7627,6 +7981,7 @@ public:
         Widget& w = fWidgets[hit];
         switch (w.type) {
             case Widget::kButton:
+            case Widget::kColor:
                 if (w.onClick) RunLater(w.onClick);
                 break;
             case Widget::kCheck:
@@ -7660,7 +8015,7 @@ public:
 
 private:
     struct Widget {
-        enum Type { kButton, kCheck, kLabel, kSegmented, kSlider } type;
+        enum Type { kButton, kCheck, kLabel, kSegmented, kSlider, kColor } type;
         std::string label;
         HRect rect;
         bool enabled = true;
@@ -7756,6 +8111,19 @@ private:
         segmented("Open App Effects:", effects, &gSettings.openEffect);
         segmented("Close App Effects:", effects, &gSettings.closeEffect);
 
+        {
+            // "Adjust Dock Color: [swatch]" -- the swatch opens the color picker
+            Widget w;
+            w.type = Widget::kColor;
+            w.label = "Adjust Dock Color:";
+            double tw;
+            MeasureText(w.label, 12, true, &tw, nullptr);
+            w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
+            w.onClick = [this]() { ShowColorPanel(layerSurface, width, height); };
+            fWidgets.push_back(w);
+            y += 30;
+        }
+
         auto slider = [&](const std::string& label, double min, double max, const char* minL, const char* maxL,
             std::function<double()> get, std::function<void(double)> set) {
             Widget w;
@@ -7824,11 +8192,17 @@ private:
 
 static std::unique_ptr<ConfigPanel> gConfig;
 
+static void RedrawConfigPanel() {
+    if (gConfig) gConfig->Redraw();
+}
+
 static void ShowConfigPanel() {
     if (gConfig) return;
     gConfig = std::make_unique<ConfigPanel>();
     auto close = []() {
         if (!gConfig) return;
+        // The color picker is a popup of this panel: it has to go first.
+        if (gColorPanel) gColorPanel->Cancel();
         ConfigPanel* raw = gConfig.release();
         RunLater([raw]() { delete raw; });
     };
