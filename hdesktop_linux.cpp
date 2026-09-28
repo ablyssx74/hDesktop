@@ -8216,17 +8216,39 @@ static int FlattenVersion(const char* s) {
     return a * 10000 + b * 100 + c;
 }
 
-static void SendNotification(const std::string& title, const std::string& body) {
+// Desktop notification (BNotification's equivalent). `done` is told whether a
+// notification server actually took it -- there may be none running (bare
+// compositors, or plasmashell not up), and then the caller can fall back.
+static void SendNotification(const std::string& title, const std::string& body,
+    std::function<void(bool shown)> done = nullptr) {
     GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
-    if (bus == nullptr) return;
+    if (bus == nullptr) {
+        if (done) done(false);
+        return;
+    }
     GVariantBuilder actions, hints;
     g_variant_builder_init(&actions, G_VARIANT_TYPE("as"));
     g_variant_builder_init(&hints, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string("hdesktop"));
+    auto* cb = new std::function<void(bool)>(std::move(done));
     g_dbus_connection_call(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
         "org.freedesktop.Notifications", "Notify",
         g_variant_new("(susssasa{sv}i)", "hDesktop", 0u, "system-software-update", title.c_str(), body.c_str(),
             &actions, &hints, -1),
-        nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 5000, nullptr,
+        [](GObject* source, GAsyncResult* res, gpointer data) {
+            auto* cb = static_cast<std::function<void(bool)>*>(data);
+            GError* err = nullptr;
+            GVariant* reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
+            if (reply) {
+                g_variant_unref(reply);
+            } else {
+                DebugLog("notification not shown: %s\n", err ? err->message : "unknown error");
+                g_clear_error(&err);
+            }
+            if (*cb) (*cb)(reply != nullptr);
+            delete cb;
+        }, cb);
     g_object_unref(bus);
 }
 
@@ -8258,10 +8280,22 @@ static void StartUpdateChecker() {
             auto* text = new std::string("A newer version of hDesktop is available! (" + remote + ")");
             g_idle_add([](gpointer p) -> gboolean {
                 auto* t = static_cast<std::string*>(p);
-                SendNotification("Update Available", *t);
+                std::string message = *t;
                 delete t;
+                // A desktop notification first; with no notification server
+                // answering, the dock's own alert says it instead.
+                SendNotification("Update Available", message, [message](bool shown) {
+                    DebugLog("update notification %s\n", shown ? "shown" : "failed, showing an alert");
+                    if (shown) return;
+                    ShowAlert("Update Available", message + "\n\nYou are running " APP_LOCAL_VERSION ".",
+                        {"Later", "Open GitHub"}, [](int choice) {
+                            if (choice == 1) OpenUri("https://github.com/ablyssx74/hDesktop");
+                        }, 1);
+                });
                 return G_SOURCE_REMOVE;
             }, text);
+        } else if (!remote.empty()) {
+            DebugLog("update check: up to date\n");
         }
     }).detach();
 }
