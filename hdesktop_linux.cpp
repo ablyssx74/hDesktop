@@ -6008,8 +6008,7 @@ private:
         fill.right = s.bounds.left + s.bounds.Width() * gVolume.level;
         if (gVolume.muted) DrawFilledRect(fill, 0.55f, 0.55f, 0.55f, 0.6f);
         else DrawFilledRect(fill, 0.2f, 1.0f, 0.2f, 0.85f);
-        const float ink = DockInk();
-        DrawRectOutline(s.bounds, ink, ink, ink, std::max(0.3f, gSettings.dockAlpha * 0.5f));
+        // No outline: on a dark dock color it read as a white frame.
         if (fHoverActive && s.bounds.Contains(fLayoutMouseX, fLayoutMouseY)) {
             char buf[32];
             snprintf(buf, sizeof(buf), gVolume.muted ? "Muted" : "Volume: %d%%", static_cast<int>(std::lround(gVolume.level * 100)));
