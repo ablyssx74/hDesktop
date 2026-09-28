@@ -199,7 +199,7 @@ struct Settings {
 
 static Settings gSettings;
 
-// A dark dock color needs light strokes (outline, dividers, running dot) on it.
+// A dark dock color needs light strokes (dividers, running dot) on it.
 static bool DockColorIsDark() {
     const int* c = gSettings.dockColor;
     return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255.0 < 0.5;
@@ -3062,18 +3062,6 @@ static void DrawFilledRoundedRect(const HRect& rc, float radius, float r, float 
     glEnd();
 }
 
-static void DrawOutlineRoundedRect(const HRect& rc, float radius, float r, float g, float b, float a) {
-    radius = std::min(radius, std::min(rc.Width(), rc.Height()) / 2.0f);
-    SetColor(r, g, b, a);
-    glLineWidth(1.0f);
-    glBegin(GL_LINE_LOOP);
-    CornerArc(rc.right - radius, rc.top + radius, radius, 270.0f, 360.0f);
-    CornerArc(rc.right - radius, rc.bottom - radius, radius, 0.0f, 90.0f);
-    CornerArc(rc.left + radius, rc.bottom - radius, radius, 90.0f, 180.0f);
-    CornerArc(rc.left + radius, rc.top + radius, radius, 180.0f, 270.0f);
-    glEnd();
-}
-
 // Draws a texture into a logical rect at the given opacity.
 static void DrawTexture(const GLTexture& t, float left, float top, float w, float h, float alpha = 1.0f) {
     if (t.id == 0) return;
@@ -5831,7 +5819,7 @@ private:
         const float ink = DockInk();
         DrawFilledRoundedRect(L.plate, 15.0f, gSettings.dockColor[0] / 255.0f, gSettings.dockColor[1] / 255.0f,
             gSettings.dockColor[2] / 255.0f, gSettings.dockAlpha);
-        DrawOutlineRoundedRect(L.plate, 15.0f, ink, ink, ink, gSettings.dockAlpha);
+        // No outline around the plate, same as the Haiku build.
 
         auto drawDivider = [&](float x) {
             if (x < 0) return;
