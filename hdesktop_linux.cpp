@@ -57,6 +57,7 @@
 #include <poll.h>
 #include <pwd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -6810,10 +6811,86 @@ private:
         return items;
     }
 
-    // One process's threads (ProcessController's team submenu). Linux has no
-    // way to kill a single thread from outside its process -- any signal takes
-    // the whole process down -- so thread rows are view-only here, and the
-    // only action is the process-level Force Kill at the top.
+    // Whether this user may raise priorities / touch other users' threads:
+    // root or CAP_SYS_NICE. Without it, the kernel only lets a thread's nice
+    // value go up (lower priority), down to 20 - RLIMIT_NICE at most.
+    static bool HasNiceCapability() {
+        if (geteuid() == 0) return true;
+        std::string status = ReadFile("/proc/self/status");
+        size_t p = status.find("CapEff:");
+        if (p == std::string::npos) return false;
+        unsigned long long caps = strtoull(status.c_str() + p + 7, nullptr, 16);
+        return (caps >> 23) & 1; // CAP_SYS_NICE
+    }
+
+    static int LowestNiceAllowed() {
+        if (HasNiceCapability()) return -20;
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NICE, &rl) != 0) return 20;
+        if (rl.rlim_cur == RLIM_INFINITY) return -20;
+        return std::clamp(20 - static_cast<int>(rl.rlim_cur), -20, 20);
+    }
+
+    // ProcessController's priority submenu, in Linux terms: nice values from
+    // 19 (lowest priority) to -20 (highest), the current one selected. Options
+    // the kernel would refuse are greyed out rather than failing on click.
+    static std::vector<MenuItem> ThreadPriorityItems(pid_t tid, bool mine) {
+        std::vector<MenuItem> items;
+        errno = 0;
+        int current = getpriority(PRIO_PROCESS, static_cast<id_t>(tid));
+        if (errno != 0) {
+            items.push_back(MenuItem::Header("Thread has exited"));
+            return items;
+        }
+        const bool privileged = HasNiceCapability();
+        const bool canChange = mine || privileged;
+        const int lowestAllowed = LowestNiceAllowed();
+        static const struct { const char* name; int nice; } kLevels[] = {
+            {"Lowest priority", 19}, {"Low priority", 10}, {"Below normal priority", 5},
+            {"Normal priority", 0}, {"Above normal priority", -5}, {"High priority", -10},
+            {"Highest priority", -20},
+        };
+        bool anyBlocked = false;
+        auto add = [&](const std::string& label, int nice) {
+            MenuItem m;
+            m.label = label + " [nice " + std::to_string(nice) + "]";
+            m.check = (nice == current) ? kRadioOn : kRadioOff;
+            m.enabled = canChange && (nice >= current || nice >= lowestAllowed);
+            if (!m.enabled && nice != current) anyBlocked = true;
+            m.action = [tid, nice]() {
+                if (setpriority(PRIO_PROCESS, static_cast<id_t>(tid), nice) != 0) {
+                    ShowAlert("Couldn't Change Priority",
+                        "Setting thread " + std::to_string(tid) + " to nice " + std::to_string(nice) +
+                        " failed: " + strerror(errno) + ".", {"OK"}, nullptr, 0);
+                }
+            };
+            items.push_back(m);
+        };
+        bool named = false;
+        for (const auto& level : kLevels) named = named || level.nice == current;
+        bool customAdded = named;
+        for (const auto& level : kLevels) {
+            if (!customAdded && current > level.nice) { // not a named level: show it where it sorts
+                add("Custom priority", current);
+                customAdded = true;
+            }
+            add(level.name, level.nice);
+        }
+        if (!customAdded) add("Custom priority", current);
+        if (!canChange) {
+            items.push_back(MenuItem::Separator());
+            items.push_back(MenuItem::Header("Not your process"));
+        } else if (anyBlocked) {
+            items.push_back(MenuItem::Separator());
+            items.push_back(MenuItem::Header("Raising priority needs root"));
+        }
+        return items;
+    }
+
+    // One process's threads (ProcessController's team submenu): each thread
+    // row opens its priority submenu. Single threads can't be killed -- Linux
+    // has no way to do that from outside a process, and it would leave the
+    // app broken anyway -- so the only kill is the process-level one on top.
     static std::vector<MenuItem> ThreadItems(pid_t pid, const std::string& name, bool mine, ThreadSampler& sampler) {
         std::vector<MenuItem> items;
         MenuItem killItem;
@@ -6841,7 +6918,7 @@ private:
             return items;
         }
         char header[96];
-        snprintf(header, sizeof(header), "Threads: %zu (view only on Linux)", threads.size());
+        snprintf(header, sizeof(header), "Threads: %zu", threads.size());
         items.push_back(MenuItem::Header(header));
         for (const ThreadInfo& t : threads) {
             MenuItem row;
@@ -6850,7 +6927,9 @@ private:
             char buf[16];
             snprintf(buf, sizeof(buf), "%3.1f%%", t.cpuPercent);
             row.valueText = buf;
-            items.push_back(row); // no action: view only
+            pid_t tid = t.tid;
+            row.submenu = [tid, mine]() { return ThreadPriorityItems(tid, mine); };
+            items.push_back(row);
         }
         return items;
     }
