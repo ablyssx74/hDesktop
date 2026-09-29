@@ -459,6 +459,47 @@ struct DesktopIconItem {
 const int32 kOcclusionGridSize = 8; // 8x8 = 64 cells, plenty for a threshold decision
 const float kOcclusionThreshold = 0.5f; // >50% covered counts as occluded
 
+// The team that owns the frontmost real window on the current workspace --
+// what the user actually sees on top -- skipping hDesktop's own windows, the
+// Desktop and other non-normal feels (menus, floating palettes), minimized and
+// hidden windows. For Tracker only its folder windows count (layer 3+, the
+// same rule the taskbar's dimming uses). -1 if there is none.
+//
+// Taskbar clicks decide "minimize or bring to front" from this rather than
+// from the roster's active app: which app is active at click time depends on
+// the focus mode and on the path the pointer took to reach the dock (with
+// focus-follows-mouse, every window it crossed became active in turn), while
+// the stacking order doesn't.
+team_id FrontmostUserWindowTeam() {
+    team_id ownTeam = (be_app != nullptr) ? be_app->Team() : -1;
+    team_id trackerTeam = -1;
+    app_info trackerInfo;
+    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
+        trackerTeam = trackerInfo.team;
+    }
+
+    int32 currentWorkspace = current_workspace();
+    int32 count = 0;
+    int32* tokens = nullptr;
+    if (BPrivate::get_window_order(currentWorkspace, &tokens, &count) != B_OK || tokens == nullptr) {
+        return -1;
+    }
+    team_id front = -1;
+    for (int32 i = 0; i < count && front < 0; ++i) { // frontmost first
+        client_window_info* info = get_window_info(tokens[i]);
+        if (info == nullptr) continue;
+        bool candidate = info->team != ownTeam
+            && info->feel == B_NORMAL_WINDOW_FEEL
+            && !info->is_mini
+            && (info->workspaces & (1 << currentWorkspace)) != 0
+            && (info->team == trackerTeam ? info->layer >= 3 : info->layer > 0);
+        if (candidate) front = info->team;
+        free(info);
+    }
+    free(tokens);
+    return front;
+}
+
 bool IsThumbnailCandidateOccluded(int32* windowTokens, int32 candidateIndex, BRect candidateFrame,
     int32 currentWorkspace, team_id ownTeam) {
     float candW = candidateFrame.Width();
@@ -6850,15 +6891,10 @@ void SyncDockWithRunningDeskbarApps() {
                 // Only an app that's already in front gets minimized. One that is
                 // merely visible -- e.g. partly covered by another app's window --
                 // is brought to the front instead, so a single click always
-                // focuses it rather than minimizing it first.
-                bool isForegroundApp = activeTaskWin.HasTeam(fLastForegroundTeam);
-                {
-                    app_info frontInfo;
-                    if (be_roster->GetActiveAppInfo(&frontInfo) == B_OK
-                        && (be_app == nullptr || frontInfo.team != be_app->Team())) {
-                        isForegroundApp = activeTaskWin.HasTeam(frontInfo.team);
-                    }
-                }
+                // focuses it rather than minimizing it first. "In front" means it
+                // owns the topmost window (see FrontmostUserWindowTeam()), not
+                // whichever app the roster last saw active.
+                bool isForegroundApp = activeTaskWin.HasTeam(FrontmostUserWindowTeam());
                 std::vector<team_id> itemTeams = activeTaskWin.Teams();
 
                 // READ TRUTH FROM RENDERFRAME WORKSPACE BITMASK
