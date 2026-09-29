@@ -961,9 +961,95 @@ private:
 
 
 // =========================================================================
+// THREAD PRIORITY SUBMENU (ProcessController's PriorityMenu)
+// One thread's priority levels, current one checked (a non-standard value
+// shows as "Custom priority [N]" in its sorted place). Picking a level sends
+// 'tpri' (thread id + priority); the CPU menu runner calls
+// set_thread_priority() -- no confirmation, same as ProcessController.
+// =========================================================================
+class BThreadPriorityMenu : public BMenu {
+public:
+    BThreadPriorityMenu(const char* label, thread_id thread)
+        : BMenu(label), fThread(thread) {
+        _Build(); // sized correctly before its first open
+    }
+
+    void SetThread(thread_id thread) {
+        if (thread == fThread) return;
+        fThread = thread;
+        _Build();
+    }
+
+    virtual void AttachedToWindow() override {
+        _Build(); // the priority may have changed since the menu was built
+        BMenu::AttachedToWindow();
+    }
+
+private:
+    void _Build() {
+        static const struct { const char* name; int32 priority; } kLevels[] = {
+            {"Idle priority", B_IDLE_PRIORITY},
+            {"Lowest active priority", B_LOWEST_ACTIVE_PRIORITY},
+            {"Low priority", B_LOW_PRIORITY},
+            {"Normal priority", B_NORMAL_PRIORITY},
+            {"Display priority", B_DISPLAY_PRIORITY},
+            {"Urgent display priority", B_URGENT_DISPLAY_PRIORITY},
+            {"Real-time display priority", B_REAL_TIME_DISPLAY_PRIORITY},
+            {"Urgent priority", B_URGENT_PRIORITY},
+            {"Real-time priority", B_REAL_TIME_PRIORITY},
+        };
+        RemoveItems(0, CountItems(), true);
+
+        int32 current = -1;
+        thread_info info;
+        if (get_thread_info(fThread, &info) == B_OK) current = info.priority;
+
+        bool customAdded = false;
+        for (const auto& level : kLevels) {
+            if (!customAdded && current >= 0 && current < level.priority) {
+                // Not one of the named levels: show it where it sorts
+                bool named = false;
+                for (const auto& l : kLevels) named = named || l.priority == current;
+                if (!named) {
+                    char label[48];
+                    std::snprintf(label, sizeof(label), "Custom priority [%d]", static_cast<int>(current));
+                    _AddLevel(label, current, true);
+                }
+                customAdded = true;
+            }
+            char label[64];
+            std::snprintf(label, sizeof(label), "%s [%d]", level.name, static_cast<int>(level.priority));
+            _AddLevel(label, level.priority, level.priority == current);
+        }
+        if (!customAdded && current > B_REAL_TIME_PRIORITY) {
+            char label[48];
+            std::snprintf(label, sizeof(label), "Custom priority [%d]", static_cast<int>(current));
+            _AddLevel(label, current, true);
+        }
+        if (current < 0) {
+            // The thread is gone: nothing left to change
+            for (int32 i = 0; i < CountItems(); i++) ItemAt(i)->SetEnabled(false);
+        }
+    }
+
+    void _AddLevel(const char* label, int32 priority, bool marked) {
+        BMessage* msg = new BMessage('tpri');
+        msg->AddInt32("thread", fThread);
+        msg->AddInt32("priority", priority);
+        BMenuItem* item = new BMenuItem(label, msg);
+        item->SetMarked(marked);
+        AddItem(item);
+    }
+
+    thread_id fThread;
+};
+
+// =========================================================================
 // LIVE-PULSING SUBSYSTEM: ONE TEAM'S THREADS (PROCESSCONTROLLER-STYLE CASCADE)
 // Row 0 force-kills the whole team ('kthr'); every thread row below the
-// separator kills just that thread ('kthd') after a confirmation alert.
+// separator opens that thread's priority submenu (BThreadPriorityMenu).
+// Single threads can't be killed from here: that almost always leaves the
+// app hung or crashed, and ProcessController doesn't offer it either.
 // =========================================================================
 class BTeamThreadsMenu : public BMenu {
 public:
@@ -982,7 +1068,6 @@ public:
     void SetTeam(team_id team, const char* name) {
         if (team == fTeam) return;
         fTeam = team;
-        fTeamName = name;
 
         RemoveItems(0, CountItems(), true);
         fThreadHistory.clear();
@@ -1008,6 +1093,12 @@ public:
 
     virtual void Pulse() override {
         BMenu::Pulse();
+        // Rows are reused by index: hold still while a priority submenu is
+        // open, or it could end up pointing at another thread.
+        for (int32 i = 0; i < CountItems(); i++) {
+            BMenu* sub = ItemAt(i)->Submenu();
+            if (sub != nullptr && sub->Window() != nullptr) return;
+        }
         _RefreshThreads();
         Invalidate();
     }
@@ -1045,19 +1136,13 @@ private:
             BCpuBarMenuItem* item = dynamic_cast<BCpuBarMenuItem*>(ItemAt(index));
             if (item) {
                 item->UpdateMetrics(cpu, rowText);
-                if (item->Message()) {
-                    item->Message()->ReplaceInt32("target_thread_id", thInfo.thread);
-                    item->Message()->ReplaceString("target_name", thInfo.name);
-                }
+                BThreadPriorityMenu* priorities = dynamic_cast<BThreadPriorityMenu*>(item->Submenu());
+                if (priorities) priorities->SetThread(thInfo.thread);
             } else {
                 // Drop a stale "no threads" placeholder before appending real rows
                 if (ItemAt(index) != nullptr) delete RemoveItem(index);
 
-                BMessage* killThreadMsg = new BMessage('kthd');
-                killThreadMsg->AddInt32("target_thread_id", thInfo.thread);
-                killThreadMsg->AddString("target_name", thInfo.name);
-                killThreadMsg->AddString("team_name", fTeamName.String());
-                AddItem(new BCpuBarMenuItem(rowText, killThreadMsg, cpu), index);
+                AddItem(new BCpuBarMenuItem(new BThreadPriorityMenu(rowText, thInfo.thread), cpu), index);
             }
             index++;
         }
@@ -1080,7 +1165,6 @@ private:
     }
 
     team_id fTeam;
-    BString fTeamName;
     int32 fCpuCount;
     bigtime_t fLastUpdateTime;
     std::map<thread_id, bigtime_t> fThreadHistory;
@@ -10614,33 +10698,13 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
                     break;
                 }
 
-                case 'kthd': {
+                case 'tpri': {
+                    // A thread's new priority from BThreadPriorityMenu
                     thread_id targetThread = -1;
-                    const char* threadName = "Unknown";
-                    const char* teamName = "Unknown";
-
-                    if (actionMsg->FindInt32("target_thread_id", &targetThread) == B_OK) {
-                        actionMsg->FindString("target_name", &threadName);
-                        actionMsg->FindString("team_name", &teamName);
-
-                        char alertText[320];
-                        std::snprintf(alertText, sizeof(alertText),
-                            "Are you sure you want to kill the thread '%s' (Thread ID: %d) of '%s'?\n\n"
-                            "Killing a single thread can leave the application unstable.",
-                            threadName, static_cast<int>(targetThread), teamName);
-
-                        BAlert* confirmationBox = new BAlert("Kill Thread", alertText,
-                            "Cancel", "Kill Thread", nullptr,
-                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-
-                        confirmationBox->SetShortcut(0, B_ESCAPE);
-                        confirmationBox->CenterOnScreen();
-
-                        int32 userChoice = confirmationBox->Go();
-
-                        if (userChoice == 1) {
-                            kill_thread(targetThread);
-                        }
+                    int32 priority = -1;
+                    if (actionMsg->FindInt32("thread", &targetThread) == B_OK
+                        && actionMsg->FindInt32("priority", &priority) == B_OK) {
+                        set_thread_priority(targetThread, priority);
                     }
                     break;
                 }
