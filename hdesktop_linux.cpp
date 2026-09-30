@@ -5125,6 +5125,13 @@ private:
     // Haiku: targetWindowHeight = ceil(iconSize * 2 + 50), full screen width,
     // pinned to the chosen screen edge. Grows only when the zoom slider goes
     // past its old fixed 1.8, so the biggest zoomed icon never gets clipped.
+    // Screen-edge strip kept free of windows ("Reserve Screen Space"): the
+    // resting plate height + its 15px margin from the edge. 0 = none.
+    static int ReservedZone() {
+        return (gSettings.reserveSpace && !gSettings.autoHide)
+            ? static_cast<int>(std::ceil(gSettings.baseIconSize + 20.0f + 15.0f)) : 0;
+    }
+
     int PanelHeight() const {
         return static_cast<int>(std::ceil(gSettings.baseIconSize * (std::max(gSettings.iconZoom, 1.8f) + 0.2f) + 50.0f));
     }
@@ -5135,10 +5142,7 @@ private:
             (top ? ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP : ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
         zwlr_layer_surface_v1_set_anchor(layerSurface, anchor);
         zwlr_layer_surface_v1_set_size(layerSurface, 0, PanelHeight());
-        // Resting plate height + its 15px margin from the screen edge.
-        int zone = (gSettings.reserveSpace && !gSettings.autoHide)
-            ? static_cast<int>(std::ceil(gSettings.baseIconSize + 20.0f + 15.0f)) : 0;
-        zwlr_layer_surface_v1_set_exclusive_zone(layerSurface, zone);
+        zwlr_layer_surface_v1_set_exclusive_zone(layerSurface, ReservedZone());
     }
 
     void ResizeEglWindow() {
@@ -5467,14 +5471,37 @@ private:
     // =====================================================================
     // The Haiku build computes this twice, once for drawing and once for hit
     // testing; here both use the same function so they can't drift apart.
+    // Haiku's magnification: a Gaussian over the 2D distance to the pointer,
+    // 180px wide. Scaled by fZoomBlend, which eases in and out (see
+    // UpdateZoomBlend()) -- Wayland only reports the pointer while it's over
+    // the dock's input region, so without easing the zoom would snap on at the
+    // region's edge and snap off when leaving it.
     float MagnifyScale(float centerX, float centerY) const {
-        if (!fHoverActive) return 1.0f;
-        float dx = fLayoutMouseX - centerX;
-        float dy = fLayoutMouseY - centerY;
+        if (fZoomBlend <= 0.0f) return 1.0f;
+        float dx = fZoomPointX - centerX;
+        float dy = fZoomPointY - centerY;
         float d = std::sqrt(dx * dx + dy * dy);
         if (d >= 180.0f) return 1.0f;
         float ratio = d / 180.0f;
-        return 1.0f + (gSettings.iconZoom - 1.0f) * std::exp(-ratio * ratio);
+        return 1.0f + (gSettings.iconZoom - 1.0f) * std::exp(-ratio * ratio) * fZoomBlend;
+    }
+
+    // Moves fZoomBlend toward 1 while hovering and 0 after the pointer leaves
+    // (then keeping the last pointer position, so the icons shrink back from
+    // where it left). Returns true while still settling.
+    bool UpdateZoomBlend() {
+        static constexpr float kEaseMs = 70.0f; // time constant: ~95% after 210ms
+        uint64_t nowMs = NowMs();
+        float dt = fZoomBlendMs ? std::min<float>(static_cast<float>(nowMs - fZoomBlendMs), 33.0f) : 16.0f;
+        fZoomBlendMs = nowMs;
+        const float target = fHoverActive ? 1.0f : 0.0f;
+        if (fHoverActive) {
+            fZoomPointX = fLayoutMouseX;
+            fZoomPointY = fLayoutMouseY;
+        }
+        fZoomBlend += (target - fZoomBlend) * (1.0f - std::exp(-dt / kEaseMs));
+        if (std::abs(target - fZoomBlend) < 0.002f) fZoomBlend = target;
+        return fZoomBlend != target;
     }
 
     float DockEdgeY(float insetFromEdge) const {
@@ -5806,6 +5833,7 @@ private:
         fLayoutMouseX = fMouseX;
         fLayoutMouseY = fMouseY - DirectionalOffset();
         fHoverActive = fPointerInside && fDockState != STATE_HIDDEN;
+        const bool zoomSettling = UpdateZoomBlend();
         fLayout = ComputeLayout();
         const DockLayout& L = fLayout;
         const bool top = gSettings.dockLocation == kDockLocationTop;
@@ -5954,7 +5982,7 @@ private:
         eglSwapBuffers(gEgl.display, fEglSurface);
 
         bool animating = anyEffect || !fClosingKey.empty() || std::abs(fCurrentY - fTargetY) > 0.1f
-            || (fLabelHoverStart != 0);
+            || (fLabelHoverStart != 0) || zoomSettling;
         if (animating) fDirty = true;
     }
 
@@ -6267,10 +6295,22 @@ private:
         }
         int x = static_cast<int>(std::floor(r.left)), y = static_cast<int>(std::floor(r.top));
         int w = static_cast<int>(std::ceil(r.right)) - x, h = static_cast<int>(std::ceil(r.bottom)) - y;
-        if (x == fRegionX && y == fRegionY && w == fRegionW && h == fRegionH) return;
+        // Haiku tracks the pointer 250px past each end of the dock so the zoom
+        // builds up as it slides in from the side. Here that can only reach as
+        // far as the reserved edge strip: anywhere else the region would take
+        // clicks away from the windows underneath.
+        int band = (fDockState == STATE_HIDDEN) ? 0 : ReservedZone();
+        int bandX = static_cast<int>(std::floor(fLayout.plate.left - 250.0f));
+        int bandW = static_cast<int>(std::ceil(fLayout.plate.right + 250.0f)) - bandX;
+        int bandY = top ? 0 : fHeight - band;
+        if (x == fRegionX && y == fRegionY && w == fRegionW && h == fRegionH && band == fRegionBand &&
+            bandX == fRegionBandX) return;
         fRegionX = x; fRegionY = y; fRegionW = w; fRegionH = h;
+        fRegionBand = band;
+        fRegionBandX = bandX;
         wl_region* region = wl_compositor_create_region(gWl.compositor);
         wl_region_add(region, x, y, std::max(1, w), std::max(1, h));
+        if (band > 0) wl_region_add(region, bandX, bandY, std::max(1, bandW), band);
         wl_surface_set_input_region(surface, region);
         wl_region_destroy(region);
     }
@@ -6946,6 +6986,7 @@ private:
     wl_egl_window* fEglWindow = nullptr;
     EGLSurface fEglSurface = EGL_NO_SURFACE;
     int fRegionX = -1, fRegionY = -1, fRegionW = -1, fRegionH = -1;
+    int fRegionBand = -1, fRegionBandX = 0;
 
     std::vector<DockApp> fApps;
     AppEntry* fFileManager = nullptr;
@@ -6956,6 +6997,9 @@ private:
     float fLayoutMouseX = -1000, fLayoutMouseY = -1000;
     bool fPointerInside = false;
     bool fHoverActive = false;
+    float fZoomBlend = 0.0f;              // 0..1 strength of the hover magnification
+    uint64_t fZoomBlendMs = 0;
+    float fZoomPointX = -1000, fZoomPointY = -1000;
 
     GLTexture fLeafIcon, fTrashIcon, fClockTexture, fCpuTooltip;
     std::string fLastClockString, fCpuTooltipText;
