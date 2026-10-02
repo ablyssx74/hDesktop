@@ -7114,6 +7114,8 @@ public:
 
         DrawHeaderButton(cr, PowerOffRect(), "Power off", RGBA{220 / 255.0, 60 / 255.0, 60 / 255.0, 45 / 255.0},
             RGBA{1, 90 / 255.0, 90 / 255.0, 1}, RGBA{210 / 255.0, 100 / 255.0, 100 / 255.0, 1});
+        DrawHeaderButton(cr, LogoutRect(), "Log out", RGBA{225 / 255.0, 228 / 255.0, 235 / 255.0, 45 / 255.0},
+            RGBA{245 / 255.0, 246 / 255.0, 250 / 255.0, 1}, RGBA{185 / 255.0, 188 / 255.0, 196 / 255.0, 1});
         DrawHeaderButton(cr, RebootRect(), "Restart system", RGBA{60 / 255.0, 140 / 255.0, 220 / 255.0, 45 / 255.0},
             RGBA{90 / 255.0, 175 / 255.0, 1, 1}, RGBA{100 / 255.0, 160 / 255.0, 220 / 255.0, 1});
 
@@ -7220,7 +7222,7 @@ public:
         fMouseX = x;
         fMouseY = y;
         int hit = CellAt(x, y);
-        bool headerHover = PowerOffRect().Contains(x, y) || RebootRect().Contains(x, y);
+        bool headerHover = PowerOffRect().Contains(x, y) || LogoutRect().Contains(x, y) || RebootRect().Contains(x, y);
         if (hit != fHoveredCell || headerHover != fHeaderHover) {
             fHoveredCell = hit;
             fHeaderHover = headerHover;
@@ -7243,6 +7245,11 @@ public:
         double x = gWl.pointerX, y = gWl.pointerY;
         if (button == kButtonLeft && PowerOffRect().Contains(x, y)) {
             RunDetached("systemctl poweroff");
+            CloseAppDrawer();
+            return;
+        }
+        if (button == kButtonLeft && LogoutRect().Contains(x, y)) {
+            RunDetached("loginctl terminate-session \"$XDG_SESSION_ID\"");
             CloseAppDrawer();
             return;
         }
@@ -7336,7 +7343,8 @@ private:
     static constexpr double kItemW = 100, kItemH = 110, kStartX = 30, kSpacingX = 24, kSpacingY = 20;
 
     HRect PowerOffRect() const { return HRect{30, 45, 110, 76}; }
-    HRect RebootRect() const { return HRect{120, 45, 225, 76}; }
+    HRect LogoutRect() const { return HRect{120, 45, 200, 76}; }
+    HRect RebootRect() const { return HRect{210, 45, 315, 76}; }
     HRect SearchRect() const { return HRect{static_cast<float>(width - 330), 45, static_cast<float>(width - 30), 76}; }
 
     void DrawHeaderButton(cairo_t* cr, const HRect& r, const char* label, RGBA hoverFill, RGBA hoverText, RGBA text) {
