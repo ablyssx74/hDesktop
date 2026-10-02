@@ -170,6 +170,7 @@ static const char* const kEffectNames[kEffectCount] = {
 struct Settings {
     bool   autoHide = false;
     bool   showSystemTray = true;
+    bool   notificationServer = true; // own org.freedesktop.Notifications and draw toasts
     bool   keepAboveWindows = true;   // Haiku: "auto-raise" (floating feel on hover)
     bool   reserveSpace = true;       // Wayland only: exclusive zone so maximized windows stop at the dock
     bool   titlePopup = true;         // Haiku mode title overlay: clickable window list popup
@@ -225,6 +226,7 @@ static void SaveConfiguration() {
     const char* g = "Dock";
     g_key_file_set_boolean(kf, g, "auto_hide", gSettings.autoHide);
     g_key_file_set_boolean(kf, g, "system_tray", gSettings.showSystemTray);
+    g_key_file_set_boolean(kf, g, "notifications", gSettings.notificationServer);
     g_key_file_set_boolean(kf, g, "keep_above_windows", gSettings.keepAboveWindows);
     g_key_file_set_boolean(kf, g, "reserve_space", gSettings.reserveSpace);
     g_key_file_set_boolean(kf, g, "title_popup", gSettings.titlePopup);
@@ -301,6 +303,7 @@ static void LoadConfiguration() {
 
     getBool("auto_hide", gSettings.autoHide);
     getBool("system_tray", gSettings.showSystemTray);
+    getBool("notifications", gSettings.notificationServer);
     getBool("keep_above_windows", gSettings.keepAboveWindows);
     getBool("reserve_space", gSettings.reserveSpace);
     getBool("title_popup", gSettings.titlePopup);
@@ -7615,6 +7618,461 @@ static void ShowAboutAlert() {
 }
 
 // =========================================================================
+// NOTIFICATION SERVER (org.freedesktop.Notifications)
+// =========================================================================
+// Haiku has its own notification_server; on Linux the desktop normally
+// supplies one (Plasma's systray applet, GNOME Shell, dunst...). When none is
+// running, every libnotify client blocks for ~25 s per notification waiting
+// for the D-Bus call to time out -- which freezes Electron apps whose main
+// thread sends them synchronously. So hDesktop serves the spec itself: toasts
+// are layer-shell panels stacked in the top-right corner. If another server
+// already owns the name we stay queued for it and take over when it exits.
+// Disable with `notifications=false` in the config file.
+class ToastPanel : public LayerPanel {
+public:
+    struct Content {
+        std::string app, summary, body;
+        std::vector<std::pair<std::string, std::string>> actions; // key, label (excluding "default")
+        bool hasDefault = false;
+        bool critical = false;
+        IconRef icon;
+    };
+
+    static constexpr int kWidth = 360;
+
+    ToastPanel(const Content& c, int marginTop) : fContent(c) {
+        fMarkup = BodyMarkup(c.body);
+        const int textLeft = c.icon ? kPad + kIcon + 10 : kPad;
+        fTextWidth = kWidth - textLeft - kPad;
+        int bodyH = 0;
+        if (!fMarkup.empty()) {
+            cairo_surface_t* scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+            cairo_t* cr = cairo_create(scratch);
+            PangoLayout* l = BodyLayout(cr);
+            int w;
+            pango_layout_get_pixel_size(l, &w, &bodyH);
+            g_object_unref(l);
+            cairo_destroy(cr);
+            cairo_surface_destroy(scratch);
+        }
+        int textH = 18 + (bodyH > 0 ? 4 + bodyH : 0);
+        int h = kPad + std::max(textH, c.icon ? kIcon : 0);
+        if (!c.actions.empty()) h += 8 + kButtonH;
+        h += kPad;
+        Config cfg;
+        cfg.layer = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
+        cfg.anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+        cfg.width = kWidth;
+        cfg.height = h;
+        cfg.marginTop = marginTop;
+        cfg.marginRight = 12;
+        cfg.keyboard = ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE;
+        cfg.nameSpace = "hdesktop-notification";
+        CreateLayer(cfg);
+        fHeight = h;
+    }
+
+    int Height() const { return fHeight; }
+
+    void SetTop(int marginTop) {
+        if (!layerSurface) return;
+        zwlr_layer_surface_v1_set_margin(layerSurface, marginTop, 12, 0, 0);
+        wl_surface_commit(surface);
+    }
+
+    // Called with (action key or "" for plain dismissal, user clicked).
+    std::function<void(const std::string&)> onClick;
+
+    void Paint(cairo_t* cr) override {
+        RoundedRectPath(cr, 0.5, 0.5, width - 1, height - 1, 8);
+        cairo_set_source_rgba(cr, 24 / 255.0, 24 / 255.0, 28 / 255.0, 0.96);
+        cairo_fill_preserve(cr);
+        if (fContent.critical) cairo_set_source_rgba(cr, 220 / 255.0, 80 / 255.0, 70 / 255.0, 1);
+        else cairo_set_source_rgba(cr, 70 / 255.0, 72 / 255.0, 84 / 255.0, 1);
+        cairo_set_line_width(cr, 1);
+        cairo_stroke(cr);
+
+        const int textLeft = fContent.icon ? kPad + kIcon + 10 : kPad;
+        if (fContent.icon) {
+            cairo_surface_t* ic = fContent.icon.get();
+            int iw = cairo_image_surface_get_width(ic), ih = cairo_image_surface_get_height(ic);
+            if (iw > 0 && ih > 0) {
+                cairo_save(cr);
+                double sc = static_cast<double>(kIcon) / std::max(iw, ih);
+                cairo_translate(cr, kPad + (kIcon - iw * sc) / 2, kPad + (kIcon - ih * sc) / 2);
+                cairo_scale(cr, sc, sc);
+                cairo_set_source_surface(cr, ic, 0, 0);
+                cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+                cairo_paint(cr);
+                cairo_restore(cr);
+            }
+        }
+        std::string title = fContent.summary.empty() ? fContent.app : fContent.summary;
+        DrawText(cr, title, textLeft, kPad, 13, true, RGBA{230 / 255.0, 232 / 255.0, 240 / 255.0, 1}, fTextWidth);
+        if (!fMarkup.empty()) {
+            PangoLayout* l = BodyLayout(cr);
+            cairo_set_source_rgba(cr, 200 / 255.0, 202 / 255.0, 210 / 255.0, 1);
+            cairo_move_to(cr, textLeft, kPad + 22);
+            pango_cairo_show_layout(cr, l);
+            g_object_unref(l);
+        }
+        for (size_t i = 0; i < fContent.actions.size(); ++i) {
+            HRect r = ButtonRect(i);
+            bool hovered = r.Contains(fMouseX, fMouseY);
+            RoundedRectPath(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1, 4);
+            cairo_set_source_rgba(cr, hovered ? 70 / 255.0 : 48 / 255.0, hovered ? 110 / 255.0 : 52 / 255.0,
+                hovered ? 200 / 255.0 : 62 / 255.0, 1);
+            cairo_fill(cr);
+            DrawText(cr, fContent.actions[i].second, r.left + 4, r.top + 5, 11, false, RGBA{1, 1, 1, 1},
+                r.Width() - 8, true);
+        }
+    }
+
+    void PointerMotion(double x, double y) override { fMouseX = x; fMouseY = y; Redraw(); }
+    void PointerEnter(double x, double y) override { PointerMotion(x, y); }
+    void PointerLeave() override { fMouseX = fMouseY = -1; Redraw(); }
+
+    void PointerButton(int button, bool pressed, uint32_t) override {
+        if (pressed || !onClick) return;
+        if (button == kButtonRight) { onClick(""); return; }
+        if (button != kButtonLeft) return;
+        for (size_t i = 0; i < fContent.actions.size(); ++i) {
+            if (ButtonRect(i).Contains(gWl.pointerX, gWl.pointerY)) { onClick(fContent.actions[i].first); return; }
+        }
+        onClick(fContent.hasDefault ? "default" : "");
+    }
+
+private:
+    static constexpr int kPad = 12, kIcon = 40, kButtonH = 24;
+
+    // The spec's body markup is a small HTML subset; Pango's parser accepts
+    // <b> <i> <u>, and anything it rejects (<a>, <img>, stray '&') is shown as
+    // plain text instead.
+    static std::string BodyMarkup(const std::string& body) {
+        if (body.empty()) return std::string();
+        std::string md = body;
+        // Pango understands <b>/<i>/<u> but not <br> or <a>; flatten those.
+        for (size_t pos; (pos = md.find("<br>")) != std::string::npos;) md.replace(pos, 4, "\n");
+        for (size_t pos; (pos = md.find("<br/>")) != std::string::npos;) md.replace(pos, 5, "\n");
+        GError* err = nullptr;
+        if (pango_parse_markup(md.c_str(), -1, 0, nullptr, nullptr, nullptr, &err)) return md;
+        g_clear_error(&err);
+        char* esc = g_markup_escape_text(body.c_str(), -1);
+        std::string out = esc;
+        g_free(esc);
+        return out;
+    }
+
+    PangoLayout* BodyLayout(cairo_t* cr) const {
+        PangoLayout* l = MakeLayout(cr, std::string(), 12, false);
+        pango_layout_set_markup(l, fMarkup.c_str(), -1);
+        pango_layout_set_width(l, fTextWidth * PANGO_SCALE);
+        pango_layout_set_wrap(l, PANGO_WRAP_WORD_CHAR);
+        pango_layout_set_ellipsize(l, PANGO_ELLIPSIZE_END);
+        pango_layout_set_height(l, -4); // at most four lines
+        return l;
+    }
+
+    HRect ButtonRect(size_t i) const {
+        const float gap = 6;
+        size_t n = fContent.actions.size();
+        float bw = (width - 2.0f * kPad - gap * (n - 1)) / n;
+        if (bw > 110) bw = 110;
+        float left = kPad + i * (bw + gap);
+        float bottom = height - static_cast<float>(kPad);
+        return HRect{left, bottom - kButtonH, left + bw, bottom};
+    }
+
+    Content fContent;
+    std::string fMarkup;
+    int fTextWidth = 0;
+    int fHeight = 0;
+    double fMouseX = -1, fMouseY = -1;
+};
+
+static const char* kNotificationsXml =
+    "<node>"
+    " <interface name='org.freedesktop.Notifications'>"
+    "  <method name='GetCapabilities'><arg type='as' direction='out'/></method>"
+    "  <method name='Notify'>"
+    "   <arg type='s' name='app_name' direction='in'/>"
+    "   <arg type='u' name='replaces_id' direction='in'/>"
+    "   <arg type='s' name='app_icon' direction='in'/>"
+    "   <arg type='s' name='summary' direction='in'/>"
+    "   <arg type='s' name='body' direction='in'/>"
+    "   <arg type='as' name='actions' direction='in'/>"
+    "   <arg type='a{sv}' name='hints' direction='in'/>"
+    "   <arg type='i' name='expire_timeout' direction='in'/>"
+    "   <arg type='u' name='id' direction='out'/>"
+    "  </method>"
+    "  <method name='CloseNotification'><arg type='u' direction='in'/></method>"
+    "  <method name='GetServerInformation'>"
+    "   <arg type='s' direction='out'/><arg type='s' direction='out'/>"
+    "   <arg type='s' direction='out'/><arg type='s' direction='out'/>"
+    "  </method>"
+    "  <signal name='NotificationClosed'><arg type='u'/><arg type='u'/></signal>"
+    "  <signal name='ActionInvoked'><arg type='u'/><arg type='s'/></signal>"
+    " </interface>"
+    "</node>";
+
+class NotificationServer {
+public:
+    void Init() {
+        GError* err = nullptr;
+        fBus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &err);
+        if (fBus == nullptr) {
+            WarnLog("no D-Bus session bus, notification server disabled: %s\n", err ? err->message : "?");
+            g_clear_error(&err);
+            return;
+        }
+        GDBusNodeInfo* node = g_dbus_node_info_new_for_xml(kNotificationsXml, nullptr);
+        static const GDBusInterfaceVTable vtable = {
+            .method_call = &MethodCall,
+            .get_property = nullptr,
+            .set_property = nullptr,
+            .padding = {nullptr},
+        };
+        fRegistration = g_dbus_connection_register_object(fBus, "/org/freedesktop/Notifications",
+            node->interfaces[0], &vtable, this, nullptr, nullptr);
+        g_dbus_node_info_unref(node);
+        // Allow replacement so a real desktop's server can take over; don't
+        // request replacement so we never steal the name from one.
+        fNameOwner = g_bus_own_name_on_connection(fBus, "org.freedesktop.Notifications",
+            G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
+            [](GDBusConnection*, const char*, gpointer) { DebugLog("notifications: serving org.freedesktop.Notifications\n"); },
+            [](GDBusConnection*, const char*, gpointer) { DebugLog("notifications: another server owns the name, queued\n"); },
+            nullptr, nullptr);
+    }
+
+    void Shutdown() {
+        for (auto& n : fToasts) if (n->timer) g_source_remove(n->timer);
+        fToasts.clear();
+        if (fBus && fRegistration) g_dbus_connection_unregister_object(fBus, fRegistration);
+        if (fNameOwner) g_bus_unown_name(fNameOwner);
+        fRegistration = 0;
+        fNameOwner = 0;
+    }
+
+private:
+    struct Toast {
+        uint32_t id = 0;
+        std::unique_ptr<ToastPanel> panel;
+        guint timer = 0;
+    };
+
+    static constexpr size_t kMaxVisible = 5;
+    static constexpr int kGap = 8, kTopMargin = 12;
+
+    static void MethodCall(GDBusConnection*, const char*, const char*, const char*, const char* method,
+        GVariant* params, GDBusMethodInvocation* inv, gpointer data) {
+        auto* self = static_cast<NotificationServer*>(data);
+        if (strcmp(method, "GetCapabilities") == 0) {
+            const char* caps[] = {"body", "body-markup", "actions", "icon-static", nullptr};
+            g_dbus_method_invocation_return_value(inv, g_variant_new("(^as)", caps));
+        } else if (strcmp(method, "GetServerInformation") == 0) {
+            g_dbus_method_invocation_return_value(inv,
+                g_variant_new("(ssss)", "hdesktop", "hDesktop", APP_LOCAL_VERSION, "1.2"));
+        } else if (strcmp(method, "CloseNotification") == 0) {
+            uint32_t id;
+            g_variant_get(params, "(u)", &id);
+            self->Close(id, 3);
+            g_dbus_method_invocation_return_value(inv, nullptr);
+        } else if (strcmp(method, "Notify") == 0) {
+            uint32_t id = self->Notify(params);
+            g_dbus_method_invocation_return_value(inv, g_variant_new("(u)", id));
+        } else {
+            g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.UnknownMethod", method);
+        }
+    }
+
+    static IconRef IconFromImageData(GVariant* v) {
+        int w, h, stride, bps, ch;
+        gboolean alpha;
+        GVariant* bytes = nullptr;
+        g_variant_get(v, "(iiibii@ay)", &w, &h, &stride, &alpha, &bps, &ch, &bytes);
+        IconRef out;
+        gsize len = 0;
+        const uint8_t* src = static_cast<const uint8_t*>(g_variant_get_fixed_array(bytes, &len, 1));
+        if (w > 0 && h > 0 && w <= 512 && h <= 512 && bps == 8 && ch >= 3 && stride >= w * ch
+            && len >= static_cast<gsize>(stride) * (h - 1) + static_cast<gsize>(w) * ch) {
+            cairo_surface_t* s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+            uint8_t* dst = cairo_image_surface_get_data(s);
+            int dstStride = cairo_image_surface_get_stride(s);
+            cairo_surface_flush(s);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const uint8_t* p = src + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * ch;
+                    uint32_t a = (alpha && ch >= 4) ? p[3] : 255;
+                    uint32_t px = (a << 24) | ((p[0] * a / 255) << 16) | ((p[1] * a / 255) << 8) | (p[2] * a / 255);
+                    memcpy(dst + static_cast<size_t>(y) * dstStride + static_cast<size_t>(x) * 4, &px, 4);
+                }
+            }
+            cairo_surface_mark_dirty(s);
+            out = MakeIconRef(s);
+        }
+        g_variant_unref(bytes);
+        return out;
+    }
+
+    static IconRef ResolveIcon(const std::string& appIcon, GVariant* hints, const std::string& appName) {
+        for (const char* key : {"image-data", "image_data", "icon_data"}) {
+            GVariant* v = g_variant_lookup_value(hints, key, G_VARIANT_TYPE("(iiibiiay)"));
+            if (v) {
+                IconRef ic = IconFromImageData(v);
+                g_variant_unref(v);
+                if (ic) return ic;
+            }
+        }
+        std::vector<std::string> names;
+        for (const char* key : {"image-path", "image_path"}) {
+            const char* s = nullptr;
+            if (g_variant_lookup(hints, key, "&s", &s) && s && *s) names.push_back(s);
+        }
+        if (!appIcon.empty()) names.push_back(appIcon);
+        const char* entry = nullptr;
+        if (g_variant_lookup(hints, "desktop-entry", "&s", &entry) && entry && *entry) names.push_back(entry);
+        if (!appName.empty()) names.push_back(ToLower(appName));
+        for (std::string n : names) {
+            if (n.compare(0, 7, "file://") == 0) n = n.substr(7);
+            IconRef ic = CachedIcon(n, ToastPxIcon());
+            if (ic) return ic;
+        }
+        return nullptr;
+    }
+
+    static int ToastPxIcon() { return 80; } // 40 logical, rendered at 2x so HiDPI stays sharp
+
+    uint32_t Notify(GVariant* params) {
+        const char *app, *icon, *summary, *body;
+        uint32_t replaces;
+        GVariantIter* actionIter;
+        GVariant* hints;
+        int32_t expire;
+        g_variant_get(params, "(&su&s&s&sas@a{sv}i)", &app, &replaces, &icon, &summary, &body, &actionIter, &hints,
+            &expire);
+
+        ToastPanel::Content c;
+        c.app = app;
+        c.summary = summary;
+        c.body = body;
+        const char *key, *label;
+        while (g_variant_iter_next(actionIter, "&s", &key) && g_variant_iter_next(actionIter, "&s", &label)) {
+            if (strcmp(key, "default") == 0) c.hasDefault = true;
+            else if (c.actions.size() < 3) c.actions.emplace_back(key, label);
+        }
+        g_variant_iter_free(actionIter);
+        uint8_t urgency = 1;
+        g_variant_lookup(hints, "urgency", "y", &urgency);
+        c.critical = urgency >= 2;
+        c.icon = ResolveIcon(icon, hints, app);
+
+        // transient/resident hints don't matter without a notification center.
+        int timeoutMs = expire < 0 ? 6000 : expire;
+        if (c.critical && expire < 0) timeoutMs = 0; // critical sticks until dismissed
+        g_variant_unref(hints);
+
+        uint32_t id = replaces;
+        size_t slot = fToasts.size();
+        if (replaces != 0) {
+            for (size_t i = 0; i < fToasts.size(); ++i) {
+                if (fToasts[i]->id == replaces) { slot = i; break; }
+            }
+        }
+        if (slot < fToasts.size()) {
+            DisposeToast(*fToasts[slot]);
+        } else {
+            id = fNextId++;
+            if (fNextId == 0) fNextId = 1;
+            fToasts.push_back(std::make_unique<Toast>());
+            fToasts.back()->id = id;
+            slot = fToasts.size() - 1;
+            while (fToasts.size() > kMaxVisible) {
+                uint32_t oldest = fToasts.front()->id;
+                Close(oldest, 1);
+                slot = fToasts.size() - 1;
+            }
+        }
+        Toast* t = fToasts[slot].get();
+        t->panel = std::make_unique<ToastPanel>(c, TopFor(slot));
+        t->panel->onClick = [this, id](const std::string& action) {
+            RunLater([this, id, action]() {
+                if (!action.empty()) {
+                    g_dbus_connection_emit_signal(fBus, nullptr, "/org/freedesktop/Notifications",
+                        "org.freedesktop.Notifications", "ActionInvoked", g_variant_new("(us)", id, action.c_str()), nullptr);
+                }
+                Close(id, 2);
+            });
+        };
+        t->panel->onClosed = [this, id]() { RunLater([this, id]() { Close(id, 2); }); };
+        if (timeoutMs > 0) {
+            t->timer = g_timeout_add_full(G_PRIORITY_DEFAULT, timeoutMs, [](gpointer p) -> gboolean {
+                auto* arg = static_cast<std::pair<NotificationServer*, uint32_t>*>(p);
+                arg->first->ExpireTimer(arg->second);
+                return G_SOURCE_REMOVE;
+            }, new std::pair<NotificationServer*, uint32_t>(this, id),
+            [](gpointer p) { delete static_cast<std::pair<NotificationServer*, uint32_t>*>(p); });
+        }
+        Layout();
+        return id;
+    }
+
+    // The timer source is removed when it fires; clear the stored id before closing.
+    void ExpireTimer(uint32_t id) {
+        for (auto& t : fToasts) if (t->id == id) t->timer = 0;
+        Close(id, 1);
+    }
+
+    int TopFor(size_t slot) const {
+        int top = kTopMargin;
+        for (size_t i = 0; i < slot && i < fToasts.size(); ++i) {
+            if (fToasts[i]->panel) top += fToasts[i]->panel->Height() + kGap;
+        }
+        return top;
+    }
+
+    void Layout() {
+        int top = kTopMargin;
+        for (auto& t : fToasts) {
+            if (!t->panel) continue;
+            t->panel->SetTop(top);
+            top += t->panel->Height() + kGap;
+        }
+    }
+
+    void DisposeToast(Toast& t) {
+        if (t.timer) { g_source_remove(t.timer); t.timer = 0; }
+        if (t.panel) {
+            ToastPanel* p = t.panel.release();
+            p->onClick = nullptr;
+            p->onClosed = nullptr;
+            RunLater([p]() { delete p; });
+        }
+    }
+
+    void Close(uint32_t id, uint32_t reason) {
+        for (auto it = fToasts.begin(); it != fToasts.end(); ++it) {
+            if ((*it)->id != id) continue;
+            DisposeToast(**it);
+            fToasts.erase(it);
+            if (fBus) {
+                g_dbus_connection_emit_signal(fBus, nullptr, "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications", "NotificationClosed", g_variant_new("(uu)", id, reason), nullptr);
+            }
+            Layout();
+            return;
+        }
+    }
+
+    GDBusConnection* fBus = nullptr;
+    guint fRegistration = 0;
+    guint fNameOwner = 0;
+    uint32_t fNextId = 1;
+    std::vector<std::unique_ptr<Toast>> fToasts;
+};
+
+static NotificationServer gNotifications;
+
+// =========================================================================
 // DOCK COLOR PICKER (Linux only)
 // =========================================================================
 // Opened from the settings panel's "Adjust Dock Color" swatch: a
@@ -8529,6 +8987,7 @@ int main(int argc, char* argv[]) {
 
     gVolume.Init();
     gTray.Init();
+    if (gSettings.notificationServer) gNotifications.Init();
     if (!gToplevels.Available()) {
         WarnLog("no window-management protocol available: the taskbar part of the dock is disabled.\n");
         if (gWl.plasmaWindows == nullptr && DesktopIs("KDE")) {
@@ -8553,6 +9012,7 @@ int main(int argc, char* argv[]) {
     gDrawer.reset();
     gConfig.reset();
     gAlerts.clear();
+    gNotifications.Shutdown();
     wl_display_flush(gWl.display);
     curl_global_cleanup();
     return 0;
