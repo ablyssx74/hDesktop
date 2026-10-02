@@ -7844,6 +7844,12 @@ public:
             nullptr, nullptr);
     }
 
+    // Settings toggle: start/stop serving without restarting the dock.
+    void SetEnabled(bool on) {
+        if (on && fNameOwner == 0) Init();
+        else if (!on && fNameOwner != 0) Shutdown();
+    }
+
     void Shutdown() {
         for (auto& n : fToasts) if (n->timer) g_source_remove(n->timer);
         fToasts.clear();
@@ -8645,6 +8651,7 @@ private:
         check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
         check("24-Hour Clock", &gSettings.clock24h);
         check("Check for Updates", &gSettings.checkForUpdates);
+        check("Notifications (hDesktop shows desktop notifications)", &gSettings.notificationServer);
 
         {
             Widget info;
@@ -8744,6 +8751,7 @@ private:
 
     void Apply() {
         SaveConfiguration();
+        gNotifications.SetEnabled(gSettings.notificationServer);
         if (gDock) gDock->SettingsChanged();
     }
 
