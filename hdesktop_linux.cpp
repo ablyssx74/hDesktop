@@ -1879,6 +1879,21 @@ static void OpenUri(const std::string& uri) {
             g_free(guessed);
             g_free(path);
         }
+        // Text and source files: on KDE let kde-open pick the app. GIO only looks at
+        // the exact type (text/x-c++src), where an editor like micro registers
+        // itself first; KDE (and so Dolphin) falls back through text/plain to the
+        // user's real default, Kate.
+        const char* desktop = g_getenv("XDG_CURRENT_DESKTOP");
+        char* kdeOpen = (desktop && strstr(desktop, "KDE") && type.compare(0, 5, "text/") == 0)
+            ? g_find_program_in_path("kde-open") : nullptr;
+        if (kdeOpen) {
+            g_free(kdeOpen);
+            if (info) g_object_unref(info);
+            g_object_unref(file);
+            g_free(scheme);
+            LaunchCommand("kde-open " + ShellQuote(uri));
+            return;
+        }
         handler = g_app_info_get_default_for_type(type.empty() ? "inode/directory" : type.c_str(), FALSE);
         if (info) g_object_unref(info);
         g_object_unref(file);
@@ -2403,7 +2418,10 @@ public:
                 continue;
             }
             bool hovered = (static_cast<int>(i) == fHovered) && it.enabled && !it.header;
-            bool open = fChild && static_cast<int>(i) == fChildIndex;
+            // The row whose submenu is open stays lit -- unless the pointer has moved to
+            // another row, which takes the highlight right away. Waiting for the
+            // submenu delay to close the old one left two rows lit at once.
+            bool open = fChild && static_cast<int>(i) == fChildIndex && (fHovered < 0 || fHovered == fChildIndex);
             if (hovered || open) {
                 cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, 1.0);
                 cairo_rectangle(cr, 1, y, w - 2, rh);
