@@ -130,8 +130,11 @@ bool fShowAdvancedOptions = false;
 // Live window preview thumbnails (taskbar hover). Sizing for the popup
 // window's content area -- see ThumbnailPreviewWindow, which is a small
 // separate BWindow - same pattern as WorkspacePreviewWindow's right-click popup
-const float kThumbnailMaxWidth  = 200.0f;
-const float kThumbnailMaxHeight = 140.0f;
+// Card width in px -- the "Thumbnail Size" slider's value; the height keeps
+// the original 200:140 proportions.
+int32 fThumbnailSize = 200;
+inline float ThumbnailMaxWidth()  { return (float)fThumbnailSize; }
+inline float ThumbnailMaxHeight() { return (float)fThumbnailSize * 0.7f; }
 
 // How often the popup re-captures while open, exposed as an Advanced-only
 // slider for testing the tradeoff yourself: higher feels smoother but means
@@ -219,6 +222,7 @@ enum {
     MSG_THUMBNAILS_TOGGLED = 'thtg',
     MSG_ADVANCED_TOGGLED = 'advt',
     MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
+    MSG_THUMBNAIL_SIZE_SLIDER_CHANGED = 'tsiz',
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_CLOCK_TOGGLED = 'cktg',
     MSG_VOLUME_TOGGLED = 'vltg',
@@ -1678,6 +1682,7 @@ private:
     BCheckBox* fThumbnailsCheckbox;
     BCheckBox* fAdvancedCheckbox;
     BSlider*   fThumbnailFpsSlider;
+    BSlider*   fThumbnailSizeSlider;
     BCheckBox* fWorkspaceSwitcherCheckbox;
     BCheckBox* fClockCheckbox;
     BCheckBox* fVolumeCheckbox;
@@ -1824,6 +1829,22 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             fThumbnailFpsSlider->Hide();
         }
 
+        // Row 7c: Thumbnail Size Slider -- shown whenever the thumbnails
+        // themselves are enabled (no Advanced needed). Same reserved-row and
+        // IsHidden()-guarded Show()/Hide() convention as the FPS slider above.
+        BRect thumbnailSizeSliderRect(35.0f, 342.0f, frame.Width() - 35.0f, 392.0f);
+        BString thumbnailSizeLabel;
+        thumbnailSizeLabel << "Thumbnail Size: " << fThumbnailSize << " px";
+        fThumbnailSizeSlider = new BSlider(thumbnailSizeSliderRect, "thumbnail_size_slider", thumbnailSizeLabel.String(),
+            new BMessage(MSG_THUMBNAIL_SIZE_SLIDER_CHANGED), 120, 360);
+        fThumbnailSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
+        fThumbnailSizeSlider->SetLimitLabels("Small", "Large");
+        fThumbnailSizeSlider->SetValue(fThumbnailSize);
+        AddChild(fThumbnailSizeSlider);
+        if (!fShowWindowThumbnails) {
+            fThumbnailSizeSlider->Hide();
+        }
+
         // Row 8: Dock Location Dropdown
         BPopUpMenu* dockLocationPopup = new BPopUpMenu("Dock Location");
 
@@ -1836,7 +1857,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         dockLocationPopup->AddItem(dockBottomItem);
 
         // Dock Location Dropdown (Label drawn manually in Draw())
-        BRect dockLocationMenuRect(145.0f, 352.0f, frame.Width() - 35.0f, 377.0f);
+        BRect dockLocationMenuRect(145.0f, 412.0f, frame.Width() - 35.0f, 437.0f);
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
@@ -1870,7 +1891,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 394.0f, frame.Width() - 35.0f, 419.0f);
+        BRect effectsMenuRect(145.0f, 454.0f, frame.Width() - 35.0f, 479.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -1904,14 +1925,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 427.0f, frame.Width() - 35.0f, 452.0f);
+        BRect closeEffectsMenuRect(145.0f, 487.0f, frame.Width() - 35.0f, 512.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
 
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 477.0f, frame.Width() - 35.0f, 527.0f);
+        BRect speedSliderRect(35.0f, 537.0f, frame.Width() - 35.0f, 587.0f);
         fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed",
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1921,7 +1942,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 547.0f, frame.Width() - 35.0f, 597.0f);
+        BRect sliderRect(35.0f, 607.0f, frame.Width() - 35.0f, 657.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency",
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1931,7 +1952,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 617.0f, frame.Width() - 35.0f, 667.0f);
+        BRect sizeSliderRect(35.0f, 677.0f, frame.Width() - 35.0f, 727.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size",
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1942,7 +1963,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
         // Icon Zoom Size Slider Row -- peak hover magnification, in percent
         // (100 = no zoom, 180 = the original fixed zoom).
-        BRect zoomSliderRect(35.0f, 687.0f, frame.Width() - 35.0f, 737.0f);
+        BRect zoomSliderRect(35.0f, 747.0f, frame.Width() - 35.0f, 797.0f);
         fIconZoomSlider = new BSlider(zoomSliderRect, "zoom_slider", "Icon Zoom Size",
             new BMessage(MSG_ICON_ZOOM_CHANGED), 100, 250);
         fIconZoomSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -2024,7 +2045,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
 		// 6. BALANCED BACKING CONTAINER
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 752.0f);
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 812.0f);
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -2065,14 +2086,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         if (fShowWindowThumbnails) {
             DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 274.0f));
         }
-        DrawString("Dock Location:", BPoint(35.0f, 369.0f));
+        DrawString("Dock Location:", BPoint(35.0f, 429.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 411.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 444.0f));
+        DrawString("Open App Effects:", BPoint(35.0f, 471.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 504.0f));
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -2157,6 +2178,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fThumbnailsCheckbox->SetTarget(this);
         fAdvancedCheckbox->SetTarget(this);
         fThumbnailFpsSlider->SetTarget(this);
+        fThumbnailSizeSlider->SetTarget(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
         fClockCheckbox->SetTarget(this);
         fVolumeCheckbox->SetTarget(this);
@@ -2241,6 +2263,11 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 } else if (!shouldShowFpsSlider && !fThumbnailFpsSlider->IsHidden()) {
                     fThumbnailFpsSlider->Hide();
                 }
+                if (fShowWindowThumbnails && fThumbnailSizeSlider->IsHidden()) {
+                    fThumbnailSizeSlider->Show();
+                } else if (!fShowWindowThumbnails && !fThumbnailSizeSlider->IsHidden()) {
+                    fThumbnailSizeSlider->Hide();
+                }
                 SaveConfiguration();
                 Invalidate();
                 break;
@@ -2267,6 +2294,15 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 BString thumbnailFpsLabel;
                 thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
                 fThumbnailFpsSlider->SetLabel(thumbnailFpsLabel.String());
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_THUMBNAIL_SIZE_SLIDER_CHANGED: {
+                fThumbnailSize = fThumbnailSizeSlider->Value();
+                BString thumbnailSizeLabel;
+                thumbnailSizeLabel << "Thumbnail Size: " << fThumbnailSize << " px";
+                fThumbnailSizeSlider->SetLabel(thumbnailSizeLabel.String());
                 SaveConfiguration();
                 break;
             }
@@ -2657,9 +2693,9 @@ public:
                 B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 
-        ResizeTo(560.0f, 867.0f);
+        ResizeTo(560.0f, 927.0f);
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 867.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - 927.0f) / 2.0f;
         MoveTo(targetX, targetY);
 
         ConfigView* configView = new ConfigView(Bounds());
@@ -3911,8 +3947,8 @@ public:
           fWindowFrame(windowFrame), fTeam(team),
           fCaptureInFlight(false), fLastCaptureTime(0), fOccluded(initiallyOccluded) {
 
-        float panelW = kThumbnailMaxWidth + 8.0f;
-        float panelH = kThumbnailMaxHeight + 8.0f;
+        float panelW = ThumbnailMaxWidth() + 8.0f;
+        float panelH = ThumbnailMaxHeight() + 8.0f;
 
         BScreen screen(this);
         BRect screenFrame = screen.Frame();
@@ -4236,6 +4272,12 @@ private:
     BPoint fAnchorScreenPoint; // for horizontal centering -- see ResizeAndReposition()
     team_id fTeam;
     float fRowHeight;
+    // How far to lift (bottom dock) or push down (top dock) the whole popup
+    // so it clears the thumbnail popup that sits between it and the icon.
+    // Zero when no thumbnail is showing.
+    float fStackOffset;
+    float fRequestedStackOffset = 0.0f; // render thread's own copy, to skip redundant posts
+    std::vector<TrackedWindowInfo> fLastEntries;
     // Width auto-sizes to the widest title (see ResizeAndReposition()),
     // clamped to this range -- small for a short one-word title, but capped
     // well before it could grow into an unwieldy banner for a long path or
@@ -4246,12 +4288,15 @@ private:
 
 public:
     TitleListPreviewWindow(BPoint anchorScreenPoint, HaikuRect anchorIconRect,
-        team_id team, const std::vector<TrackedWindowInfo>& entries)
+        team_id team, const std::vector<TrackedWindowInfo>& entries, float stackOffset = 0.0f)
         : BWindow(BRect(0, 0, 10, 10), "Window Titles",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                   B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
           fTicker(nullptr), fView(nullptr), fAnchorIconRect(anchorIconRect),
-          fAnchorScreenPoint(anchorScreenPoint), fTeam(team), fRowHeight(0.0f) {
+          fAnchorScreenPoint(anchorScreenPoint), fTeam(team), fRowHeight(0.0f),
+          fStackOffset(stackOffset) {
+
+        fRequestedStackOffset = stackOffset;
 
         BFont font(be_plain_font);
         font.SetSize(11.0f);
@@ -4301,6 +4346,7 @@ public:
     // content, while a long path or sentence-length title stops growing the
     // panel at the cap and lets Draw()'s own TruncateString() take over.
     void ResizeAndReposition(const std::vector<TrackedWindowInfo>& entries) {
+        fLastEntries = entries;
         size_t rowCount = entries.empty() ? 1 : entries.size();
         float panelH = fRowHeight * (float)rowCount + 2.0f; // +2 for the 1px stroke on each edge
 
@@ -4325,15 +4371,26 @@ public:
         // Bottom dock: open upward above the icon. Top dock: open downward below it.
         float targetY;
         if (gDockLocation == kDockLocationTop) {
-            targetY = fAnchorIconRect.bottom + 12.0f;
+            targetY = fAnchorIconRect.bottom + 12.0f + fStackOffset;
         } else {
-            targetY = fAnchorIconRect.top - panelH - 12.0f;
+            targetY = fAnchorIconRect.top - panelH - 12.0f - fStackOffset;
         }
         if (targetY < 10.0f) targetY = 10.0f;
         if (targetY + panelH > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelH;
 
         MoveTo(targetX, targetY);
         ResizeTo(panelW, panelH);
+    }
+
+    // Called from RenderFrame()'s thread every hover pass with where the
+    // thumbnail popup currently is (0 = none). Posts rather than moving the
+    // window directly, same reason as UpdateEntries(); only posts on a change.
+    void SetStackOffset(float offset) {
+        if (offset == fRequestedStackOffset) return;
+        fRequestedStackOffset = offset;
+        BMessage msg('tlso');
+        msg.AddFloat("offset", offset);
+        PostMessage(&msg);
     }
 
     // Thread-safe from any thread -- unlike the constructor's own direct
@@ -4358,6 +4415,14 @@ public:
     }
 
     virtual void MessageReceived(BMessage* message) {
+        if (message->what == 'tlso') {
+            float offset = 0.0f;
+            if (message->FindFloat("offset", &offset) == B_OK && offset != fStackOffset) {
+                fStackOffset = offset;
+                ResizeAndReposition(fLastEntries);
+            }
+            return;
+        }
         if (message->what == 'tlup') {
             void* ptr = nullptr;
             if (message->FindPointer("entries", &ptr) == B_OK && ptr != nullptr) {
@@ -4431,7 +4496,7 @@ public:
 // fragile) and wasn't worth the complexity, so that option was dropped.
 //
 // Before any of the above: if the target window is bigger than the popup's
-// own small display box (kThumbnailMaxWidth x kThumbnailMaxHeight) --
+// own small display box (ThumbnailMaxWidth() x ThumbnailMaxHeight()) --
 // notably a large or near-fullscreen video player -- and direct capture is
 // verified and the whole window is on-screen, this skips the tile grid
 // entirely and reads only the dstWidth x dstHeight pixels the popup will
@@ -4468,7 +4533,7 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                 int32 fullHeight = (int32)windowFrame.Height() + 1;
 
                 // The popup only ever displays a thumbnail inside a small,
-                // fixed box (kThumbnailMaxWidth x kThumbnailMaxHeight) -- see
+                // fixed box (ThumbnailMaxWidth() x ThumbnailMaxHeight()) -- see
                 // ThumbnailPreviewView::Draw()'s own scale-to-fit. Moving a
                 // full window-resolution frame through a BMessage every tick
                 // (this function's own composite -> AddData's copy into the
@@ -4481,8 +4546,8 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                 // fit the box natively; dstWidth/dstHeight is what it'll
                 // actually be drawn at either way, so there's nothing lost
                 // by only ever capturing and sending that many pixels.
-                float scale = std::min(kThumbnailMaxWidth / (float)fullWidth,
-                    kThumbnailMaxHeight / (float)fullHeight);
+                float scale = std::min(ThumbnailMaxWidth() / (float)fullWidth,
+                    ThumbnailMaxHeight() / (float)fullHeight);
                 bool downscale = scale < 1.0f;
                 int32 dstWidth  = downscale ? std::max((int32)1, (int32)(fullWidth * scale + 0.5f)) : fullWidth;
                 int32 dstHeight = downscale ? std::max((int32)1, (int32)(fullHeight * scale + 0.5f)) : fullHeight;
@@ -6685,7 +6750,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 834.0f;
+									    float winHeight = 894.0f;
 
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
@@ -9058,6 +9123,11 @@ void SyncDockWithRunningDeskbarApps() {
 			    // pattern as the thumbnail preview above. See
 			    // TitleListPreviewWindow's own comment for why this replaced
 			    // the old single-line hover text and its 750ms auto-focus.
+			    // The thumbnail popup sits right above the icon; the title list
+			    // stacks above it (below it, for a top dock) so neither covers
+			    // the other. Gap: thumbnail panel height + 8px margin each side.
+			    float titleStackOffset = (gActiveThumbnailPreview != nullptr)
+			        ? (ThumbnailMaxHeight() + 8.0f) + 16.0f : 0.0f;
 			    if (fShowTitleOverlaysHaiku && !fCurrentWindowsList.empty()) {
 			        if (gActiveTitleListPreview == nullptr ||
 			            gActiveTitleListPreview->Team() != activeTaskWin.teamId) {
@@ -9070,13 +9140,14 @@ void SyncDockWithRunningDeskbarApps() {
 
 			            BPoint anchorScreenPoint(listBaseX, listBaseY);
 			            gActiveTitleListPreview = new TitleListPreviewWindow(anchorScreenPoint, iconBounds,
-			                activeTaskWin.teamId, fCurrentWindowsList);
+			                activeTaskWin.teamId, fCurrentWindowsList, titleStackOffset);
 			            gActiveTitleListPreview->Show();
 			        } else {
 			            // Same popup, same app -- just refresh its list in place
 			            // (a window may have opened/closed/moved workspace since
 			            // the last 300ms refresh) instead of tearing it down.
 			            gActiveTitleListPreview->UpdateEntries(fCurrentWindowsList);
+			            gActiveTitleListPreview->SetStackOffset(titleStackOffset);
 			        }
 			    } else if (gActiveTitleListPreview != nullptr) {
 			        if (gActiveTitleListPreview->Lock()) {
@@ -10430,6 +10501,7 @@ void SaveConfiguration() {
             settingsMsg.AddBool("window_thumbnails", fShowWindowThumbnails);
             settingsMsg.AddBool("advanced_options", fShowAdvancedOptions);
             settingsMsg.AddInt32("thumbnail_fps", fThumbnailCaptureFps);
+            settingsMsg.AddInt32("thumbnail_size", fThumbnailSize);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
             settingsMsg.AddBool("show_clock", fShowClock);
             settingsMsg.AddBool("show_volume", fShowVolume);
@@ -10492,6 +10564,9 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("window_thumbnails", &valBool) == B_OK) fShowWindowThumbnails = valBool;
                 if (settingsMsg.FindBool("advanced_options", &valBool) == B_OK) fShowAdvancedOptions = valBool;
                 if (settingsMsg.FindInt32("thumbnail_fps", &valInt32) == B_OK) fThumbnailCaptureFps = valInt32;
+                if (settingsMsg.FindInt32("thumbnail_size", &valInt32) == B_OK) {
+                    fThumbnailSize = std::max<int32>(120, std::min<int32>(360, valInt32));
+                }
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
                 if (settingsMsg.FindBool("show_clock", &valBool) == B_OK) fShowClock = valBool;
                 if (settingsMsg.FindBool("show_volume", &valBool) == B_OK) fShowVolume = valBool;
