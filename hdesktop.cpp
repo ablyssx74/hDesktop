@@ -3856,6 +3856,8 @@ class ThumbnailPreviewView : public BView {
 private:
     BBitmap* fBitmap = nullptr;
     bool fOccluded = false;
+    int32 fTargetToken = -1; // the previewed window's app_server token (-1: not clickable)
+    bool fHovered = false;
 
 public:
     ThumbnailPreviewView(BRect frame)
@@ -3865,6 +3867,25 @@ public:
 
     virtual ~ThumbnailPreviewView() {
         delete fBitmap;
+    }
+
+    void SetTargetToken(int32 token) { fTargetToken = token; }
+
+    // Clicking the preview raises and focuses the window it shows -- same
+    // do_window_action(B_BRING_TO_FRONT) call the title list uses -- and
+    // closes the popup. The outline below tells the user it's clickable.
+    virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) {
+        bool hovered = (transit != B_EXITED_VIEW) && fTargetToken >= 0;
+        if (hovered != fHovered) {
+            fHovered = hovered;
+            Invalidate();
+        }
+    }
+
+    virtual void MouseDown(BPoint point) {
+        if (fTargetToken < 0) return;
+        do_window_action(fTargetToken, B_BRING_TO_FRONT, BRect(), false);
+        if (Window()) Window()->PostMessage(B_QUIT_REQUESTED);
     }
 
     // Always called on this view's own window thread (from MessageReceived).
@@ -3940,8 +3961,9 @@ public:
             DrawString(label, textPos);
         }
 
-        SetHighColor(rgb_color{48, 50, 58, 255});
+        SetHighColor(fHovered ? rgb_color{70, 110, 200, 255} : rgb_color{48, 50, 58, 255});
         StrokeRect(bounds);
+        if (fHovered) StrokeRect(bounds.InsetByCopy(1.0f, 1.0f));
     }
 };
 
@@ -3963,7 +3985,7 @@ private:
 
 public:
     ThumbnailPreviewWindow(BPoint anchorScreenPoint, HaikuRect anchorIconRect,
-        team_id team, BRect windowFrame, bool initiallyOccluded)
+        team_id team, BRect windowFrame, bool initiallyOccluded, int32 serverToken = -1)
         : BWindow(BRect(0, 0, 10, 10), "Window Preview",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                   B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
@@ -3995,6 +4017,7 @@ public:
         ResizeTo(panelW, panelH);
 
         fView = new ThumbnailPreviewView(Bounds());
+        fView->SetTargetToken(serverToken);
         AddChild(fView);
 
         // Seed from the last frame this team's own popup actually captured,
@@ -8792,6 +8815,7 @@ void SyncDockWithRunningDeskbarApps() {
 		    // windows on the current workspace, same as the counters above.
 		    BRect activeTaskWinThumbnailFrame;
 		    bool haveActiveTaskWinThumbnailFrame = false;
+		    int32 activeTaskWinThumbnailToken = -1; // that window's server token -- a click on the preview raises it
 		    // Whether some other app's window is drawn on top of the chosen
 		    // window, at least partially -- if so, a capture would show that
 		    // other window's content in the overlap, not this app's own (see
@@ -8817,6 +8841,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                                activeTaskWinThumbnailFrame.Set(info->window_left, info->window_top,
 		                                    info->window_right, info->window_bottom);
 		                                haveActiveTaskWinThumbnailFrame = true;
+		                                activeTaskWinThumbnailToken = info->server_token;
 		                                activeTaskWinThumbnailOccluded = IsThumbnailCandidateOccluded(
 		                                    windowTokens, i, activeTaskWinThumbnailFrame, currentWorkspace, ownTeam);
 		                            }
@@ -8833,6 +8858,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                                    activeTaskWinThumbnailFrame.Set(info->window_left, info->window_top,
 		                                        info->window_right, info->window_bottom);
 		                                    haveActiveTaskWinThumbnailFrame = true;
+		                                    activeTaskWinThumbnailToken = info->server_token;
 		                                    activeTaskWinThumbnailOccluded = IsThumbnailCandidateOccluded(
 		                                        windowTokens, i, activeTaskWinThumbnailFrame, currentWorkspace, ownTeam);
 		                                }
@@ -9124,7 +9150,8 @@ void SyncDockWithRunningDeskbarApps() {
 			                (iconBounds.left + iconBounds.right) / 2.0f,
 			                (iconBounds.top + iconBounds.bottom) / 2.0f);
 			            gActiveThumbnailPreview = new ThumbnailPreviewWindow(anchorScreenPoint, iconBounds,
-			                activeTaskWin.teamId, activeTaskWinThumbnailFrame, activeTaskWinThumbnailOccluded);
+			                activeTaskWin.teamId, activeTaskWinThumbnailFrame, activeTaskWinThumbnailOccluded,
+			                activeTaskWinThumbnailToken);
 			            gActiveThumbnailPreview->Show();
 			        } else {
 			            // Same popup, same app -- just tell it whether the target
