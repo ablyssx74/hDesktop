@@ -190,6 +190,7 @@ struct Settings {
     float  iconZoom = 1.8f;           // peak hover magnification (1.0 = none); 1.8 was the fixed value
     float  dockAlpha = 0.32f;
     int    dockColor[3] = {216, 216, 216}; // backplate RGB; Haiku's default panel grey
+    int    accentColor[3] = {70, 110, 200}; // selector / highlight color (menus, sliders, checkboxes...)
     int    effectDurationMs = 750;
     int    previewWidth = 180;        // window preview card width (logical px); height follows 180:110
     int    openEffect = kEffectSpin;
@@ -251,6 +252,9 @@ static void SaveConfiguration() {
     snprintf(colorHex, sizeof(colorHex), "#%02x%02x%02x", gSettings.dockColor[0], gSettings.dockColor[1],
         gSettings.dockColor[2]);
     g_key_file_set_string(kf, g, "dock_color", colorHex);
+    snprintf(colorHex, sizeof(colorHex), "#%02x%02x%02x", gSettings.accentColor[0], gSettings.accentColor[1],
+        gSettings.accentColor[2]);
+    g_key_file_set_string(kf, g, "accent_color", colorHex);
     g_key_file_set_integer(kf, g, "effect_duration", gSettings.effectDurationMs);
     g_key_file_set_integer(kf, g, "preview_width", gSettings.previewWidth);
     g_key_file_set_string(kf, g, "open_effect", kEffectNames[gSettings.openEffect]);
@@ -333,6 +337,12 @@ static void LoadConfiguration() {
         gSettings.dockColor[0] = static_cast<int>(r);
         gSettings.dockColor[1] = static_cast<int>(gr);
         gSettings.dockColor[2] = static_cast<int>(b);
+    }
+    getString("accent_color", colorHex);
+    if (colorHex.size() == 7 && sscanf(colorHex.c_str(), "#%02x%02x%02x", &r, &gr, &b) == 3) {
+        gSettings.accentColor[0] = static_cast<int>(r);
+        gSettings.accentColor[1] = static_cast<int>(gr);
+        gSettings.accentColor[2] = static_cast<int>(b);
     }
     getInt("effect_duration", gSettings.effectDurationMs);
     getInt("preview_width", gSettings.previewWidth);
@@ -475,6 +485,30 @@ static bool DesktopIs(const char* name) {
 struct RGBA {
     double r = 0, g = 0, b = 0, a = 1;
 };
+
+// The user's accent color (Settings > Selector Color) and the shades the bevel,
+// hover rings and readable text are worked out from it.
+static RGBA AccentColor(double alpha = 1.0) {
+    return RGBA{gSettings.accentColor[0] / 255.0, gSettings.accentColor[1] / 255.0, gSettings.accentColor[2] / 255.0,
+        alpha};
+}
+static RGBA AccentLight() {   // toward white
+    RGBA c = AccentColor();
+    return RGBA{c.r + (1 - c.r) * 0.35, c.g + (1 - c.g) * 0.35, c.b + (1 - c.b) * 0.35, 1};
+}
+static RGBA AccentDark() {    // toward black
+    RGBA c = AccentColor();
+    return RGBA{c.r * 0.62, c.g * 0.62, c.b * 0.62, 1};
+}
+static RGBA AccentTextColor() {   // white on dark accents, near-black on light ones
+    RGBA c = AccentColor();
+    double lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    return lum > 0.62 ? RGBA{20 / 255.0, 22 / 255.0, 28 / 255.0, 1} : RGBA{1, 1, 1, 1};
+}
+static void SetAccent(cairo_t* cr, double alpha = 1.0) {
+    RGBA c = AccentColor(alpha);
+    cairo_set_source_rgba(cr, c.r, c.g, c.b, c.a);
+}
 
 static PangoLayout* MakeLayout(cairo_t* cr, const std::string& text, double pixelSize, bool bold) {
     PangoLayout* layout = pango_cairo_create_layout(cr);
@@ -2149,6 +2183,9 @@ public:
     xdg_surface* xdgSurface = nullptr;
     xdg_popup* popup = nullptr;
     std::function<void()> onDismissed;
+    // Where the compositor put this popup, relative to its parent (from xdg_popup.configure).
+    int popupX = 0, popupY = 0;
+    std::function<void()> onPositioned;
 
     // parentLayer: attach to a layer surface. parentXdg: attach to another popup.
     bool CreatePopup(zwlr_layer_surface_v1* parentLayer, xdg_surface* parentXdg,
@@ -2217,10 +2254,14 @@ const xdg_surface_listener PopupSurface::kXdgSurfaceListener = {
 };
 
 const xdg_popup_listener PopupSurface::kPopupListener = {
-    .configure = [](void* data, xdg_popup*, int32_t, int32_t, int32_t w, int32_t h) {
+    .configure = [](void* data, xdg_popup*, int32_t x, int32_t y, int32_t w, int32_t h) {
         auto* self = static_cast<PopupSurface*>(data);
+        bool moved = self->popupX != x || self->popupY != y;
+        self->popupX = x;
+        self->popupY = y;
         if (w > 0) self->width = w;
         if (h > 0) self->height = h;
+        if (moved && self->onPositioned) self->onPositioned();
     },
     .popup_done = [](void* data, xdg_popup*) {
         auto* self = static_cast<PopupSurface*>(data);
@@ -2393,11 +2434,23 @@ public:
         cairo_set_line_width(cr, 1.0);
         cairo_stroke(cr);
 
+        ClampScroll(); // the compositor may have resized us
+        {
+            // The selector goes under the text, and reaches the border column where
+            // menus join, so it gets the full outline as its clip, not the inset one.
+            cairo_save(cr);
+            RoundedRectPath(cr, 0, 0, w, h, 6.0);
+            cairo_clip(cr);
+            cairo_rectangle(cr, 0, ViewTop(), w, ViewBottom() - ViewTop());
+            cairo_clip(cr);
+            DrawHighlight(cr);
+            cairo_restore(cr);
+        }
+
         cairo_save(cr);
         RoundedRectPath(cr, 1, 1, w - 2, h - 2, 5.5);
         cairo_clip(cr);
 
-        ClampScroll(); // the compositor may have resized us
         if (Scrollable()) DrawScrollArrows(cr);
         cairo_rectangle(cr, 0, ViewTop(), w, ViewBottom() - ViewTop());
         cairo_clip(cr);
@@ -2422,14 +2475,9 @@ public:
             // another row, which takes the highlight right away. Waiting for the
             // submenu delay to close the old one left two rows lit at once.
             bool open = fChild && static_cast<int>(i) == fChildIndex && (fHovered < 0 || fHovered == fChildIndex);
-            if (hovered || open) {
-                cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, 1.0);
-                cairo_rectangle(cr, 1, y, w - 2, rh);
-                cairo_fill(cr);
-            }
             RGBA textColor = it.header ? RGBA{130 / 255.0, 145 / 255.0, 180 / 255.0, 0.9}
                 : !it.enabled ? RGBA{0.5, 0.5, 0.55, 1.0}
-                : (hovered || open) ? RGBA{1, 1, 1, 1} : RGBA{220 / 255.0, 220 / 255.0, 225 / 255.0, 1};
+                : (hovered || open) ? AccentTextColor() : RGBA{220 / 255.0, 220 / 255.0, 225 / 255.0, 1};
 
             double textH = 0;
             MeasureText("Ag", kFontSize, it.header, nullptr, &textH);
@@ -2760,7 +2808,7 @@ private:
         const double w = width, h = height;
         auto arrow = [&](double cy, bool up, bool active, bool hot) {
             if (hot && active) {
-                cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, 0.35);
+                SetAccent(cr, 0.35);
                 cairo_rectangle(cr, 1, up ? 1 : h - kArrowH, w - 2, kArrowH - 1);
                 cairo_fill(cr);
             }
@@ -2791,6 +2839,140 @@ private:
             top += rh;
         }
         return -1;
+    }
+
+    // Row's top edge in surface coordinates, scrolling included but not clamped.
+    double RowTopRaw(int row) const {
+        double top = ViewTop() + kPadY - fScroll;
+        for (int i = 0; i < row && i < static_cast<int>(fItems.size()); ++i) top += RowHeight(fItems[i]);
+        return top;
+    }
+
+    // Rounded rectangle with a separate radius per corner (0 = square).
+    static void CornerRectPath(cairo_t* cr, double x, double y, double w, double h,
+        double tl, double tr, double br, double bl) {
+        cairo_new_sub_path(cr);
+        cairo_arc(cr, x + w - tr, y + tr, tr, -M_PI / 2, 0);
+        cairo_arc(cr, x + w - br, y + h - br, br, 0, M_PI / 2);
+        cairo_arc(cr, x + bl, y + h - bl, bl, M_PI / 2, M_PI);
+        cairo_arc(cr, x + tl, y + tl, tl, M_PI, 3 * M_PI / 2);
+        cairo_close_path(cr);
+    }
+
+    // The blue selector: rounded, with a light top edge and a dark bottom edge
+    // (a bevel), and the "snake trail" -- the highlight runs unbroken from the
+    // root menu along the path of open submenus. Menus abut, so the row that
+    // opened a submenu runs flush to the shared edge, the submenu's row meets it
+    // flush, and the submenu adds a bar down that edge to wherever its own
+    // highlighted row sits (it doesn't always land level with the row that
+    // opened it). All the pieces are filled as one union, so the bevel follows
+    // the whole outline, bends included.
+    void DrawHighlight(cairo_t* cr) {
+        struct Piece { double x, y, w, h, tl, tr, br, bl; };
+        // Concave fillet: fills the corner where the elbow bar meets a row (empty
+        // space runs toward (dx, dy) from the corner point).
+        struct Fillet { double x, y; int dx, dy; };
+        std::vector<Piece> pieces;
+        std::vector<Fillet> fillets;
+        const double w = width;
+        const double kR = 4.0;     // corner radius of a lone selector row
+
+        const bool parentLink = fParent && fParent->fChild.get() == this && fParent->fChildIndex >= 0 &&
+            fParent->fChildIndex < static_cast<int>(fParent->fItems.size()) &&
+            (fParent->fHovered < 0 || fParent->fHovered == fParent->fChildIndex);
+        const bool parentOnLeft = popupX >= 0;
+        const int own = fChild ? fChildIndex : fHovered;   // my row on the trail
+
+        // The parent's row, in my coordinates. Where the trail runs flush to the
+        // shared edge it is only joined to the parent's highlight within this range;
+        // past it that edge is an outer edge, so those corners get rounded too.
+        double pTop = 0, pBottom = 0;
+        if (parentLink) {
+            pTop = fParent->RowTopRaw(fParent->fChildIndex) - popupY + 1;
+            pBottom = pTop - 1 + RowHeight(fParent->fItems[fParent->fChildIndex]) - 1;
+        }
+        auto cornerR = [&](bool flush, bool exposed) { return (!flush || exposed) ? kR : 0.0; };
+
+        double y = ViewTop() + kPadY - fScroll;
+        double ownTop = 0, ownBottom = 0;
+        for (size_t i = 0; i < fItems.size(); ++i) {
+            const MenuItem& it = fItems[i];
+            const double rh = RowHeight(it);
+            if (!it.separator) {
+                bool hovered = (static_cast<int>(i) == fHovered) && it.enabled && !it.header;
+                bool open = fChild && static_cast<int>(i) == fChildIndex && (fHovered < 0 || fHovered == fChildIndex);
+                bool parentRow = parentLink && static_cast<int>(i) == own;
+                if (parentRow) { ownTop = y + 1; ownBottom = y + rh - 1; }
+                if ((hovered || open || parentRow) && y + rh > ViewTop() && y < ViewBottom()) {
+                    bool childOnRight = open && fChild->popupX >= 0;
+                    bool leftFlush = (open && !childOnRight) || (parentRow && parentOnLeft);
+                    bool rightFlush = childOnRight || (parentRow && !parentOnLeft);
+                    double x0 = leftFlush ? 0 : 3, x1 = rightFlush ? w : w - 3;
+                    bool expTop = parentRow && y + 1 < pTop - 0.5, expBottom = parentRow && y + rh - 1 > pBottom + 0.5;
+                    pieces.push_back({x0, y + 1, x1 - x0, rh - 2,
+                        cornerR(leftFlush, parentRow && parentOnLeft && expTop),
+                        cornerR(rightFlush, parentRow && !parentOnLeft && expTop),
+                        cornerR(rightFlush, parentRow && !parentOnLeft && expBottom),
+                        cornerR(leftFlush, parentRow && parentOnLeft && expBottom)});
+                }
+            }
+            y += rh;
+        }
+        if (parentLink) {
+            // Bridge my parent's row to mine.
+            double top = pTop, bottom = pBottom;
+            if (own >= 0 && ownBottom > ownTop) { top = std::min(top, ownTop); bottom = std::max(bottom, ownBottom); }
+            top = std::max(top, 0.0);
+            bottom = std::min(bottom, static_cast<double>(height));
+            if (bottom > top) {
+                const double barW = 7, r = 3;
+                const double rt = top < pTop - 0.5 ? kR : 0, rb = bottom > pBottom + 0.5 ? kR : 0;
+                if (parentOnLeft) pieces.push_back({0, top, barW, bottom - top, rt, r, r, rb});
+                else pieces.push_back({w - barW, top, barW, bottom - top, r, rt, rb, r});
+                // Round the inside corners where the bar meets my row.
+                if (own >= 0 && ownBottom > ownTop) {
+                    double ex = parentOnLeft ? barW : w - barW;
+                    int dx = parentOnLeft ? 1 : -1;
+                    if (top < ownTop - 0.5) fillets.push_back({ex, ownTop, dx, -1});
+                    if (bottom > ownBottom + 0.5) fillets.push_back({ex, ownBottom, dx, 1});
+                }
+            }
+        }
+        if (pieces.empty()) return;
+        const double kFillet = 3.0;
+
+        const RGBA base = AccentColor(), light = AccentLight(), dark = AccentDark();
+        auto addUnion = [&](double dy) {
+            for (const Piece& p : pieces) CornerRectPath(cr, p.x, p.y + dy, p.w, p.h, p.tl, p.tr, p.br, p.bl);
+            for (const Fillet& f : fillets) {
+                // Corner point, along one edge, a quarter arc around the circle centre, back along the other.
+                double px = f.x, py = f.y + dy, r = kFillet;
+                double cx = px + f.dx * r, cy = py + f.dy * r;
+                cairo_new_sub_path(cr);
+                cairo_move_to(cr, px, py);
+                cairo_line_to(cr, cx, py);
+                double a1 = -f.dy * M_PI / 2;
+                if (f.dx * f.dy > 0) cairo_arc_negative(cr, cx, cy, r, a1, f.dx > 0 ? -M_PI : 0);
+                else cairo_arc(cr, cx, cy, r, a1, f.dx > 0 ? M_PI : 0);
+                cairo_close_path(cr);
+            }
+        };
+        // Union, then the same union nudged down and up a pixel: what the
+        // nudges miss at the top is the light edge, at the bottom the dark one.
+        cairo_save(cr);
+        addUnion(0);
+        cairo_clip(cr);
+        cairo_set_source_rgba(cr, light.r, light.g, light.b, 1);
+        cairo_paint(cr);
+        addUnion(1);
+        cairo_clip(cr);
+        cairo_set_source_rgba(cr, dark.r, dark.g, dark.b, 1);
+        cairo_paint(cr);
+        addUnion(-1);
+        cairo_clip(cr);
+        cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
+        cairo_paint(cr);
+        cairo_restore(cr);
     }
 
     // Row's top edge in surface coordinates (after scrolling).
@@ -2837,6 +3019,7 @@ private:
         uint32_t serial = fGrabbing ? gWl.lastInputSerial : 0;
         if (!raw->CreatePopup(nullptr, xdgSurface, a, raw->MeasuredWidth(), raw->MeasuredHeight(), serial)) return;
         raw->onDismissed = [this]() { CloseChild(); };
+        raw->onPositioned = [this]() { Redraw(); };   // the trail between us depends on where it landed
         if (fItems[row].liveMs > 0) raw->SetLiveSource(fItems[row].submenu, fItems[row].liveMs);
         fChild = std::move(child);
         fChildIndex = row;
@@ -7605,7 +7788,7 @@ public:
         RoundedRectPath(cr, sr.left, sr.top, sr.Width(), sr.Height(), 4);
         cairo_set_source_rgba(cr, 35 / 255.0, 36 / 255.0, 42 / 255.0, 1);
         cairo_fill_preserve(cr);
-        cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, fSearch.empty() ? 0.35 : 0.9);
+        SetAccent(cr, fSearch.empty() ? 0.35 : 0.9);
         cairo_stroke(cr);
         std::string shown = fSearch.empty() ? "Type to search…" : fSearch;
         RGBA sc = fSearch.empty() ? RGBA{0.5, 0.5, 0.55, 1} : RGBA{0.94, 0.94, 0.96, 1};
@@ -8019,7 +8202,7 @@ public:
             bool hovered = r.Contains(fMouseX, fMouseY);
             bool isDefault = static_cast<int>(i) == fDefault;
             RoundedRectPath(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1, 4);
-            if (isDefault) cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, hovered ? 1.0 : 0.85);
+            if (isDefault) SetAccent(cr, hovered ? 1.0 : 0.85);
             else cairo_set_source_rgba(cr, hovered ? 55 / 255.0 : 40 / 255.0, hovered ? 57 / 255.0 : 42 / 255.0,
                 hovered ? 66 / 255.0 : 50 / 255.0, 1);
             cairo_fill(cr);
@@ -8580,8 +8763,12 @@ static void RedrawConfigPanel();
 
 class ColorPanel : public PopupSurface {
 public:
-    ColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight) {
-        for (int i = 0; i < 3; ++i) fOriginal[i] = gSettings.dockColor[i];
+    // Edits the RGB triple at `target` live; `title` heads the panel and `defaults`
+    // is what the Default button restores.
+    ColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight, int* target, const char* title,
+        const int* defaults)
+        : fTarget(target), fTitle(title) {
+        for (int i = 0; i < 3; ++i) { fDefault[i] = defaults[i]; fOriginal[i] = fTarget[i]; }
         RgbToHsv(fOriginal, fH, fS, fV);
         PopupAnchor a; // centered over the settings panel
         a.x = 0;
@@ -8605,7 +8792,7 @@ public:
         cairo_set_source_rgba(cr, 70 / 255.0, 72 / 255.0, 84 / 255.0, 1);
         cairo_set_line_width(cr, 1);
         cairo_stroke(cr);
-        DrawText(cr, "Dock Color", 24, 18, 14, true, RGBA{230 / 255.0, 232 / 255.0, 240 / 255.0, 1});
+        DrawText(cr, fTitle, 24, 18, 14, true, RGBA{230 / 255.0, 232 / 255.0, 240 / 255.0, 1});
 
         // Saturation (left to right) / brightness (bottom to top) square
         int hue[3];
@@ -8659,11 +8846,11 @@ public:
 
         // New / current preview and hex value
         DrawText(cr, "New", kNew.left, kNew.top - 18, 11, false, dim);
-        FillSwatch(cr, kNew, gSettings.dockColor);
+        FillSwatch(cr, kNew, fTarget);
         DrawText(cr, "Current", kOld.left, kOld.top - 18, 11, false, dim);
         FillSwatch(cr, kOld, fOriginal);
         char hex[8];
-        snprintf(hex, sizeof(hex), "#%02X%02X%02X", gSettings.dockColor[0], gSettings.dockColor[1], gSettings.dockColor[2]);
+        snprintf(hex, sizeof(hex), "#%02X%02X%02X", fTarget[0], fTarget[1], fTarget[2]);
         DrawText(cr, hex, kNew.left, kOld.bottom + 8, 12, true, text);
 
         // Presets
@@ -8672,10 +8859,10 @@ public:
             HRect r = PresetRect(i);
             FillSwatch(cr, r, kPresets[i]);
             bool current = true;
-            for (int k = 0; k < 3; ++k) current = current && kPresets[i][k] == gSettings.dockColor[k];
+            for (int k = 0; k < 3; ++k) current = current && kPresets[i][k] == fTarget[k];
             if (current || r.Contains(fMouseX, fMouseY)) {
                 RoundedRectPath(cr, r.left - 2.5, r.top - 2.5, r.Width() + 5, r.Height() + 5, 4);
-                cairo_set_source_rgba(cr, 90 / 255.0, 140 / 255.0, 240 / 255.0, current ? 1.0 : 0.6);
+                { RGBA ring = AccentLight(); cairo_set_source_rgba(cr, ring.r, ring.g, ring.b, current ? 1.0 : 0.6); }
                 cairo_set_line_width(cr, 2);
                 cairo_stroke(cr);
                 cairo_set_line_width(cr, 1);
@@ -8687,7 +8874,7 @@ public:
             bool hovered = r.Contains(fMouseX, fMouseY);
             bool primary = (i == kApply);
             RoundedRectPath(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1, 4);
-            if (primary) cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, hovered ? 1.0 : 0.85);
+            if (primary) SetAccent(cr, hovered ? 1.0 : 0.85);
             else cairo_set_source_rgba(cr, hovered ? 55 / 255.0 : 40 / 255.0, hovered ? 57 / 255.0 : 42 / 255.0,
                 hovered ? 66 / 255.0 : 50 / 255.0, 1);
             cairo_fill(cr);
@@ -8695,7 +8882,7 @@ public:
             double tw, th;
             MeasureText(kLabels[i], 12, primary, &tw, &th);
             DrawText(cr, kLabels[i], r.left + (r.Width() - tw) / 2, r.top + (r.Height() - th) / 2, 12, primary,
-                RGBA{1, 1, 1, 1});
+                primary ? AccentTextColor() : RGBA{1, 1, 1, 1});
         }
     }
 
@@ -8731,7 +8918,7 @@ public:
             fDrag = kDragNone;
             return;
         }
-        if (ButtonRect(kDefault).Contains(x, y)) SetRgb(kPresets[0]);
+        if (ButtonRect(kDefault).Contains(x, y)) SetRgb(fDefault);
         else if (ButtonRect(kCancel).Contains(x, y)) Cancel();
         else if (ButtonRect(kApply).Contains(x, y)) Apply();
     }
@@ -8748,7 +8935,7 @@ public:
 
     void Cancel() {
         if (fFinished) return;
-        for (int i = 0; i < 3; ++i) gSettings.dockColor[i] = fOriginal[i];
+        for (int i = 0; i < 3; ++i) fTarget[i] = fOriginal[i];
         Changed();
         Finish();
     }
@@ -8808,12 +8995,12 @@ private:
         } else if (fDrag == kDragHue) {
             fH = std::clamp((y - kHue.top) / kHue.Height(), 0.0, 1.0);
         }
-        HsvToRgb(fH, fS, fV, gSettings.dockColor);
+        HsvToRgb(fH, fS, fV, fTarget);
         Changed();
     }
 
     void SetRgb(const int* c) {
-        for (int i = 0; i < 3; ++i) gSettings.dockColor[i] = c[i];
+        for (int i = 0; i < 3; ++i) fTarget[i] = c[i];
         RgbToHsv(c, fH, fS, fV);
         Changed();
     }
@@ -8859,6 +9046,9 @@ private:
         else h = ((r - g) / d + 4.0) / 6.0;
     }
 
+    int* fTarget;
+    std::string fTitle;
+    int fDefault[3] = {216, 216, 216};
     int fOriginal[3] = {216, 216, 216};
     double fH = 0, fS = 0, fV = 0;
     int fDrag = kDragNone;
@@ -8868,9 +9058,10 @@ private:
 
 static std::unique_ptr<ColorPanel> gColorPanel;
 
-static void ShowColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight) {
+static void ShowColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight, int* target,
+    const char* title, const int* defaults) {
     if (gColorPanel || parent == nullptr) return;
-    gColorPanel = std::make_unique<ColorPanel>(parent, parentWidth, parentHeight);
+    gColorPanel = std::make_unique<ColorPanel>(parent, parentWidth, parentHeight, target, title, defaults);
     gColorPanel->onDone = []() {
         if (!gColorPanel) return;
         ColorPanel* raw = gColorPanel.release();
@@ -8930,8 +9121,8 @@ public:
                     bool on = w.getBool();
                     HRect box{w.rect.left, w.rect.top + 3, w.rect.left + 14, w.rect.top + 17};
                     RoundedRectPath(cr, box.left + 0.5, box.top + 0.5, 13, 13, 2);
-                    cairo_set_source_rgba(cr, on ? 70 / 255.0 : 35 / 255.0, on ? 110 / 255.0 : 36 / 255.0,
-                        on ? 200 / 255.0 : 42 / 255.0, 1);
+                    if (on) SetAccent(cr);
+                    else cairo_set_source_rgba(cr, 35 / 255.0, 36 / 255.0, 42 / 255.0, 1);
                     cairo_fill_preserve(cr);
                     cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, hovered ? 1 : 0.7);
                     cairo_stroke(cr);
@@ -8949,7 +9140,7 @@ public:
                         bool hh = static_cast<int>(i) == fHelpHover;
                         double cx = (w.helpRect.left + w.helpRect.right) / 2, cy = (w.helpRect.top + w.helpRect.bottom) / 2;
                         cairo_arc(cr, cx, cy, 7, 0, 2 * M_PI);
-                        cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, hh ? 0.45 : 0.15);
+                        SetAccent(cr, hh ? 0.45 : 0.15);
                         cairo_fill_preserve(cr);
                         cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, hh ? 1 : 0.7);
                         cairo_stroke(cr);
@@ -8967,10 +9158,9 @@ public:
                     DrawText(cr, w.label, w.rect.left, w.rect.top, 12, true, text);
                     HRect sw{w.rect.right - 40, w.rect.top, w.rect.right, w.rect.bottom};
                     RoundedRectPath(cr, sw.left + 0.5, sw.top + 0.5, sw.Width() - 1, sw.Height() - 1, 3);
-                    cairo_set_source_rgb(cr, gSettings.dockColor[0] / 255.0, gSettings.dockColor[1] / 255.0,
-                        gSettings.dockColor[2] / 255.0);
+                    cairo_set_source_rgb(cr, w.color[0] / 255.0, w.color[1] / 255.0, w.color[2] / 255.0);
                     cairo_fill_preserve(cr);
-                    if (hovered) cairo_set_source_rgba(cr, 90 / 255.0, 140 / 255.0, 240 / 255.0, 1);
+                    if (hovered) { RGBA ring = AccentLight(); cairo_set_source_rgba(cr, ring.r, ring.g, ring.b, 1); }
                     else cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, 1);
                     cairo_set_line_width(cr, hovered ? 2 : 1);
                     cairo_stroke(cr);
@@ -8986,7 +9176,7 @@ public:
                         bool sel = (s == current);
                         bool hov = hovered && r.Contains(fMouseX, fMouseY);
                         cairo_rectangle(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1);
-                        if (sel) cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, 1);
+                        if (sel) SetAccent(cr);
                         else cairo_set_source_rgba(cr, hov ? 50 / 255.0 : 35 / 255.0, hov ? 52 / 255.0 : 36 / 255.0,
                             hov ? 62 / 255.0 : 42 / 255.0, 1);
                         cairo_fill_preserve(cr);
@@ -9009,7 +9199,7 @@ public:
                     cairo_set_source_rgba(cr, 45 / 255.0, 46 / 255.0, 54 / 255.0, 1);
                     cairo_fill(cr);
                     RoundedRectPath(cr, w.rect.left, trackY - 3, w.rect.Width() * frac, 6, 3);
-                    cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, 1);
+                    SetAccent(cr);
                     cairo_fill(cr);
                     cairo_arc(cr, w.rect.left + w.rect.Width() * frac, trackY, hovered || fDragging == static_cast<int>(i) ? 8 : 7, 0, 2 * M_PI);
                     cairo_set_source_rgb(cr, 0.92, 0.93, 0.96);
@@ -9126,6 +9316,9 @@ private:
         std::string minLabel, maxLabel;
         std::function<double()> getDouble;
         std::function<void(double)> setDouble;
+        int* color = nullptr; // kColor: the RGB triple the swatch shows and edits
+        std::string pickerTitle;
+        const int* colorDefault = nullptr;
         std::string help;   // hover text for the [?] badge after a checkbox label
         HRect helpRect;
     };
@@ -9241,16 +9434,25 @@ private:
         segmented("Close App Effects:", effects, &gSettings.closeEffect);
 
         {
-            // "Adjust Dock Color: [swatch]" -- the swatch opens the color picker
-            Widget w;
-            w.type = Widget::kColor;
-            w.label = "Adjust Dock Color:";
-            double tw;
-            MeasureText(w.label, 12, true, &tw, nullptr);
-            w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
-            w.onClick = [this]() { ShowColorPanel(layerSurface, width, height); };
-            fWidgets.push_back(w);
-            y += 30;
+            // "Adjust Dock Color: [swatch]" and "Selector Color: [swatch]" -- a swatch opens the color picker
+            static const int kDockDefault[3] = {216, 216, 216};
+            static const int kAccentDefault[3] = {70, 110, 200};
+            auto colorRow = [&](const char* label, const char* title, int* color, const int* defaults) {
+                Widget w;
+                w.type = Widget::kColor;
+                w.label = label;
+                w.color = color;
+                double tw;
+                MeasureText(w.label, 12, true, &tw, nullptr);
+                w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
+                w.onClick = [this, color, title, defaults]() {
+                    ShowColorPanel(layerSurface, width, height, color, title, defaults);
+                };
+                fWidgets.push_back(w);
+                y += 30;
+            };
+            colorRow("Adjust Dock Color:", "Dock Color", gSettings.dockColor, kDockDefault);
+            colorRow("Selector Color:", "Selector Color", gSettings.accentColor, kAccentDefault);
         }
 
         slider("Effect Speed (ms)", 200, 1500, "Fast", "Slow",
