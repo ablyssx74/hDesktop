@@ -6262,6 +6262,14 @@ public:
 
         gToplevels.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); };
         gWorkspaces.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); };
+        // The Tracker icon and the app list are built by SyncApps(), which normally runs
+        // when the first window or workspace event arrives. On a desktop with no windows
+        // and no workspace information (Wayfire without its IPC plugins, say) nothing
+        // would ever trigger it, so the dock sat without its Tracker icon until the first
+        // window opened. Run it once shortly after startup if no event has.
+        RunAfter(500, [this]() {
+            if (!fInitialSyncDone) { SyncApps(); RequestRender(); }
+        });
         gVolume.onChanged = [this]() { RequestRender(); };
         gTray.onChanged = [this]() { RequestRender(); };
         gMenus.onStateChanged = [this]() { RequestRender(); };
