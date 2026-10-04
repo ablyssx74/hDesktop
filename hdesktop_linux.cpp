@@ -86,6 +86,9 @@
 #include <curl/curl.h>
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
+#include <pipewire/pipewire.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/pod/builder.h>
 
 #include "xdg-shell-client-protocol.h"
 // The generated header names a parameter `namespace`, a C++ keyword.
@@ -99,6 +102,7 @@
 #include "xdg-activation-v1-client-protocol.h"
 #include "fractional-scale-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
+#include "zkde-screencast-unstable-v1-client-protocol.h"
 
 #define APP_LOCAL_VERSION "v1.0.54"
 
@@ -171,6 +175,7 @@ struct Settings {
     bool   autoHide = false;
     bool   showSystemTray = true;
     bool   notificationServer = true; // own org.freedesktop.Notifications and draw toasts
+    bool   windowPreviews = false;    // KWin: window thumbnails in the hover list (PipeWire screencast)
     bool   keepAboveWindows = true;   // Haiku: "auto-raise" (floating feel on hover)
     bool   reserveSpace = true;       // Wayland only: exclusive zone so maximized windows stop at the dock
     bool   titlePopup = true;         // Haiku mode title overlay: clickable window list popup
@@ -227,6 +232,7 @@ static void SaveConfiguration() {
     g_key_file_set_boolean(kf, g, "auto_hide", gSettings.autoHide);
     g_key_file_set_boolean(kf, g, "system_tray", gSettings.showSystemTray);
     g_key_file_set_boolean(kf, g, "notifications", gSettings.notificationServer);
+    g_key_file_set_boolean(kf, g, "window_previews", gSettings.windowPreviews);
     g_key_file_set_boolean(kf, g, "keep_above_windows", gSettings.keepAboveWindows);
     g_key_file_set_boolean(kf, g, "reserve_space", gSettings.reserveSpace);
     g_key_file_set_boolean(kf, g, "title_popup", gSettings.titlePopup);
@@ -304,6 +310,7 @@ static void LoadConfiguration() {
     getBool("auto_hide", gSettings.autoHide);
     getBool("system_tray", gSettings.showSystemTray);
     getBool("notifications", gSettings.notificationServer);
+    getBool("window_previews", gSettings.windowPreviews);
     getBool("keep_above_windows", gSettings.keepAboveWindows);
     getBool("reserve_space", gSettings.reserveSpace);
     getBool("title_popup", gSettings.titlePopup);
@@ -1254,6 +1261,8 @@ struct WaylandState {
     xdg_activation_v1* activation = nullptr;
     wp_fractional_scale_manager_v1* fractionalScale = nullptr;
     wp_viewporter* viewporter = nullptr;
+    zkde_screencast_unstable_v1* screencast = nullptr;   // KWin only: per-window PipeWire streams (previews)
+    uint32_t screencastVersion = 0;
     std::vector<std::unique_ptr<Output>> outputs;
 
     wl_cursor_theme* cursorTheme = nullptr;
@@ -1645,6 +1654,9 @@ static const wl_registry_listener kRegistryListener = {
                 bind(&wp_fractional_scale_manager_v1_interface, 1));
         } else if (strcmp(iface, wp_viewporter_interface.name) == 0) {
             gWl.viewporter = static_cast<wp_viewporter*>(bind(&wp_viewporter_interface, 1));
+        } else if (strcmp(iface, zkde_screencast_unstable_v1_interface.name) == 0) {
+            gWl.screencastVersion = std::min(version, 6u);
+            gWl.screencast = static_cast<zkde_screencast_unstable_v1*>(bind(&zkde_screencast_unstable_v1_interface, 6));
         }
     },
     .global_remove = [](void*, wl_registry*, uint32_t name) {
@@ -2240,6 +2252,9 @@ struct MenuItem {
     double barPercent = -1.0;
     int barPalette = 0;           // 0 = CPU thresholds, 1 = memory used, 2 = memory free, 3 = memory total
     std::string valueText;
+    // Window-preview rows: a thumbnail card above the label (placeholder until `thumb` arrives).
+    bool wantThumb = false;
+    IconRef thumb;
 
     static MenuItem Separator() {
         MenuItem m;
@@ -2396,6 +2411,11 @@ public:
             MeasureText("Ag", kFontSize, it.header, nullptr, &textH);
             double textY = y + (rh - textH) / 2.0;
             double left = fHasLeftColumn ? kLeftColumn : kPadX;
+            if (it.wantThumb) {
+                DrawThumbCard(cr, it, kPadX, y + 5, w - kPadX * 2, kThumbH);
+                textY = y + rh - kRowH + (kRowH - textH) / 2.0;
+                left = kPadX;
+            }
 
             if (it.check != kCheckNone) {
                 double cx = kPadX + 8, cy = y + rh / 2;
@@ -2584,7 +2604,40 @@ private:
     static constexpr double kArrowH = 16.0;   // scroll arrow strips at the top and bottom
     static constexpr double kScreenMargin = 24.0;
 
-    static double RowHeight(const MenuItem& it) { return it.separator ? kSepH : kRowH; }
+    static constexpr double kThumbW = 180.0;
+    static constexpr double kThumbH = 110.0;
+    static double RowHeight(const MenuItem& it) {
+        if (it.separator) return kSepH;
+        return it.wantThumb ? kThumbH + 10.0 + kRowH : kRowH;
+    }
+
+    static void DrawThumbCard(cairo_t* cr, const MenuItem& it, double x, double y, double w, double h) {
+        RoundedRectPath(cr, x + 0.5, y + 0.5, w - 1, h - 1, 4.0);
+        cairo_set_source_rgba(cr, 14 / 255.0, 14 / 255.0, 18 / 255.0, 1.0);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 60 / 255.0, 62 / 255.0, 72 / 255.0, 1.0);
+        cairo_set_line_width(cr, 1.0);
+        cairo_stroke(cr);
+        if (!it.thumb) {
+            double tw = 0, th = 0;
+            MeasureText("...", 14, false, &tw, &th);
+            DrawText(cr, "...", x + (w - tw) / 2, y + (h - th) / 2, 14, false, RGBA{0.5, 0.5, 0.55, 1.0});
+            return;
+        }
+        double iw = cairo_image_surface_get_width(it.thumb.get());
+        double ih = cairo_image_surface_get_height(it.thumb.get());
+        if (iw <= 0 || ih <= 0) return;
+        double s = std::min((w - 4) / iw, (h - 4) / ih);
+        cairo_save(cr);
+        RoundedRectPath(cr, x + 1, y + 1, w - 2, h - 2, 3.5);
+        cairo_clip(cr);
+        cairo_translate(cr, x + (w - iw * s) / 2, y + (h - ih * s) / 2);
+        cairo_scale(cr, s, s);
+        cairo_set_source_surface(cr, it.thumb.get(), 0, 0);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+        cairo_paint(cr);
+        cairo_restore(cr);
+    }
 
     bool Selectable(int i) const {
         return i >= 0 && i < static_cast<int>(fItems.size()) && !fItems[i].separator && !fItems[i].header && fItems[i].enabled;
@@ -2594,6 +2647,7 @@ private:
         fHasLeftColumn = false;
         bool hasBars = false;
         bool hasSubmenus = false;
+        bool hasThumbs = false;
         double maxLabel = 0;
         double h = kPadY * 2;
         for (const auto& it : fItems) {
@@ -2605,6 +2659,7 @@ private:
             double tw = 0;
             MeasureText(it.label, kFontSize, it.header, &tw, nullptr);
             maxLabel = std::max(maxLabel, tw);
+            if (it.wantThumb) hasThumbs = true;
         }
         double left = fHasLeftColumn ? kLeftColumn : kPadX;
         double w;
@@ -2616,6 +2671,7 @@ private:
         } else {
             w = std::clamp(left + maxLabel + kPadX + 22, 150.0, 420.0);
         }
+        if (hasThumbs) w = std::max(w, kThumbW + kPadX * 2);
         fWidth = static_cast<int>(std::ceil(w));
         fContentH = h;
         fHeight = static_cast<int>(std::ceil(std::min(h, MaxHeight())));
@@ -3130,6 +3186,7 @@ struct Toplevel {
     std::string title;
     std::string appId;
     std::string themedIcon;     // KWin tells us the icon name directly
+    std::string uuid;           // KWin window uuid (screencast target)
     bool activated = false;
     bool minimized = false;
     bool maximized = false;
@@ -3340,6 +3397,7 @@ const org_kde_plasma_window_management_listener ToplevelManager::kPlasmaMgmtList
     .window_with_uuid = [](void* data, org_kde_plasma_window_management* mgmt, uint32_t, const char* uuid) {
         auto* self = static_cast<ToplevelManager*>(data);
         Toplevel* t = self->NewWindow();
+        t->uuid = uuid ? uuid : "";
         t->plasma = org_kde_plasma_window_management_get_window_by_uuid(mgmt, uuid);
         org_kde_plasma_window_add_listener(t->plasma, &kPlasmaWindowListener, new WlrHandleCtx{self, t});
     },
@@ -3413,6 +3471,246 @@ const org_kde_plasma_window_listener ToplevelManager::kPlasmaWindowListener = {
     .resource_name_changed = [](void*, org_kde_plasma_window*, const char*) {},
     .client_geometry = [](void*, org_kde_plasma_window*, int32_t, int32_t, uint32_t, uint32_t) {},
     .mapped = [](void*, org_kde_plasma_window*) {},
+};
+
+// =========================================================================
+// WINDOW PREVIEWS (KWin zkde_screencast + PipeWire)
+// =========================================================================
+// KWin has no screencopy protocol, but it will stream any single window by
+// uuid over PipeWire -- including windows on other virtual desktops. Hovering
+// a dock icon grabs one frame of each of its windows (open stream, wait for
+// the first valid buffer, close it) and caches it as a cairo surface.
+class WindowPreviews {
+public:
+    std::function<void()> onUpdated;   // a new thumbnail landed
+
+    bool Available() const { return gWl.screencast != nullptr; }
+
+    IconRef Get(const std::string& uuid) const {
+        auto it = fThumbs.find(uuid);
+        return it == fThumbs.end() ? IconRef() : it->second;
+    }
+
+    void Request(const std::string& uuid) {
+        if (!Available() || uuid.empty() || fJobs.count(uuid) || !InitPipeWire()) return;
+        auto job = std::make_unique<Job>();
+        job->owner = this;
+        job->uuid = uuid;
+        job->wl = zkde_screencast_unstable_v1_stream_window(gWl.screencast, uuid.c_str(), 1 /* pointer: hidden */);
+        zkde_screencast_stream_unstable_v1_add_listener(job->wl, &kStreamListener, job.get());
+        job->timeout = RunAfter(2500, [this, uuid]() {
+            auto it = fJobs.find(uuid);
+            if (it == fJobs.end()) return;
+            it->second->timeout = 0;
+            DebugLog("preview: timed out for %s\n", uuid.c_str());
+            Finish(uuid, nullptr);
+        });
+        fJobs[uuid] = std::move(job);
+        wl_display_flush(gWl.display);
+    }
+
+private:
+    struct Job {
+        WindowPreviews* owner = nullptr;
+        std::string uuid;
+        zkde_screencast_stream_unstable_v1* wl = nullptr;
+        pw_stream* stream = nullptr;
+        spa_hook hook{};
+        spa_video_info_raw fmt{};
+        guint timeout = 0;
+        bool done = false;
+    };
+
+    pw_loop* fLoop = nullptr;
+    pw_context* fContext = nullptr;
+    pw_core* fCore = nullptr;
+    bool fInitFailed = false;
+    std::map<std::string, std::unique_ptr<Job>> fJobs;
+    std::map<std::string, IconRef> fThumbs;
+
+    bool InitPipeWire() {
+        if (fCore) return true;
+        if (fInitFailed) return false;
+        pw_init(nullptr, nullptr);
+        fLoop = pw_loop_new(nullptr);
+        fContext = fLoop ? pw_context_new(fLoop, nullptr, 0) : nullptr;
+        fCore = fContext ? pw_context_connect(fContext, nullptr, 0) : nullptr;
+        if (!fCore) {
+            DebugLog("preview: cannot connect to PipeWire\n");
+            fInitFailed = true;
+            return false;
+        }
+        pw_loop_enter(fLoop);
+        g_unix_fd_add(pw_loop_get_fd(fLoop), G_IO_IN, [](gint, GIOCondition, gpointer p) -> gboolean {
+            pw_loop_iterate(static_cast<pw_loop*>(p), 0);
+            return G_SOURCE_CONTINUE;
+        }, fLoop);
+        return true;
+    }
+
+    void StartStream(Job* j, uint32_t node, uint64_t serial) {
+        if (j->stream || j->done) return;
+        pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+            PW_KEY_MEDIA_ROLE, "Screen", nullptr);
+        uint32_t target = PW_ID_ANY;
+        if (serial != 0) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(serial));
+            pw_properties_set(props, PW_KEY_TARGET_OBJECT, buf);
+        } else {
+            target = node;
+        }
+        j->stream = pw_stream_new(fCore, "hdesktop-preview", props);
+        if (!j->stream) { Finish(j->uuid, nullptr); return; }
+        static const pw_stream_events events = MakeEvents();
+        pw_stream_add_listener(j->stream, &j->hook, &events, j);
+
+        uint8_t buffer[1024];
+        spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+        spa_rectangle defSize{320, 200}, minSize{1, 1}, maxSize{8192, 8192};
+        spa_fraction defRate{25, 1}, minRate{0, 1}, maxRate{1000, 1};
+        const spa_pod* params[1];
+        params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(&b,
+            SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+            SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA,
+                SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx),
+            SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&defSize, &minSize, &maxSize),
+            SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate)));
+        int r = pw_stream_connect(j->stream, PW_DIRECTION_INPUT, target,
+            static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
+        if (r < 0) {
+            DebugLog("preview: pw_stream_connect failed: %d\n", r);
+            Finish(j->uuid, nullptr);
+        }
+    }
+
+    static pw_stream_events MakeEvents() {
+        pw_stream_events e{};
+        e.version = PW_VERSION_STREAM_EVENTS;
+        e.state_changed = [](void* data, pw_stream_state, pw_stream_state state, const char* error) {
+            auto* j = static_cast<Job*>(data);
+            if (state == PW_STREAM_STATE_ERROR) {
+                DebugLog("preview: stream error: %s\n", error ? error : "?");
+                RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid, nullptr); });
+            }
+        };
+        e.param_changed = [](void* data, uint32_t id, const spa_pod* param) {
+            auto* j = static_cast<Job*>(data);
+            if (id != SPA_PARAM_Format || param == nullptr) return;
+            spa_format_video_raw_parse(param, &j->fmt);
+            int stride = SPA_ROUND_UP_N(static_cast<int>(j->fmt.size.width) * 4, 4);
+            uint8_t buf[512];
+            spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+            const spa_pod* params[1];
+            params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(&b,
+                SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+                SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+                SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
+                SPA_PARAM_BUFFERS_size, SPA_POD_Int(stride * static_cast<int>(j->fmt.size.height)),
+                SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
+                SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd))));
+            pw_stream_update_params(j->stream, params, 1);
+        };
+        e.process = [](void* data) {
+            auto* j = static_cast<Job*>(data);
+            pw_buffer* pb = pw_stream_dequeue_buffer(j->stream);
+            if (!pb) return;
+            spa_buffer* sb = pb->buffer;
+            if (!j->done && sb->n_datas > 0 && sb->datas[0].data && sb->datas[0].chunk->size > 0 &&
+                !(sb->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
+                IconRef img = ConvertFrame(j->fmt, sb->datas[0]);
+                if (img) {
+                    j->done = true;
+                    RunLater([o = j->owner, uuid = j->uuid, img]() { o->Finish(uuid, img); });
+                }
+            }
+            pw_stream_queue_buffer(j->stream, pb);
+        };
+        return e;
+    }
+
+    // Copy the frame into a cairo surface, downscaled to at most 2x the card size.
+    static IconRef ConvertFrame(const spa_video_info_raw& fmt, const spa_data& d) {
+        int w = static_cast<int>(fmt.size.width), h = static_cast<int>(fmt.size.height);
+        if (w <= 0 || h <= 0) return IconRef();
+        int stride = d.chunk->stride > 0 ? d.chunk->stride : w * 4;
+        if (static_cast<size_t>(d.chunk->offset) + static_cast<size_t>(stride) * h > d.maxsize) return IconRef();
+        const uint8_t* src = static_cast<const uint8_t*>(d.data) + d.chunk->offset;
+        bool swap = fmt.format == SPA_VIDEO_FORMAT_RGBA || fmt.format == SPA_VIDEO_FORMAT_RGBx;
+        bool opaque = fmt.format == SPA_VIDEO_FORMAT_BGRx || fmt.format == SPA_VIDEO_FORMAT_RGBx;
+
+        cairo_surface_t* full = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        if (cairo_surface_status(full) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(full); return IconRef(); }
+        uint8_t* dst = cairo_image_surface_get_data(full);
+        int dstride = cairo_image_surface_get_stride(full);
+        cairo_surface_flush(full);
+        for (int y = 0; y < h; ++y) {
+            const uint8_t* s = src + static_cast<size_t>(y) * stride;
+            uint32_t* o = reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * dstride);
+            for (int x = 0; x < w; ++x, s += 4) {
+                uint8_t c0 = s[0], c1 = s[1], c2 = s[2], a = opaque ? 255 : s[3];
+                uint8_t r = swap ? c0 : c2, b = swap ? c2 : c0;
+                if (a != 255) { r = r * a / 255; c1 = c1 * a / 255; b = b * a / 255; }  // premultiply
+                o[x] = (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(c1) << 8) | b;
+            }
+        }
+        cairo_surface_mark_dirty(full);
+
+        double scale = std::min(1.0, std::min(360.0 / w, 220.0 / h));
+        int tw = std::max(1, static_cast<int>(std::lround(w * scale)));
+        int th = std::max(1, static_cast<int>(std::lround(h * scale)));
+        cairo_surface_t* out = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, tw, th);
+        cairo_t* cr = cairo_create(out);
+        cairo_scale(cr, scale, scale);
+        cairo_set_source_surface(cr, full, 0, 0);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        cairo_surface_destroy(full);
+        return IconRef(out, cairo_surface_destroy);
+    }
+
+    void Finish(const std::string& uuid, IconRef img) {
+        auto it = fJobs.find(uuid);
+        if (it == fJobs.end()) return;
+        std::unique_ptr<Job> job = std::move(it->second);
+        fJobs.erase(it);
+        if (job->timeout) g_source_remove(job->timeout);
+        if (job->stream) pw_stream_destroy(job->stream);
+        if (job->wl) zkde_screencast_stream_unstable_v1_close(job->wl);
+        wl_display_flush(gWl.display);
+        if (img) {
+            if (fThumbs.size() > 64) fThumbs.clear();
+            fThumbs[uuid] = img;
+            if (onUpdated) onUpdated();
+        }
+    }
+
+    static const zkde_screencast_stream_unstable_v1_listener kStreamListener;
+};
+
+static WindowPreviews gPreviews;
+
+const zkde_screencast_stream_unstable_v1_listener WindowPreviews::kStreamListener = {
+    .closed = [](void* data, zkde_screencast_stream_unstable_v1*) {
+        auto* j = static_cast<Job*>(data);
+        if (!j->done) RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid, nullptr); });
+    },
+    .created = [](void* data, zkde_screencast_stream_unstable_v1*, uint32_t node) {
+        auto* j = static_cast<Job*>(data);
+        j->owner->StartStream(j, node, 0);
+    },
+    .failed = [](void* data, zkde_screencast_stream_unstable_v1*, const char* error) {
+        auto* j = static_cast<Job*>(data);
+        DebugLog("preview: compositor refused stream: %s\n", error ? error : "?");
+        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid, nullptr); });
+    },
+    .serial = [](void* data, zkde_screencast_stream_unstable_v1*, uint32_t hi, uint32_t lo) {
+        auto* j = static_cast<Job*>(data);
+        j->owner->StartStream(j, 0, (static_cast<uint64_t>(hi) << 32) | lo);
+    },
 };
 
 // =========================================================================
@@ -6182,18 +6480,28 @@ private:
                     a.gravity = XDG_POSITIONER_GRAVITY_TOP;
                     a.offsetY = -12;
                 }
-                gMenus.OpenHover(layerSurface, a, WindowListItems(*hovered), true);
+                if (PreviewsOn()) {
+                    gPreviews.onUpdated = [this]() { RefreshHoverPopup(); };
+                    for (Toplevel* t : hovered->windows) gPreviews.Request(t->uuid);
+                }
+                gMenus.OpenHover(layerSurface, a, WindowListItems(*hovered), !PreviewsOn());
             }
         } else if (gMenus.HoverOpen()) {
             ScheduleHoverClose();
         }
     }
 
+    static bool PreviewsOn() { return gSettings.windowPreviews && gPreviews.Available(); }
+
     std::vector<MenuItem> WindowListItems(const DockApp& app) {
         std::vector<MenuItem> items;
         for (Toplevel* t : app.windows) {
             MenuItem m;
             m.label = t->title.empty() ? app.displayName : t->title;
+            if (PreviewsOn()) {
+                m.wantThumb = true;
+                m.thumb = gPreviews.Get(t->uuid);
+            }
             uint64_t uid = t->uid;
             m.action = [this, uid]() {
                 for (Toplevel* w : gToplevels.Windows()) {
@@ -8699,6 +9007,8 @@ private:
         check("24-Hour Clock", &gSettings.clock24h, 317);
         check("Notifications", &gSettings.notificationServer, 40, false, true, "hDesktop shows desktop notifications");
         check("Check for Updates", &gSettings.checkForUpdates, 317);
+        check("Window Previews", &gSettings.windowPreviews, 40, true, gPreviews.Available(),
+            "Thumbnails when hovering dock icons (KDE Plasma)");
 
         {
             Widget info;
