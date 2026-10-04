@@ -176,6 +176,7 @@ struct Settings {
     bool   showSystemTray = true;
     bool   notificationServer = true; // own org.freedesktop.Notifications and draw toasts
     bool   windowPreviews = false;    // KWin: window thumbnails in the hover list (PipeWire screencast)
+    bool   snakeTrail = true;         // menu selector stays joined across submenus
     bool   keepAboveWindows = true;   // Haiku: "auto-raise" (floating feel on hover)
     bool   reserveSpace = true;       // Wayland only: exclusive zone so maximized windows stop at the dock
     bool   titlePopup = true;         // Haiku mode title overlay: clickable window list popup
@@ -235,6 +236,7 @@ static void SaveConfiguration() {
     g_key_file_set_boolean(kf, g, "system_tray", gSettings.showSystemTray);
     g_key_file_set_boolean(kf, g, "notifications", gSettings.notificationServer);
     g_key_file_set_boolean(kf, g, "window_previews", gSettings.windowPreviews);
+    g_key_file_set_boolean(kf, g, "snake_trail", gSettings.snakeTrail);
     g_key_file_set_boolean(kf, g, "keep_above_windows", gSettings.keepAboveWindows);
     g_key_file_set_boolean(kf, g, "reserve_space", gSettings.reserveSpace);
     g_key_file_set_boolean(kf, g, "title_popup", gSettings.titlePopup);
@@ -317,6 +319,7 @@ static void LoadConfiguration() {
     getBool("system_tray", gSettings.showSystemTray);
     getBool("notifications", gSettings.notificationServer);
     getBool("window_previews", gSettings.windowPreviews);
+    getBool("snake_trail", gSettings.snakeTrail);
     getBool("keep_above_windows", gSettings.keepAboveWindows);
     getBool("reserve_space", gSettings.reserveSpace);
     getBool("title_popup", gSettings.titlePopup);
@@ -1277,6 +1280,7 @@ struct Output {
     std::string name;
     int scale = 1;
     int width = 0, height = 0;   // current mode, in pixels
+    int x = 0, y = 0;            // position in the compositor's logical space
     int32_t transform = WL_OUTPUT_TRANSFORM_NORMAL;
 };
 
@@ -1624,9 +1628,12 @@ static const wl_seat_listener kSeatListener = {
 static std::function<void()> gOnOutputsChanged;
 
 static const wl_output_listener kOutputListener = {
-    .geometry = [](void* data, wl_output*, int32_t, int32_t, int32_t, int32_t, int32_t, const char*, const char*,
+    .geometry = [](void* data, wl_output*, int32_t x, int32_t y, int32_t, int32_t, int32_t, const char*, const char*,
         int32_t transform) {
-        static_cast<Output*>(data)->transform = transform;
+        auto* o = static_cast<Output*>(data);
+        o->x = x;
+        o->y = y;
+        o->transform = transform;
     },
     .mode = [](void* data, wl_output*, uint32_t flags, int32_t w, int32_t h, int32_t) {
         auto* o = static_cast<Output*>(data);
@@ -2871,7 +2878,8 @@ private:
         const double w = width;
         const double kR = 4.0;     // corner radius of a lone selector row
 
-        const bool parentLink = fParent && fParent->fChild.get() == this && fParent->fChildIndex >= 0 &&
+        const bool trail = gSettings.snakeTrail;   // off: each menu keeps its own, unjoined selector
+        const bool parentLink = trail && fParent && fParent->fChild.get() == this && fParent->fChildIndex >= 0 &&
             fParent->fChildIndex < static_cast<int>(fParent->fItems.size()) &&
             (fParent->fHovered < 0 || fParent->fHovered == fParent->fChildIndex);
         const bool parentOnLeft = popupX >= 0;
@@ -2928,7 +2936,7 @@ private:
                 if (parentRow) { ownTop = y + 1; ownBottom = y + rh - 1; hasOwn = true; }
                 if ((hovered || open || parentRow) && y + rh > ViewTop() && y < ViewBottom()) {
                     bool childOnRight = open && fChild->popupX >= 0;
-                    addPiece(y + 1, y + rh - 1, open, childOnRight, parentRow, false);
+                    addPiece(y + 1, y + rh - 1, open && trail, childOnRight, parentRow, false);
                 }
             }
             y += rh;
@@ -3430,6 +3438,8 @@ struct Toplevel {
     bool onAllDesktops = false;
     uint32_t pid = 0;
     std::set<std::string> desktops;  // KWin virtual desktop ids
+    int gx = 0, gy = 0, gw = 0, gh = 0;  // KWin: window geometry in compositor space
+    bool hasGeometry = false;
     uint64_t lastActivated = 0;
     zwlr_foreign_toplevel_handle_v1* wlr = nullptr;
     org_kde_plasma_window* plasma = nullptr;
@@ -3476,6 +3486,19 @@ public:
                 ORG_KDE_PLASMA_WINDOW_MANAGEMENT_STATE_ACTIVE | ORG_KDE_PLASMA_WINDOW_MANAGEMENT_STATE_MINIMIZED,
                 ORG_KDE_PLASMA_WINDOW_MANAGEMENT_STATE_ACTIVE);
         }
+    }
+
+    // KWin only: put a window on one virtual desktop (and take it off the others).
+    bool CanMoveToWorkspace(const Toplevel* t) const { return t && t->plasma; }
+    void MoveToWorkspace(Toplevel* t, const std::string& desktopId) {
+        if (t == nullptr || t->plasma == nullptr || desktopId.empty()) return;
+        if (t->onAllDesktops) {
+            org_kde_plasma_window_set_state(t->plasma, ORG_KDE_PLASMA_WINDOW_MANAGEMENT_STATE_ON_ALL_DESKTOPS, 0);
+        }
+        org_kde_plasma_window_request_enter_virtual_desktop(t->plasma, desktopId.c_str());
+        std::vector<std::string> leave;
+        for (const auto& id : t->desktops) if (id != desktopId) leave.push_back(id);
+        for (const auto& id : leave) org_kde_plasma_window_request_leave_virtual_desktop(t->plasma, id.c_str());
     }
 
     void Unminimize(Toplevel* t) {
@@ -3682,7 +3705,11 @@ const org_kde_plasma_window_listener ToplevelManager::kPlasmaWindowListener = {
         PLASMA_CTX(data);
         t->hasParent = (parent != nullptr);
     },
-    .geometry = [](void*, org_kde_plasma_window*, int32_t, int32_t, uint32_t, uint32_t) {},
+    .geometry = [](void* data, org_kde_plasma_window*, int32_t x, int32_t y, uint32_t w, uint32_t h) {
+        PLASMA_CTX(data);
+        t->gx = x; t->gy = y; t->gw = static_cast<int>(w); t->gh = static_cast<int>(h);
+        t->hasGeometry = true;   // no Changed(): this fires constantly while a window is dragged
+    },
     .icon_changed = [](void*, org_kde_plasma_window*) {},
     .pid_changed = [](void* data, org_kde_plasma_window*, uint32_t pid) {
         PLASMA_CTX(data);
@@ -5591,6 +5618,309 @@ struct DockApp {
     HRect lastIconRectSent;
 };
 
+// =========================================================================
+// WORKSPACE PREVIEW POPUP (the WorkspacePreviewWindow equivalent)
+// =========================================================================
+// Opened by clicking the workspace widget: every workspace as a small copy of
+// the desktop with a box per window. Click a mini desktop to switch to it,
+// click a box to raise that window, and (on KDE) drag a box onto another mini
+// desktop to move the window there. A window can't be positioned from outside
+// on Wayland, so unlike Haiku's popup a drag only changes its workspace.
+class WorkspacePopup : public PopupSurface {
+public:
+    WorkspacePopup(zwlr_layer_surface_v1* parent, const PopupAnchor& anchor, uint32_t serial) {
+        fList = gWorkspaces.List();
+        if (fList.empty()) {
+            WorkspaceInfo w;
+            w.name = "Workspace 1";
+            w.active = true;
+            fList.push_back(w);
+        }
+        int count = static_cast<int>(fList.size());
+        fCols = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count)))));
+        fRows = (count + fCols - 1) / fCols;
+        ScreenRect(&fScreenX, &fScreenY, &fScreenW, &fScreenH);
+        fCellW = 200;
+        fCellH = std::clamp(static_cast<int>(std::lround(fCellW * static_cast<double>(fScreenH) / fScreenW)), 90, 220);
+        int w = fCols * fCellW + kGap * (fCols + 1) + 2;
+        int h = fRows * fCellH + kGap * (fRows + 1) + 2;
+        CreatePopup(parent, nullptr, anchor, w, h, serial);
+        fRefreshTimer = g_timeout_add(250, [](gpointer p) -> gboolean {
+            auto* self = static_cast<WorkspacePopup*>(p);
+            if (!self->fDragging) self->Redraw();   // windows move on their own
+            return G_SOURCE_CONTINUE;
+        }, this);
+    }
+
+    ~WorkspacePopup() override {
+        if (fRefreshTimer) g_source_remove(fRefreshTimer);
+    }
+
+    void Refresh() { Redraw(); }
+
+    void Paint(cairo_t* cr) override {
+        const double w = width, h = height;
+        RoundedRectPath(cr, 0.5, 0.5, w - 1, h - 1, 6.0);
+        cairo_set_source_rgba(cr, 24 / 255.0, 24 / 255.0, 28 / 255.0, 0.98);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 48 / 255.0, 50 / 255.0, 58 / 255.0, 1.0);
+        cairo_set_line_width(cr, 1.0);
+        cairo_stroke(cr);
+
+        const std::vector<Toplevel*> windows = gToplevels.Windows();
+        const int dropCell = fDragging ? CellAt(fPointerX, fPointerY) : -1;
+        for (int ws = 0; ws < static_cast<int>(fList.size()); ++ws) {
+            HRect c = CellRect(ws);
+            bool active = fList[ws].active;
+            bool hot = (ws == dropCell && ws != fDragFrom) || (!fDragging && ws == CellAt(fPointerX, fPointerY) &&
+                BoxAt(fPointerX, fPointerY, windows) == nullptr);
+            RoundedRectPath(cr, c.left + 0.5, c.top + 0.5, c.Width() - 1, c.Height() - 1, 4.0);
+            cairo_set_source_rgba(cr, 14 / 255.0, 14 / 255.0, 18 / 255.0, 1.0);
+            cairo_fill_preserve(cr);
+            if (hot) { SetAccent(cr, 0.22); cairo_fill_preserve(cr); }
+            if (active || hot) SetAccent(cr, hot ? 1.0 : 0.8);
+            else cairo_set_source_rgba(cr, 60 / 255.0, 62 / 255.0, 72 / 255.0, 1.0);
+            cairo_set_line_width(cr, active || hot ? 2.0 : 1.0);
+            cairo_stroke(cr);
+            cairo_set_line_width(cr, 1.0);
+
+            cairo_save(cr);
+            RoundedRectPath(cr, c.left + 1, c.top + 1, c.Width() - 2, c.Height() - 2, 3.5);
+            cairo_clip(cr);
+            for (Toplevel* t : windows) {
+                if (!OnWorkspace(t, ws)) continue;
+                if (fDragging && t->uid == fDragUid && ws == fDragFrom) continue;   // drawn as the ghost
+                HRect b;
+                if (!BoxRect(t, c, &b)) continue;
+                DrawBox(cr, t, b, t->uid == fHoverUid && !fDragging, false);
+            }
+            cairo_restore(cr);
+
+            // Workspace name, small, in the cell's corner
+            std::string label = fList[ws].name.empty() ? std::to_string(ws + 1) : fList[ws].name;
+            DrawText(cr, label, c.left + 5, c.bottom - 15, 9, false, RGBA{150 / 255.0, 155 / 255.0, 168 / 255.0, 0.9},
+                c.Width() - 10);
+        }
+
+        if (fDragging) {
+            for (Toplevel* t : windows) {
+                if (t->uid != fDragUid) continue;
+                HRect b{static_cast<float>(fPointerX - fDragGrabX), static_cast<float>(fPointerY - fDragGrabY),
+                    0, 0};
+                b.right = b.left + fDragW;
+                b.bottom = b.top + fDragH;
+                DrawBox(cr, t, b, true, true);
+            }
+        }
+    }
+
+    void PointerEnter(double x, double y) override { PointerMotion(x, y); }
+
+    void PointerLeave() override {
+        fPointerX = fPointerY = -1000;
+        fHoverUid = 0;
+        if (!fDragging) Redraw();
+    }
+
+    void PointerMotion(double x, double y) override {
+        fPointerX = x;
+        fPointerY = y;
+        const std::vector<Toplevel*> windows = gToplevels.Windows();
+        if (fPressUid && !fDragging &&
+            std::hypot(x - fPressX, y - fPressY) > 5 && gToplevels.CanMoveToWorkspace(FindWindow(windows, fPressUid))) {
+            fDragging = true;
+            fDragUid = fPressUid;
+        }
+        if (!fDragging) {
+            Toplevel* t = BoxAt(x, y, windows);
+            fHoverUid = t ? t->uid : 0;
+        }
+        Redraw();
+    }
+
+    void PointerButton(int button, bool pressed, uint32_t) override {
+        if (button != kButtonLeft) return;
+        double x = gWl.pointerX, y = gWl.pointerY;
+        const std::vector<Toplevel*> windows = gToplevels.Windows();
+        if (pressed) {
+            Toplevel* t = BoxAt(x, y, windows);
+            if (!t) return;
+            fPressUid = t->uid;
+            fPressX = x;
+            fPressY = y;
+            fDragFrom = CellAt(x, y);
+            HRect b;
+            if (fDragFrom >= 0 && BoxRect(t, CellRect(fDragFrom), &b)) {
+                fDragGrabX = x - b.left;
+                fDragGrabY = y - b.top;
+                fDragW = b.Width();
+                fDragH = b.Height();
+            }
+            return;
+        }
+        // Release
+        if (fDragging) {
+            int target = CellAt(x, y);
+            Toplevel* t = FindWindow(windows, fDragUid);
+            if (t && target >= 0 && target != fDragFrom) gToplevels.MoveToWorkspace(t, fList[target].id);
+            fDragging = false;
+            fPressUid = 0;
+            fDragUid = 0;
+            Redraw();
+            return;
+        }
+        if (fPressUid) {
+            Toplevel* t = FindWindow(windows, fPressUid);
+            fPressUid = 0;
+            if (t) {
+                int ws = fDragFrom;
+                if (ws >= 0 && !fList[ws].active) gWorkspaces.Activate(ws);
+                gToplevels.Activate(t);
+                Close();
+            }
+            return;
+        }
+        int cell = CellAt(x, y);
+        if (cell >= 0) {
+            gWorkspaces.Activate(cell);
+            Close();
+        }
+    }
+
+    void Key(xkb_keysym_t sym, const std::string&) override {
+        if (sym == XKB_KEY_Escape) Close();
+    }
+
+    std::function<void()> onClose;   // asks the owner to drop this popup
+
+private:
+    static constexpr int kGap = 8;
+
+    void Close() { if (onClose) onClose(); }
+
+    // The dock's output in the compositor's logical space (windows report their
+    // geometry in that space).
+    static void ScreenRect(int* x, int* y, int* w, int* h) {
+        Surface* dock = SurfaceFromWl(gActivationSurface);
+        Output* out = nullptr;
+        if (dock && !dock->enteredOutputs.empty()) out = *dock->enteredOutputs.begin();
+        if (out == nullptr) out = FindOutput(gSettings.output);
+        if (out == nullptr && !gWl.outputs.empty()) out = gWl.outputs.front().get();
+        *x = *y = 0;
+        *w = 1920;
+        *h = 1080;
+        if (out == nullptr || out->width <= 0 || out->height <= 0) return;
+        bool rotated = out->transform == WL_OUTPUT_TRANSFORM_90 || out->transform == WL_OUTPUT_TRANSFORM_270 ||
+                       out->transform == WL_OUTPUT_TRANSFORM_FLIPPED_90 || out->transform == WL_OUTPUT_TRANSFORM_FLIPPED_270;
+        double scale = std::max(1.0, dock ? dock->scale : static_cast<double>(out->scale));
+        *x = out->x;
+        *y = out->y;
+        *w = std::max(1, static_cast<int>(std::lround((rotated ? out->height : out->width) / scale)));
+        *h = std::max(1, static_cast<int>(std::lround((rotated ? out->width : out->height) / scale)));
+    }
+
+    HRect CellRect(int ws) const {
+        int col = ws % fCols, row = ws / fCols;
+        float x = 1.0f + kGap + col * (fCellW + kGap), y = 1.0f + kGap + row * (fCellH + kGap);
+        return HRect{x, y, x + fCellW, y + fCellH};
+    }
+
+    int CellAt(double x, double y) const {
+        for (int ws = 0; ws < static_cast<int>(fList.size()); ++ws) if (CellRect(ws).Contains(x, y)) return ws;
+        return -1;
+    }
+
+    bool OnWorkspace(const Toplevel* t, int ws) const {
+        if (t->onAllDesktops) return true;
+        if (t->desktops.empty()) return fList[ws].active;   // not reported: assume the current one
+        return !fList[ws].id.empty() && t->desktops.count(fList[ws].id) > 0;
+    }
+
+    // The window's box in a cell (the cell is a scaled copy of the screen); false if off this screen.
+    bool BoxRect(const Toplevel* t, const HRect& cell, HRect* out) const {
+        if (!t->hasGeometry || t->gw <= 0 || t->gh <= 0) return false;
+        double sx = cell.Width() / fScreenW, sy = cell.Height() / fScreenH;
+        double l = cell.left + (t->gx - fScreenX) * sx, tp = cell.top + (t->gy - fScreenY) * sy;
+        double r = l + std::max(6.0, t->gw * sx), b = tp + std::max(6.0, t->gh * sy);
+        l = std::max<double>(l, cell.left + 1);
+        tp = std::max<double>(tp, cell.top + 1);
+        r = std::min<double>(r, cell.right - 1);
+        b = std::min<double>(b, cell.bottom - 1);
+        if (r - l < 4 || b - tp < 4) return false;
+        *out = HRect{static_cast<float>(l), static_cast<float>(tp), static_cast<float>(r), static_cast<float>(b)};
+        return true;
+    }
+
+    // Topmost box under the point, among the cell it is in.
+    Toplevel* BoxAt(double x, double y, const std::vector<Toplevel*>& windows) const {
+        int ws = CellAt(x, y);
+        if (ws < 0) return nullptr;
+        HRect cell = CellRect(ws);
+        Toplevel* hit = nullptr;
+        for (Toplevel* t : windows) {
+            HRect b;
+            if (OnWorkspace(t, ws) && BoxRect(t, cell, &b) && b.Contains(x, y)) hit = t;   // later = on top
+        }
+        return hit;
+    }
+
+    static Toplevel* FindWindow(const std::vector<Toplevel*>& windows, uint64_t uid) {
+        for (Toplevel* t : windows) if (t->uid == uid) return t;
+        return nullptr;
+    }
+
+    void DrawBox(cairo_t* cr, const Toplevel* t, const HRect& b, bool hot, bool ghost) {
+        RoundedRectPath(cr, b.left + 0.5, b.top + 0.5, b.Width() - 1, b.Height() - 1, 2.0);
+        double a = t->minimized ? 0.55 : 0.95;
+        cairo_set_source_rgba(cr, (hot ? 62 : 46) / 255.0, (hot ? 66 : 49) / 255.0, (hot ? 80 : 60) / 255.0,
+            ghost ? 0.85 : a);
+        cairo_fill_preserve(cr);
+        if (t->activated || hot) SetAccent(cr, 1.0);
+        else cairo_set_source_rgba(cr, 120 / 255.0, 125 / 255.0, 140 / 255.0, t->minimized ? 0.6 : 1.0);
+        cairo_set_line_width(cr, t->activated || hot ? 1.5 : 1.0);
+        cairo_stroke(cr);
+        cairo_set_line_width(cr, 1.0);
+        if (b.Width() > 34 && b.Height() > 14) {
+            std::string title = t->title.empty() ? t->appId : t->title;
+            DrawText(cr, title, b.left + 4, b.top + 2, 9, false, RGBA{215 / 255.0, 218 / 255.0, 228 / 255.0, 1.0},
+                b.Width() - 8);
+        }
+    }
+
+    std::vector<WorkspaceInfo> fList;
+    int fCols = 1, fRows = 1, fCellW = 200, fCellH = 112;
+    int fScreenX = 0, fScreenY = 0, fScreenW = 1920, fScreenH = 1080;
+    double fPointerX = -1000, fPointerY = -1000;
+    uint64_t fHoverUid = 0;
+    // A press on a box becomes a drag once the pointer has moved a few pixels.
+    uint64_t fPressUid = 0;
+    double fPressX = 0, fPressY = 0;
+    bool fDragging = false;
+    uint64_t fDragUid = 0;
+    int fDragFrom = -1;
+    double fDragGrabX = 0, fDragGrabY = 0, fDragW = 20, fDragH = 14;
+    guint fRefreshTimer = 0;
+};
+
+static std::unique_ptr<WorkspacePopup> gWsPopup;
+static uint64_t gWsPopupClosedAt = 0;   // a click that just dismissed it shouldn't reopen it
+
+static void CloseWorkspacePopup() {
+    if (!gWsPopup) return;
+    gWsPopupClosedAt = NowMs();
+    WorkspacePopup* raw = gWsPopup.release();
+    RunLater([raw]() { delete raw; });
+}
+
+static bool WorkspacePopupOpen() { return gWsPopup != nullptr; }
+
+static void OpenWorkspacePopup(zwlr_layer_surface_v1* parent, const PopupAnchor& anchor, uint32_t serial) {
+    CloseWorkspacePopup();
+    gWsPopup = std::make_unique<WorkspacePopup>(parent, anchor, serial);
+    gWsPopup->onClose = []() { CloseWorkspacePopup(); };
+    gWsPopup->onDismissed = []() { CloseWorkspacePopup(); };
+}
+
 enum SlotKind { kSlotLeaf, kSlotApp, kSlotTrash, kSlotTray, kSlotClock, kSlotVolume, kSlotCpu, kSlotWorkspaces };
 
 struct DockSlot {
@@ -5631,8 +5961,8 @@ public:
         ApplyGeometrySettings();
         wl_surface_commit(surface);
 
-        gToplevels.onChanged = [this]() { SyncApps(); RequestRender(); };
-        gWorkspaces.onChanged = [this]() { SyncApps(); RequestRender(); };
+        gToplevels.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); };
+        gWorkspaces.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); };
         gVolume.onChanged = [this]() { RequestRender(); };
         gTray.onChanged = [this]() { RequestRender(); };
         gMenus.onStateChanged = [this]() { RequestRender(); };
@@ -7008,7 +7338,7 @@ private:
         float dt = fLastAnimTime ? std::min(0.1f, (now - fLastAnimTime) / 1000.0f) : 0.016f;
         fLastAnimTime = now;
 
-        bool keepOpen = fPointerInside || gMenus.IsOpen() || gMenus.HoverOpen() || AppDrawerOpen();
+        bool keepOpen = fPointerInside || gMenus.IsOpen() || gMenus.HoverOpen() || AppDrawerOpen() || WorkspacePopupOpen();
         if (gSettings.autoHide) {
             if (keepOpen) {
                 fTargetY = 0.0f;
@@ -7097,7 +7427,6 @@ private:
         fLayoutMouseY = y - DirectionalOffset();
         if (fDockState == STATE_HIDDEN) return;
         float lx = fLayoutMouseX, ly = fLayoutMouseY;
-        float ratio = gSettings.baseIconSize / 48.0f;
 
         for (const DockSlot& s : fLayout.slots) {
             // Widgets hit-test against the plate's full height like Haiku's
@@ -7170,26 +7499,24 @@ private:
                     return;
                 case kSlotWorkspaces:
                     if (button == kButtonLeft) {
+                        // Left click: switch to the workspace tile that was clicked.
                         int cols, rows, count;
                         WorkspaceGrid(cols, rows, count);
                         for (int ws = 0; ws < count; ++ws) {
-                            if (WorkspaceTile(s.bounds, ws, ratio).Contains(lx, ly)) {
+                            if (WorkspaceTile(s.bounds, ws, gSettings.baseIconSize / 48.0f).Contains(lx, ly)) {
                                 gWorkspaces.Activate(ws);
                                 break;
                             }
                         }
-                    } else if (button == kButtonRight && !MenuJustClosed()) {
-                        std::vector<MenuItem> items;
-                        auto list = gWorkspaces.List();
-                        for (size_t i = 0; i < list.size(); ++i) {
-                            MenuItem m;
-                            m.label = list[i].name.empty() ? "Workspace " + std::to_string(i + 1) : list[i].name;
-                            m.check = list[i].active ? kRadioOn : kRadioOff;
-                            int idx = static_cast<int>(i);
-                            m.action = [idx]() { gWorkspaces.Activate(idx); };
-                            items.push_back(m);
+                    } else if (button == kButtonRight) {
+                        // Right click, like Haiku: the workspace preview, where a mini desktop is
+                        // clicked to switch and window boxes can be dragged between them.
+                        if (WorkspacePopupOpen()) {
+                            CloseWorkspacePopup();
+                        } else if (!MenuJustClosed() && NowMs() - gWsPopupClosedAt > 150) {
+                            gMenus.CloseAll();
+                            OpenWorkspacePopup(layerSurface, AnchorAbove(s.bounds), serial);
                         }
-                        OpenMenu(s.bounds, items, serial);
                     }
                     return;
             }
@@ -9411,8 +9738,10 @@ private:
         check("24-Hour Clock", &gSettings.clock24h, 317);
         check("Notifications", &gSettings.notificationServer, 40, false, true, "hDesktop shows desktop notifications");
         check("Check for Updates", &gSettings.checkForUpdates, 317);
-        check("Window Previews", &gSettings.windowPreviews, 40, true, gPreviews.Available(),
+        check("Window Previews", &gSettings.windowPreviews, 40, false, gPreviews.Available(),
             "Thumbnails when hovering dock icons (KDE Plasma)");
+        check("Snake Trail", &gSettings.snakeTrail, 317, true, true,
+            "Menu highlight stays joined across submenus");
         fBuiltPreviews = gSettings.windowPreviews && gPreviews.Available();
         if (fBuiltPreviews) {
             y += 6;

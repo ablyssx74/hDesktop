@@ -2758,14 +2758,9 @@ public:
     }
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
-        // If the mouse left this view container, double check if it left the window
-        if (transit == B_EXITED_VIEW && Window()) {
-            BPoint screenPoint = ConvertToScreen(point);
-            if (!Window()->Frame().Contains(screenPoint)) {
-                Window()->Quit();
-                return;
-            }
-        }
+        // Leaving the window no longer closes it here: HaikuAppDrawerWindow's own
+        // 100ms poll does that after a short grace period, so a brief slip past
+        // the edge doesn't lose the drawer.
         // Force the app cell grid canvas to instantly refresh as your cursor glides across choices
         Invalidate();
     }
@@ -3325,6 +3320,10 @@ class HaikuAppDrawerWindow : public BWindow {
 private:
     BMessageRunner* fHoverTicker;
     bool            fMouseHasEntered; // Safety check flag
+    bigtime_t       fLeftTime;        // when the pointer last left the drawer (0 = it's inside / near the dock)
+    // How long the pointer may stay off the drawer before it closes -- a
+    // brief slip past the edge shouldn't lose it (the Linux build waits the same).
+    static constexpr bigtime_t kCloseDelayUs = 250000;
 
 public:
     HaikuAppDrawerWindow(float screenH)
@@ -3332,7 +3331,8 @@ public:
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                   B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE),
           fHoverTicker(nullptr),
-          fMouseHasEntered(false) { // Initially false so it won't instant-close
+          fMouseHasEntered(false), // Initially false so it won't instant-close
+          fLeftTime(0) {
 
         BScreen activeScreen(this);
         BRect screenFrame = activeScreen.Frame();
@@ -3385,7 +3385,9 @@ public:
                         fMouseHasEntered = true;
                     }
 
-                    if (!isInsideFrame) {
+                    if (isInsideFrame) {
+                        fLeftTime = 0;
+                    } else {
                         BScreen screen(this);
                         BRect screenFrame = screen.Frame();
 
@@ -3394,11 +3396,19 @@ public:
                             ? (screenMousePos.y <= (screenFrame.top + 100.0f))
                             : (screenMousePos.y >= (screenFrame.bottom - 100.0f));
                         if (mouseNearDock) {
+                            fLeftTime = 0;
                             break;
                         }
 
                         if (fMouseHasEntered) {
-                            PostMessage(B_QUIT_REQUESTED);
+                            // Wait out a short grace period before closing; coming
+                            // back inside (or onto the dock) in time cancels it.
+                            bigtime_t now = system_time();
+                            if (fLeftTime == 0) {
+                                fLeftTime = now;
+                            } else if (now - fLeftTime >= kCloseDelayUs) {
+                                PostMessage(B_QUIT_REQUESTED);
+                            }
                         }
                     }
                 }
