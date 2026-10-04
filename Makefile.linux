@@ -4,7 +4,7 @@
 #   sudo make -f Makefile.linux install install into $(PREFIX) (default /usr)
 #
 # Requires (Arch / CachyOS package names):
-#   wayland libglvnd mesa cairo pango librsvg gdk-pixbuf2 glib2 libpulse curl libxkbcommon
+#   wayland libglvnd mesa cairo pango librsvg gdk-pixbuf2 glib2 libpulse curl libxkbcommon pipewire
 #
 # KDE Plasma note: KWin only hands its window-management protocol to clients
 # that ship a .desktop file listing it (X-KDE-Wayland-Interfaces), so the
