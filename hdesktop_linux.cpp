@@ -2640,7 +2640,7 @@ private:
         cairo_translate(cr, x + (w - iw * s) / 2, y + (h - ih * s) / 2);
         cairo_scale(cr, s, s);
         cairo_set_source_surface(cr, it.thumb.get(), 0, 0);
-        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
         cairo_paint(cr);
         cairo_restore(cr);
     }
@@ -3551,6 +3551,7 @@ private:
         spa_hook hook{};
         spa_video_info_raw fmt{};
         guint timeout = 0;
+        guint resume = 0;       // timer that wakes a throttled stream
         uint64_t lastFrame = 0;
     };
 
@@ -3672,10 +3673,34 @@ private:
                 !(sb->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) && now - j->lastFrame >= 30) {
                 j->lastFrame = now;
                 j->owner->OnFrame(j, sb->datas[0]);
+                j->owner->Throttle(j);
             }
             pw_stream_queue_buffer(j->stream, pb);
         };
         return e;
+    }
+
+    // KWin renders and copies every frame of a streamed window, even a
+    // minimized one, so two full-size (say 4K) windows at 30 fps cost it
+    // gigabytes per second and bog the whole desktop down. Keep the total
+    // pixel rate under a budget: when it would be exceeded, pause the stream
+    // between frames (KWin stops rendering a paused stream) and wake it again
+    // after the interval. Ordinary windows stay at the full 30 fps.
+    void Throttle(Job* j) {
+        constexpr double kPixelBudget = 150e6;   // pixels per second, across all open previews
+        double pixels = static_cast<double>(j->fmt.size.width) * j->fmt.size.height;
+        if (pixels <= 0 || j->resume) return;
+        double fps = std::clamp(kPixelBudget / (std::max<size_t>(1, fJobs.size()) * pixels), 5.0, 30.0);
+        unsigned interval = static_cast<unsigned>(1000.0 / fps);
+        if (interval <= 34) return;
+        pw_stream_set_active(j->stream, false);
+        std::string uuid = j->uuid;
+        j->resume = RunAfter(interval, [this, uuid]() {
+            auto it = fJobs.find(uuid);
+            if (it == fJobs.end()) return;
+            it->second->resume = 0;
+            if (it->second->stream) pw_stream_set_active(it->second->stream, true);
+        });
     }
 
     void OnFrame(Job* j, const spa_data& d) {
@@ -3697,30 +3722,21 @@ private:
 
     // Scales the frame into `slot`. The surface is repainted in place when the
     // size is unchanged, because the popup rows hold a pointer to it.
+    //
+    // Hand-rolled box sampling, not cairo's scaler: cairo's GOOD filter costs
+    // ~17 ms per 1080p frame (~50 ms at 4K), which on the dock's single main
+    // thread froze everything once two video windows were previewed. Taking a
+    // few evenly spread samples per output pixel is ~1.5 ms at any source size
+    // and looks fine at thumbnail scale.
     static bool ScaleFrame(const spa_video_info_raw& fmt, const spa_data& d, IconRef& slot, bool* rebuilt) {
         int w = static_cast<int>(fmt.size.width), h = static_cast<int>(fmt.size.height);
         if (w <= 0 || h <= 0) return false;
         int stride = d.chunk->stride > 0 ? d.chunk->stride : w * 4;
         if (static_cast<size_t>(d.chunk->offset) + static_cast<size_t>(stride) * h > d.maxsize) return false;
         const uint8_t* src = static_cast<const uint8_t*>(d.data) + d.chunk->offset;
-        bool swap = fmt.format == SPA_VIDEO_FORMAT_RGBA || fmt.format == SPA_VIDEO_FORMAT_RGBx;
-
-        // KWin hands out BGRx/BGRA, which cairo reads as-is. RGBx/RGBA need the
-        // red and blue channels swapped first (rare; slow path).
-        cairo_surface_t* source = nullptr;
-        std::vector<uint8_t> swapped;
-        if (swap) {
-            swapped.resize(static_cast<size_t>(w) * h * 4);
-            for (int y = 0; y < h; ++y) {
-                const uint8_t* s = src + static_cast<size_t>(y) * stride;
-                uint8_t* o = swapped.data() + static_cast<size_t>(y) * w * 4;
-                for (int x = 0; x < w; ++x, s += 4, o += 4) { o[0] = s[2]; o[1] = s[1]; o[2] = s[0]; o[3] = 255; }
-            }
-            source = cairo_image_surface_create_for_data(swapped.data(), CAIRO_FORMAT_RGB24, w, h, w * 4);
-        } else {
-            source = cairo_image_surface_create_for_data(const_cast<uint8_t*>(src), CAIRO_FORMAT_RGB24, w, h, stride);
-        }
-        if (cairo_surface_status(source) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(source); return false; }
+        // BGRx/BGRA (what KWin hands out) keep blue first; RGBx/RGBA have red first.
+        const bool redFirst = fmt.format == SPA_VIDEO_FORMAT_RGBA || fmt.format == SPA_VIDEO_FORMAT_RGBx;
+        const int rOff = redFirst ? 0 : 2, bOff = redFirst ? 2 : 0;
 
         // Up to 2x the card, so HiDPI stays sharp.
         double maxW = gSettings.previewWidth * 2.0, maxH = maxW * 110.0 / 180.0;
@@ -3731,14 +3747,40 @@ private:
             slot = IconRef(cairo_image_surface_create(CAIRO_FORMAT_ARGB32, tw, th), cairo_surface_destroy);
             *rebuilt = true;
         }
-        cairo_t* cr = cairo_create(slot.get());
-        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-        cairo_scale(cr, static_cast<double>(tw) / w, static_cast<double>(th) / h);
-        cairo_set_source_surface(cr, source, 0, 0);
-        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-        cairo_paint(cr);
-        cairo_destroy(cr);
-        cairo_surface_destroy(source);
+        if (cairo_surface_status(slot.get()) != CAIRO_STATUS_SUCCESS) return false;
+
+        const int kx = std::clamp(w / tw, 1, 3), ky = std::clamp(h / th, 1, 3);
+        std::vector<int> xs(static_cast<size_t>(tw) * kx);   // source columns to sample, per output column
+        for (int x = 0; x < tw; ++x) {
+            int x0 = static_cast<int>(static_cast<int64_t>(x) * w / tw);
+            int x1 = static_cast<int>(static_cast<int64_t>(x + 1) * w / tw);
+            int cw = std::max(1, x1 - x0);
+            for (int i = 0; i < kx; ++i) xs[static_cast<size_t>(x) * kx + i] = std::min(w - 1, x0 + cw * (2 * i + 1) / (2 * kx));
+        }
+        cairo_surface_flush(slot.get());
+        uint8_t* dst = cairo_image_surface_get_data(slot.get());
+        const int dstride = cairo_image_surface_get_stride(slot.get());
+        const int samples = kx * ky;
+        for (int y = 0; y < th; ++y) {
+            int y0 = static_cast<int>(static_cast<int64_t>(y) * h / th);
+            int y1 = static_cast<int>(static_cast<int64_t>(y + 1) * h / th);
+            int ch = std::max(1, y1 - y0);
+            const uint8_t* rows[3];
+            for (int j = 0; j < ky; ++j) rows[j] = src + static_cast<size_t>(std::min(h - 1, y0 + ch * (2 * j + 1) / (2 * ky))) * stride;
+            uint32_t* o = reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * dstride);
+            for (int x = 0; x < tw; ++x) {
+                uint32_t r = 0, g = 0, b = 0;
+                const int* cx = &xs[static_cast<size_t>(x) * kx];
+                for (int j = 0; j < ky; ++j) {
+                    for (int i = 0; i < kx; ++i) {
+                        const uint8_t* px = rows[j] + static_cast<size_t>(cx[i]) * 4;
+                        r += px[rOff]; g += px[1]; b += px[bOff];
+                    }
+                }
+                o[x] = 0xff000000u | ((r / samples) << 16) | ((g / samples) << 8) | (b / samples);
+            }
+        }
+        cairo_surface_mark_dirty(slot.get());
         return true;
     }
 
@@ -3748,6 +3790,7 @@ private:
         std::unique_ptr<Job> job = std::move(it->second);
         fJobs.erase(it);
         if (job->timeout) g_source_remove(job->timeout);
+        if (job->resume) g_source_remove(job->resume);
         if (job->stream) pw_stream_destroy(job->stream);
         if (job->wl) zkde_screencast_stream_unstable_v1_close(job->wl);
         wl_display_flush(gWl.display);
