@@ -10320,12 +10320,24 @@ static void PrintUsage(const char* argv0) {
            "  -h, --help           show this help\n", argv0);
 }
 
-// A second dock on top of the first would be confusing; hold a bus name.
+// A second dock on top of the first would be confusing; hold a bus name. The name
+// includes the Wayland display, so one dock runs per compositor session: KDE on one
+// tty and Sway on another both share the user's bus, and each gets its own dock.
 static bool AcquireSingleInstance() {
     GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
     if (bus == nullptr) return true; // no bus: nothing to coordinate with
+    std::string name = "net.epluribusunix.hDesktop";
+    if (const char* display = g_getenv("WAYLAND_DISPLAY")) {
+        // Bus-name elements allow letters, digits, '_' and '-' and can't start with a digit.
+        std::string element;
+        for (const char* c = display; *c; ++c) element += (g_ascii_isalnum(*c) || *c == '_' || *c == '-') ? *c : '_';
+        if (!element.empty()) {
+            if (g_ascii_isdigit(element[0])) element = "d" + element;
+            name += "." + element;
+        }
+    }
     GVariant* reply = g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-        "org.freedesktop.DBus", "RequestName", g_variant_new("(su)", "net.epluribusunix.hDesktop", 4u /* DO_NOT_QUEUE */),
+        "org.freedesktop.DBus", "RequestName", g_variant_new("(su)", name.c_str(), 4u /* DO_NOT_QUEUE */),
         G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 2000, nullptr, nullptr);
     if (reply == nullptr) return true;
     guint32 result = 0;
