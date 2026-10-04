@@ -4211,6 +4211,10 @@ public:
         } else if (g_getenv("SWAYSOCK")) {
             fBackend = kSway;
             InitSway();
+        } else if (g_getenv("WAYFIRE_SOCKET")) {
+            // Wayfire has no workspace protocol, only its IPC (the ipc and ipc-rules
+            // plugins); if those aren't loaded the socket is absent and we stay "none".
+            InitWayfire();
         }
         DebugLog("workspace backend: %s\n", BackendName());
     }
@@ -4221,6 +4225,7 @@ public:
             case kExt: return "ext-workspace-v1";
             case kHyprland: return "Hyprland IPC";
             case kSway: return "Sway IPC";
+            case kWayfire: return "Wayfire IPC";
             default: return "none";
         }
     }
@@ -4269,6 +4274,15 @@ public:
                 SwayRequest(0, "workspace " + SwayQuote(w.name));
                 RefreshSway();
                 break;
+            case kWayfire: {
+                int gx = 0, gy = 0;
+                if (sscanf(w.id.c_str(), "%d,%d", &gx, &gy) == 2) {
+                    WayfireRequest("vswitch/set-workspace", "{\"x\":" + std::to_string(gx) + ",\"y\":" +
+                        std::to_string(gy) + ",\"output-id\":" + std::to_string(fWf.outputId) + "}");
+                    RefreshWayfire();
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -4284,13 +4298,18 @@ public:
         std::string workspace;   // as the compositor names it
         int x = 0, y = 0, w = 0, h = 0;
         bool focused = false;
+        bool allWorkspaces = false;   // sticky: shown on every workspace
     };
 
-    bool HasWindowSource() const { return g_getenv("SWAYSOCK") || g_getenv("HYPRLAND_INSTANCE_SIGNATURE"); }
+    bool HasWindowSource() const {
+        return g_getenv("SWAYSOCK") || g_getenv("HYPRLAND_INSTANCE_SIGNATURE") || fBackend == kWayfire;
+    }
 
     std::vector<WsWindow> QueryWindows() {
         std::vector<WsWindow> out;
-        if (g_getenv("SWAYSOCK")) {
+        if (fBackend == kWayfire) {
+            QueryWayfireWindows(out);
+        } else if (g_getenv("SWAYSOCK")) {
             Json tree = Json::Parse(SwayRequest(4, ""));
             CollectSwayWindows(tree, std::string(), out);
         } else if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) {
@@ -4315,7 +4334,9 @@ public:
     }
 
     void MoveWindow(const WsWindow& win, const std::string& workspace) {
-        if (g_getenv("SWAYSOCK")) {
+        if (fBackend == kWayfire) {
+            MoveWayfireWindow(win, workspace);
+        } else if (g_getenv("SWAYSOCK")) {
             SwayRequest(0, "[con_id=" + win.key + "] move container to workspace " + SwayQuote(workspace));
         } else if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) {
             bool numeric = !workspace.empty() && workspace.find_first_not_of("0123456789") == std::string::npos;
@@ -4325,7 +4346,8 @@ public:
     }
 
     void FocusWindow(const WsWindow& win) {
-        if (g_getenv("SWAYSOCK")) SwayRequest(0, "[con_id=" + win.key + "] focus");
+        if (fBackend == kWayfire) WayfireRequest("window-rules/focus-view", "{\"id\":" + win.key + "}");
+        else if (g_getenv("SWAYSOCK")) SwayRequest(0, "[con_id=" + win.key + "] focus");
         else if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) HyprRequest("dispatch focuswindow address:" + win.key);
     }
 
@@ -4356,7 +4378,133 @@ private:
         if (floating) for (const auto& c : floating->arr) CollectSwayWindows(c, ws, out);
     }
 
-    enum Backend { kNone, kPlasma, kExt, kHyprland, kSway };
+    enum Backend { kNone, kPlasma, kExt, kHyprland, kSway, kWayfire };
+
+    // ---- Wayfire IPC ----
+    // Messages are a 4-byte little-endian length followed by JSON. Workspaces are the
+    // cells of a grid; a window's coordinates are relative to the workspace you are
+    // on, so which cell it belongs to follows from where it sits, and moving it
+    // means shifting its position by whole screens.
+    struct WayfireState {
+        int outputId = 1;
+        double x = 0, y = 0, w = 1280, h = 720;   // the output
+        int gridW = 1, gridH = 1, curX = 0, curY = 0;
+    } fWf;
+
+    static bool ReadFully(int fd, char* buf, size_t n) {
+        size_t got = 0;
+        while (got < n) {
+            ssize_t r = read(fd, buf + got, n - got);
+            if (r <= 0) return false;
+            got += r;
+        }
+        return true;
+    }
+
+    Json WayfireRequest(const std::string& method, const std::string& data = "{}") {
+        const char* path = g_getenv("WAYFIRE_SOCKET");
+        int fd = path ? ConnectUnix(path) : -1;
+        if (fd < 0) return Json();
+        timeval tv{0, 500000};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        std::string body = "{\"method\":\"" + method + "\",\"data\":" + data + "}";
+        uint32_t len = static_cast<uint32_t>(body.size());
+        std::string msg(reinterpret_cast<const char*>(&len), 4);
+        msg += body;
+        Json reply;
+        uint32_t replyLen = 0;
+        if (write(fd, msg.data(), msg.size()) == static_cast<ssize_t>(msg.size()) &&
+            ReadFully(fd, reinterpret_cast<char*>(&replyLen), 4) && replyLen > 0 && replyLen < (16u << 20)) {
+            std::string text(replyLen, '\0');
+            if (ReadFully(fd, text.data(), replyLen)) reply = Json::Parse(text);
+        }
+        close(fd);
+        return reply;
+    }
+
+    // Reads the focused output and its workspace grid; rebuilds the list when it changed.
+    void RefreshWayfire() {
+        Json out = WayfireRequest("window-rules/get-focused-output");
+        const Json* info = out.Get("info");
+        const Json* ws = info ? info->Get("workspace") : nullptr;
+        const Json* geo = info ? info->Get("geometry") : nullptr;
+        if (!ws || !geo) return;
+        WayfireState st;
+        st.outputId = static_cast<int>(info->Num("id", 1));
+        st.x = geo->Num("x"); st.y = geo->Num("y");
+        st.w = std::max(1.0, geo->Num("width", 1280)); st.h = std::max(1.0, geo->Num("height", 720));
+        st.gridW = std::max(1, static_cast<int>(ws->Num("grid_width", 1)));
+        st.gridH = std::max(1, static_cast<int>(ws->Num("grid_height", 1)));
+        st.curX = static_cast<int>(ws->Num("x")); st.curY = static_cast<int>(ws->Num("y"));
+        bool changed = fWorkspaces.size() != static_cast<size_t>(st.gridW * st.gridH) ||
+            st.curX != fWf.curX || st.curY != fWf.curY;
+        fWf = st;
+        if (!changed) return;
+        fWorkspaces.clear();
+        for (int gy = 0; gy < st.gridH; ++gy) {
+            for (int gx = 0; gx < st.gridW; ++gx) {
+                auto w = std::make_unique<WorkspaceInfo>();
+                w->id = std::to_string(gx) + "," + std::to_string(gy);
+                w->name = std::to_string(gy * st.gridW + gx + 1);
+                w->active = gx == st.curX && gy == st.curY;
+                w->sortKey = gy * st.gridW + gx;
+                fWorkspaces.push_back(std::move(w));
+            }
+        }
+        Changed();
+    }
+
+    void InitWayfire() {
+        const char* path = g_getenv("WAYFIRE_SOCKET");
+        if (!path || !FileExists(path)) return;
+        fBackend = kWayfire;
+        RefreshWayfire();
+        if (fWorkspaces.empty()) { fBackend = kNone; return; }
+        g_timeout_add(500, [](gpointer p) -> gboolean {   // no change events to subscribe to cheaply: poll
+            static_cast<WorkspaceManager*>(p)->RefreshWayfire();
+            return G_SOURCE_CONTINUE;
+        }, this);
+    }
+
+    void QueryWayfireWindows(std::vector<WsWindow>& out) {
+        RefreshWayfire();
+        Json views = WayfireRequest("window-rules/list-views");
+        for (const auto& v : views.arr) {
+            if (v.Str("role") != "toplevel" || !v.Bool("mapped") || v.Bool("minimized")) continue;
+            const Json* g = v.Get("geometry");
+            if (!g) continue;
+            double gx = g->Num("x"), gy = g->Num("y"), gw = g->Num("width"), gh = g->Num("height");
+            // Which screen-sized cell the window's centre falls in, relative to the current workspace.
+            int dx = static_cast<int>(std::floor((gx + gw / 2 - fWf.x) / fWf.w));
+            int dy = static_cast<int>(std::floor((gy + gh / 2 - fWf.y) / fWf.h));
+            WsWindow w;
+            w.key = std::to_string(static_cast<long long>(v.Num("id")));
+            w.title = v.Str("title");
+            w.appId = v.Str("app-id");
+            w.workspace = std::to_string(fWf.curX + dx) + "," + std::to_string(fWf.curY + dy);
+            w.x = static_cast<int>(gx - dx * fWf.w);   // position within its own workspace
+            w.y = static_cast<int>(gy - dy * fWf.h);
+            w.w = static_cast<int>(gw);
+            w.h = static_cast<int>(gh);
+            w.focused = v.Bool("activated");
+            w.allWorkspaces = v.Bool("sticky");
+            out.push_back(std::move(w));
+        }
+    }
+
+    // Shifts the window by whole screens so it lands on the target workspace (named by
+    // its number), without switching to it.
+    void MoveWayfireWindow(const WsWindow& win, const std::string& workspace) {
+        RefreshWayfire();
+        int index = atoi(workspace.c_str()) - 1;
+        if (index < 0 || index >= fWf.gridW * fWf.gridH) return;
+        int tx = index % fWf.gridW, ty = index / fWf.gridW;
+        int x = static_cast<int>((tx - fWf.curX) * fWf.w) + win.x;
+        int y = static_cast<int>((ty - fWf.curY) * fWf.h) + win.y;
+        WayfireRequest("window-rules/configure-view", "{\"id\":" + win.key + ",\"geometry\":{\"x\":" +
+            std::to_string(x) + ",\"y\":" + std::to_string(y) + ",\"width\":" + std::to_string(win.w) +
+            ",\"height\":" + std::to_string(win.h) + "}}");
+    }
 
     void Changed() {
         if (fChangePending) return;
@@ -5908,7 +6056,7 @@ private:
                 win.gx = w.x; win.gy = w.y; win.gw = w.w; win.gh = w.h;
                 win.activated = w.focused;
                 for (int i = 0; i < static_cast<int>(fList.size()); ++i) {
-                    if (fList[i].name == w.workspace || fList[i].id == w.workspace) win.wss.push_back(i);
+                    if (w.allWorkspaces || fList[i].name == w.workspace || fList[i].id == w.workspace) win.wss.push_back(i);
                 }
                 win.ipc = w;
                 win.viaIpc = true;
