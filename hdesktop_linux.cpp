@@ -2282,6 +2282,11 @@ public:
     void OpenHover(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor, std::vector<MenuItem> items,
         bool centered);
     void UpdateHover(std::vector<MenuItem> items);
+    void RedrawHover();
+    // Window previews: a second popup (the title list) stacked above the thumbnail one.
+    void OpenHoverTitles(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor, std::vector<MenuItem> items);
+    void UpdateHoverTitles(std::vector<MenuItem> items);
+    int HoverHeight() const;
 
     void CloseAll();
     void CloseHover();
@@ -2291,11 +2296,13 @@ public:
     uint64_t LastClosedAt() const { return fClosedAt; }
 
     std::function<void()> onStateChanged; // lets the dock stop auto-hiding while a menu is up
+    std::function<void()> onHoverClosed;  // the hover popup went away (stops the preview streams)
 
 private:
     friend class PopupMenu;
     std::unique_ptr<PopupMenu> fRoot;
     std::unique_ptr<PopupMenu> fHover;
+    std::unique_ptr<PopupMenu> fHoverTitles;
     uint64_t fClosedAt = 0;
 };
 
@@ -2413,8 +2420,8 @@ public:
             double left = fHasLeftColumn ? kLeftColumn : kPadX;
             if (it.wantThumb) {
                 DrawThumbCard(cr, it, kPadX, y + 5, w - kPadX * 2, kThumbH);
-                textY = y + rh - kRowH + (kRowH - textH) / 2.0;
-                left = kPadX;
+                y += rh;
+                continue;
             }
 
             if (it.check != kCheckNone) {
@@ -2608,7 +2615,7 @@ private:
     static constexpr double kThumbH = 110.0;
     static double RowHeight(const MenuItem& it) {
         if (it.separator) return kSepH;
-        return it.wantThumb ? kThumbH + 10.0 + kRowH : kRowH;
+        return it.wantThumb ? kThumbH + 10.0 : kRowH;
     }
 
     static void DrawThumbCard(cairo_t* cr, const MenuItem& it, double x, double y, double w, double h) {
@@ -2656,10 +2663,10 @@ private:
             if (it.icon || !it.iconName.empty() || it.check != kCheckNone) fHasLeftColumn = true;
             if (it.barPercent >= 0) hasBars = true;
             if (it.submenu) hasSubmenus = true;
+            if (it.wantThumb) { hasThumbs = true; continue; }
             double tw = 0;
             MeasureText(it.label, kFontSize, it.header, &tw, nullptr);
             maxLabel = std::max(maxLabel, tw);
-            if (it.wantThumb) hasThumbs = true;
         }
         double left = fHasLeftColumn ? kLeftColumn : kPadX;
         double w;
@@ -2891,8 +2898,31 @@ void MenuManager::UpdateHover(std::vector<MenuItem> items) {
     if (fHover) fHover->ReplaceItems(std::move(items));
 }
 
+void MenuManager::RedrawHover() {
+    if (fHover) fHover->Redraw();
+}
+
+int MenuManager::HoverHeight() const {
+    return fHover ? fHover->MeasuredHeight() : 0;
+}
+
+void MenuManager::OpenHoverTitles(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor,
+    std::vector<MenuItem> items) {
+    if (!fHover || items.empty()) return;
+    auto menu = std::make_unique<PopupMenu>(std::move(items), nullptr, false, true);
+    PopupAnchor a = anchor;
+    a.constraints |= XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y;
+    if (!menu->CreatePopup(parentLayer, nullptr, a, menu->MeasuredWidth(), menu->MeasuredHeight(), 0)) return;
+    menu->onDismissed = [this]() { CloseHover(); };
+    fHoverTitles = std::move(menu);
+}
+
+void MenuManager::UpdateHoverTitles(std::vector<MenuItem> items) {
+    if (fHoverTitles) fHoverTitles->ReplaceItems(std::move(items));
+}
+
 bool MenuManager::PointerInHover() const {
-    return fHover && fHover->PointerInside();
+    return (fHover && fHover->PointerInside()) || (fHoverTitles && fHoverTitles->PointerInside());
 }
 
 void MenuManager::CloseAll() {
@@ -2905,9 +2935,14 @@ void MenuManager::CloseAll() {
 }
 
 void MenuManager::CloseHover() {
+    if (fHoverTitles) {
+        PopupMenu* raw = fHoverTitles.release();
+        RunLater([raw]() { delete raw; });
+    }
     if (fHover) {
         PopupMenu* raw = fHover.release();
         RunLater([raw]() { delete raw; });
+        if (onHoverClosed) onHoverClosed();
         if (onStateChanged) onStateChanged();
     }
 }
@@ -3478,11 +3513,16 @@ const org_kde_plasma_window_listener ToplevelManager::kPlasmaWindowListener = {
 // =========================================================================
 // KWin has no screencopy protocol, but it will stream any single window by
 // uuid over PipeWire -- including windows on other virtual desktops. Hovering
-// a dock icon grabs one frame of each of its windows (open stream, wait for
-// the first valid buffer, close it) and caches it as a cairo surface.
+// a dock icon opens a stream per window; every frame (capped at 30 fps) is
+// scaled into a cairo surface the hover popup draws. The streams close with
+// the popup, and the last frame stays cached so the next hover has something
+// to show at once.
 class WindowPreviews {
 public:
-    std::function<void()> onUpdated;   // a new thumbnail landed
+    // Called (at most ~30x/s) while streams are live. rebuild == true when a
+    // thumbnail surface was created or resized, so the popup rows must be
+    // rebuilt; otherwise the surfaces were repainted in place and a redraw is enough.
+    std::function<void(bool rebuild)> onUpdated;
 
     bool Available() const { return gWl.screencast != nullptr; }
 
@@ -3498,12 +3538,12 @@ public:
         job->uuid = uuid;
         job->wl = zkde_screencast_unstable_v1_stream_window(gWl.screencast, uuid.c_str(), 1 /* pointer: hidden */);
         zkde_screencast_stream_unstable_v1_add_listener(job->wl, &kStreamListener, job.get());
-        job->timeout = RunAfter(2500, [this, uuid]() {
+        job->timeout = RunAfter(2500, [this, uuid]() {   // no first frame in time: give up
             auto it = fJobs.find(uuid);
             if (it == fJobs.end()) return;
             it->second->timeout = 0;
             DebugLog("preview: timed out for %s\n", uuid.c_str());
-            Finish(uuid, nullptr);
+            Finish(uuid);
         });
         fJobs[uuid] = std::move(job);
         wl_display_flush(gWl.display);
@@ -3518,8 +3558,20 @@ private:
         spa_hook hook{};
         spa_video_info_raw fmt{};
         guint timeout = 0;
-        bool done = false;
+        uint64_t lastFrame = 0;
     };
+
+public:
+    // Closes every stream (the hover popup went away). Cached frames stay.
+    void StopAll() {
+        std::vector<std::string> uuids;
+        for (auto& kv : fJobs) uuids.push_back(kv.first);
+        for (auto& u : uuids) Finish(u);
+    }
+
+private:
+    guint fFlushTimer = 0;
+    bool fFlushRebuild = false;
 
     pw_loop* fLoop = nullptr;
     pw_context* fContext = nullptr;
@@ -3549,7 +3601,7 @@ private:
     }
 
     void StartStream(Job* j, uint32_t node, uint64_t serial) {
-        if (j->stream || j->done) return;
+        if (j->stream) return;
         pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
             PW_KEY_MEDIA_ROLE, "Screen", nullptr);
         uint32_t target = PW_ID_ANY;
@@ -3561,14 +3613,14 @@ private:
             target = node;
         }
         j->stream = pw_stream_new(fCore, "hdesktop-preview", props);
-        if (!j->stream) { Finish(j->uuid, nullptr); return; }
+        if (!j->stream) { Finish(j->uuid); return; }
         static const pw_stream_events events = MakeEvents();
         pw_stream_add_listener(j->stream, &j->hook, &events, j);
 
         uint8_t buffer[1024];
         spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         spa_rectangle defSize{320, 200}, minSize{1, 1}, maxSize{8192, 8192};
-        spa_fraction defRate{25, 1}, minRate{0, 1}, maxRate{1000, 1};
+        spa_fraction defRate{30, 1}, minRate{0, 1}, maxRate{30, 1};
         const spa_pod* params[1];
         params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(&b,
             SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
@@ -3582,7 +3634,7 @@ private:
             static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
         if (r < 0) {
             DebugLog("preview: pw_stream_connect failed: %d\n", r);
-            Finish(j->uuid, nullptr);
+            Finish(j->uuid);
         }
     }
 
@@ -3593,7 +3645,7 @@ private:
             auto* j = static_cast<Job*>(data);
             if (state == PW_STREAM_STATE_ERROR) {
                 DebugLog("preview: stream error: %s\n", error ? error : "?");
-                RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid, nullptr); });
+                RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); });
             }
         };
         e.param_changed = [](void* data, uint32_t id, const spa_pod* param) {
@@ -3618,61 +3670,80 @@ private:
             pw_buffer* pb = pw_stream_dequeue_buffer(j->stream);
             if (!pb) return;
             spa_buffer* sb = pb->buffer;
-            if (!j->done && sb->n_datas > 0 && sb->datas[0].data && sb->datas[0].chunk->size > 0 &&
-                !(sb->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
-                IconRef img = ConvertFrame(j->fmt, sb->datas[0]);
-                if (img) {
-                    j->done = true;
-                    RunLater([o = j->owner, uuid = j->uuid, img]() { o->Finish(uuid, img); });
-                }
+            uint64_t now = NowMs();
+            // KWin already honors the 30 fps cap; this just drops any extras.
+            if (sb->n_datas > 0 && sb->datas[0].data && sb->datas[0].chunk->size > 0 &&
+                !(sb->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) && now - j->lastFrame >= 30) {
+                j->lastFrame = now;
+                j->owner->OnFrame(j, sb->datas[0]);
             }
             pw_stream_queue_buffer(j->stream, pb);
         };
         return e;
     }
 
-    // Copy the frame into a cairo surface, downscaled to at most 2x the card size.
-    static IconRef ConvertFrame(const spa_video_info_raw& fmt, const spa_data& d) {
+    void OnFrame(Job* j, const spa_data& d) {
+        if (j->timeout) { g_source_remove(j->timeout); j->timeout = 0; }
+        IconRef& slot = fThumbs[j->uuid];
+        bool rebuilt = false;
+        if (!ScaleFrame(j->fmt, d, slot, &rebuilt)) return;
+        fFlushRebuild = fFlushRebuild || rebuilt;
+        if (!fFlushTimer) {
+            fFlushTimer = RunAfter(33, [this]() {
+                fFlushTimer = 0;
+                bool rebuild = fFlushRebuild;
+                fFlushRebuild = false;
+                if (onUpdated) onUpdated(rebuild);
+            });
+        }
+    }
+
+    // Scales the frame into `slot`. The surface is repainted in place when the
+    // size is unchanged, because the popup rows hold a pointer to it.
+    static bool ScaleFrame(const spa_video_info_raw& fmt, const spa_data& d, IconRef& slot, bool* rebuilt) {
         int w = static_cast<int>(fmt.size.width), h = static_cast<int>(fmt.size.height);
-        if (w <= 0 || h <= 0) return IconRef();
+        if (w <= 0 || h <= 0) return false;
         int stride = d.chunk->stride > 0 ? d.chunk->stride : w * 4;
-        if (static_cast<size_t>(d.chunk->offset) + static_cast<size_t>(stride) * h > d.maxsize) return IconRef();
+        if (static_cast<size_t>(d.chunk->offset) + static_cast<size_t>(stride) * h > d.maxsize) return false;
         const uint8_t* src = static_cast<const uint8_t*>(d.data) + d.chunk->offset;
         bool swap = fmt.format == SPA_VIDEO_FORMAT_RGBA || fmt.format == SPA_VIDEO_FORMAT_RGBx;
-        bool opaque = fmt.format == SPA_VIDEO_FORMAT_BGRx || fmt.format == SPA_VIDEO_FORMAT_RGBx;
 
-        cairo_surface_t* full = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-        if (cairo_surface_status(full) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(full); return IconRef(); }
-        uint8_t* dst = cairo_image_surface_get_data(full);
-        int dstride = cairo_image_surface_get_stride(full);
-        cairo_surface_flush(full);
-        for (int y = 0; y < h; ++y) {
-            const uint8_t* s = src + static_cast<size_t>(y) * stride;
-            uint32_t* o = reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * dstride);
-            for (int x = 0; x < w; ++x, s += 4) {
-                uint8_t c0 = s[0], c1 = s[1], c2 = s[2], a = opaque ? 255 : s[3];
-                uint8_t r = swap ? c0 : c2, b = swap ? c2 : c0;
-                if (a != 255) { r = r * a / 255; c1 = c1 * a / 255; b = b * a / 255; }  // premultiply
-                o[x] = (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(c1) << 8) | b;
+        // KWin hands out BGRx/BGRA, which cairo reads as-is. RGBx/RGBA need the
+        // red and blue channels swapped first (rare; slow path).
+        cairo_surface_t* source = nullptr;
+        std::vector<uint8_t> swapped;
+        if (swap) {
+            swapped.resize(static_cast<size_t>(w) * h * 4);
+            for (int y = 0; y < h; ++y) {
+                const uint8_t* s = src + static_cast<size_t>(y) * stride;
+                uint8_t* o = swapped.data() + static_cast<size_t>(y) * w * 4;
+                for (int x = 0; x < w; ++x, s += 4, o += 4) { o[0] = s[2]; o[1] = s[1]; o[2] = s[0]; o[3] = 255; }
             }
+            source = cairo_image_surface_create_for_data(swapped.data(), CAIRO_FORMAT_RGB24, w, h, w * 4);
+        } else {
+            source = cairo_image_surface_create_for_data(const_cast<uint8_t*>(src), CAIRO_FORMAT_RGB24, w, h, stride);
         }
-        cairo_surface_mark_dirty(full);
+        if (cairo_surface_status(source) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(source); return false; }
 
         double scale = std::min(1.0, std::min(360.0 / w, 220.0 / h));
         int tw = std::max(1, static_cast<int>(std::lround(w * scale)));
         int th = std::max(1, static_cast<int>(std::lround(h * scale)));
-        cairo_surface_t* out = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, tw, th);
-        cairo_t* cr = cairo_create(out);
-        cairo_scale(cr, scale, scale);
-        cairo_set_source_surface(cr, full, 0, 0);
-        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+        if (!slot || cairo_image_surface_get_width(slot.get()) != tw || cairo_image_surface_get_height(slot.get()) != th) {
+            slot = IconRef(cairo_image_surface_create(CAIRO_FORMAT_ARGB32, tw, th), cairo_surface_destroy);
+            *rebuilt = true;
+        }
+        cairo_t* cr = cairo_create(slot.get());
+        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+        cairo_scale(cr, static_cast<double>(tw) / w, static_cast<double>(th) / h);
+        cairo_set_source_surface(cr, source, 0, 0);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
         cairo_paint(cr);
         cairo_destroy(cr);
-        cairo_surface_destroy(full);
-        return IconRef(out, cairo_surface_destroy);
+        cairo_surface_destroy(source);
+        return true;
     }
 
-    void Finish(const std::string& uuid, IconRef img) {
+    void Finish(const std::string& uuid) {
         auto it = fJobs.find(uuid);
         if (it == fJobs.end()) return;
         std::unique_ptr<Job> job = std::move(it->second);
@@ -3681,11 +3752,7 @@ private:
         if (job->stream) pw_stream_destroy(job->stream);
         if (job->wl) zkde_screencast_stream_unstable_v1_close(job->wl);
         wl_display_flush(gWl.display);
-        if (img) {
-            if (fThumbs.size() > 64) fThumbs.clear();
-            fThumbs[uuid] = img;
-            if (onUpdated) onUpdated();
-        }
+        if (fThumbs.size() > 64) fThumbs.clear();
     }
 
     static const zkde_screencast_stream_unstable_v1_listener kStreamListener;
@@ -3693,10 +3760,14 @@ private:
 
 static WindowPreviews gPreviews;
 
+static void InstallPreviewHooks() {
+    gMenus.onHoverClosed = []() { gPreviews.StopAll(); };
+}
+
 const zkde_screencast_stream_unstable_v1_listener WindowPreviews::kStreamListener = {
     .closed = [](void* data, zkde_screencast_stream_unstable_v1*) {
         auto* j = static_cast<Job*>(data);
-        if (!j->done) RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid, nullptr); });
+        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); });
     },
     .created = [](void* data, zkde_screencast_stream_unstable_v1*, uint32_t node) {
         auto* j = static_cast<Job*>(data);
@@ -3705,7 +3776,7 @@ const zkde_screencast_stream_unstable_v1_listener WindowPreviews::kStreamListene
     .failed = [](void* data, zkde_screencast_stream_unstable_v1*, const char* error) {
         auto* j = static_cast<Job*>(data);
         DebugLog("preview: compositor refused stream: %s\n", error ? error : "?");
-        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid, nullptr); });
+        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); });
     },
     .serial = [](void* data, zkde_screencast_stream_unstable_v1*, uint32_t hi, uint32_t lo) {
         auto* j = static_cast<Job*>(data);
@@ -6480,11 +6551,22 @@ private:
                     a.gravity = XDG_POSITIONER_GRAVITY_TOP;
                     a.offsetY = -12;
                 }
-                if (PreviewsOn()) {
-                    gPreviews.onUpdated = [this]() { RefreshHoverPopup(); };
+                const bool previews = PreviewsOn();
+                gMenus.OpenHover(layerSurface, a, WindowListItems(*hovered, previews), !previews);
+                if (previews && gMenus.HoverOpen()) {
+                    // Titles can run long, so they get their own popup stacked
+                    // above (below, for a top dock) the thumbnail cards.
+                    PopupAnchor ta = a;
+                    int stack = gMenus.HoverHeight() + 6;
+                    ta.offsetY = top ? a.offsetY + stack : a.offsetY - stack;
+                    gMenus.OpenHoverTitles(layerSurface, ta, WindowListItems(*hovered, false));
+                    // After OpenHover: opening closes the previous popup, which stops its streams.
+                    gPreviews.onUpdated = [this](bool rebuild) {
+                        if (rebuild) RefreshHoverPopup();
+                        else gMenus.RedrawHover();
+                    };
                     for (Toplevel* t : hovered->windows) gPreviews.Request(t->uuid);
                 }
-                gMenus.OpenHover(layerSurface, a, WindowListItems(*hovered), !PreviewsOn());
             }
         } else if (gMenus.HoverOpen()) {
             ScheduleHoverClose();
@@ -6493,12 +6575,12 @@ private:
 
     static bool PreviewsOn() { return gSettings.windowPreviews && gPreviews.Available(); }
 
-    std::vector<MenuItem> WindowListItems(const DockApp& app) {
+    std::vector<MenuItem> WindowListItems(const DockApp& app, bool thumbs) {
         std::vector<MenuItem> items;
         for (Toplevel* t : app.windows) {
             MenuItem m;
             m.label = t->title.empty() ? app.displayName : t->title;
-            if (PreviewsOn()) {
+            if (thumbs) {
                 m.wantThumb = true;
                 m.thumb = gPreviews.Get(t->uuid);
             }
@@ -6521,7 +6603,9 @@ private:
         for (auto& app : fApps) {
             if (app.key != fHoverKey || app.closing) continue;
             if (app.windows.size() == fHoverWindowCount) {
-                gMenus.UpdateHover(WindowListItems(app));
+                const bool previews = PreviewsOn();
+                gMenus.UpdateHover(WindowListItems(app, previews));
+                if (previews) gMenus.UpdateHoverTitles(WindowListItems(app, false));
             } else {
                 gMenus.CloseHover();
                 fHoverKey.clear();
@@ -9336,6 +9420,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    InstallPreviewHooks();
     gMainLoop = g_main_loop_new(nullptr, FALSE);
     gIconTheme = new IconTheme();
     gApps = new AppDatabase();
