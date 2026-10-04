@@ -2441,8 +2441,6 @@ public:
             cairo_save(cr);
             RoundedRectPath(cr, 0, 0, w, h, 6.0);
             cairo_clip(cr);
-            cairo_rectangle(cr, 0, ViewTop(), w, ViewBottom() - ViewTop());
-            cairo_clip(cr);
             DrawHighlight(cr);
             cairo_restore(cr);
         }
@@ -2807,18 +2805,14 @@ private:
     void DrawScrollArrows(cairo_t* cr) {
         const double w = width, h = height;
         auto arrow = [&](double cy, bool up, bool active, bool hot) {
-            if (hot && active) {
-                SetAccent(cr, 0.35);
-                cairo_rectangle(cr, 1, up ? 1 : h - kArrowH, w - 2, kArrowH - 1);
-                cairo_fill(cr);
-            }
-            double cx = w / 2, d = up ? -1 : 1;
+            double cx = w / 2, d = up ? -1 : 1;   // (the lit strip itself is DrawHighlight's)
             cairo_new_path(cr);
             cairo_move_to(cr, cx - 5, cy - 2.5 * d);
             cairo_line_to(cr, cx, cy + 2.5 * d);
             cairo_line_to(cr, cx + 5, cy - 2.5 * d);
             cairo_close_path(cr);
-            cairo_set_source_rgba(cr, 220 / 255.0, 220 / 255.0, 225 / 255.0, active ? 0.9 : 0.25);
+            RGBA glyph = (hot && active) ? AccentTextColor() : RGBA{220 / 255.0, 220 / 255.0, 225 / 255.0, 1};
+            cairo_set_source_rgba(cr, glyph.r, glyph.g, glyph.b, active ? 0.9 : 0.25);
             cairo_fill(cr);
         };
         arrow(kArrowH / 2, true, fScroll > 0.5, fScrollDir < 0);
@@ -2893,35 +2887,62 @@ private:
         }
         auto cornerR = [&](bool flush, bool exposed) { return (!flush || exposed) ? kR : 0.0; };
 
+        // While the pointer sits on a scroll arrow (the menu scrolls), that strip is
+        // the lit element -- it takes the place of a hovered row so the trail stays
+        // connected to it instead of ending at the parent's row.
+        int arrowDir = 0;
+        if (Scrollable()) {
+            if (fScrollDir < 0 && fScroll > 0.5) arrowDir = -1;
+            else if (fScrollDir > 0 && fScroll < MaxScroll() - 0.5) arrowDir = 1;
+        }
+
+        // One lit piece spanning [top, bottom]. `onTrail`: it is my link to the parent.
+        // Clipped to the scrolling view, which is why it is done by hand: the arrow
+        // strips lie outside it and must still be able to light up.
+        auto addPiece = [&](double top, double bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow) {
+            double vt = arrow ? 0 : ViewTop(), vb = arrow ? static_cast<double>(height) : ViewBottom();
+            bool cutTop = top < vt, cutBottom = bottom > vb;
+            double t = std::max(top, vt), b = std::min(bottom, vb);
+            if (b <= t) return;
+            bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft);
+            bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft);
+            double x0 = leftFlush ? 0 : 3, x1 = rightFlush ? w : w - 3;
+            bool expTop = onTrail && top < pTop - 0.5, expBottom = onTrail && bottom > pBottom + 0.5;
+            double tl = cutTop ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
+            double tr = cutTop ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
+            double br = cutBottom ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
+            double bl = cutBottom ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expBottom);
+            pieces.push_back({x0, t, x1 - x0, b - t, tl, tr, br, bl});
+        };
+
         double y = ViewTop() + kPadY - fScroll;
         double ownTop = 0, ownBottom = 0;
+        bool hasOwn = false;
         for (size_t i = 0; i < fItems.size(); ++i) {
             const MenuItem& it = fItems[i];
             const double rh = RowHeight(it);
             if (!it.separator) {
                 bool hovered = (static_cast<int>(i) == fHovered) && it.enabled && !it.header;
                 bool open = fChild && static_cast<int>(i) == fChildIndex && (fHovered < 0 || fHovered == fChildIndex);
-                bool parentRow = parentLink && static_cast<int>(i) == own;
-                if (parentRow) { ownTop = y + 1; ownBottom = y + rh - 1; }
+                bool parentRow = parentLink && static_cast<int>(i) == own && !arrowDir;
+                if (parentRow) { ownTop = y + 1; ownBottom = y + rh - 1; hasOwn = true; }
                 if ((hovered || open || parentRow) && y + rh > ViewTop() && y < ViewBottom()) {
                     bool childOnRight = open && fChild->popupX >= 0;
-                    bool leftFlush = (open && !childOnRight) || (parentRow && parentOnLeft);
-                    bool rightFlush = childOnRight || (parentRow && !parentOnLeft);
-                    double x0 = leftFlush ? 0 : 3, x1 = rightFlush ? w : w - 3;
-                    bool expTop = parentRow && y + 1 < pTop - 0.5, expBottom = parentRow && y + rh - 1 > pBottom + 0.5;
-                    pieces.push_back({x0, y + 1, x1 - x0, rh - 2,
-                        cornerR(leftFlush, parentRow && parentOnLeft && expTop),
-                        cornerR(rightFlush, parentRow && !parentOnLeft && expTop),
-                        cornerR(rightFlush, parentRow && !parentOnLeft && expBottom),
-                        cornerR(leftFlush, parentRow && parentOnLeft && expBottom)});
+                    addPiece(y + 1, y + rh - 1, open, childOnRight, parentRow, false);
                 }
             }
             y += rh;
         }
+        if (arrowDir) {
+            ownTop = arrowDir < 0 ? 2 : height - kArrowH + 1;
+            ownBottom = arrowDir < 0 ? kArrowH - 1 : height - 2;
+            hasOwn = true;
+            addPiece(ownTop, ownBottom, false, false, parentLink, true);
+        }
         if (parentLink) {
             // Bridge my parent's row to mine.
             double top = pTop, bottom = pBottom;
-            if (own >= 0 && ownBottom > ownTop) { top = std::min(top, ownTop); bottom = std::max(bottom, ownBottom); }
+            if (hasOwn && ownBottom > ownTop) { top = std::min(top, ownTop); bottom = std::max(bottom, ownBottom); }
             top = std::max(top, 0.0);
             bottom = std::min(bottom, static_cast<double>(height));
             if (bottom > top) {
@@ -2930,7 +2951,7 @@ private:
                 if (parentOnLeft) pieces.push_back({0, top, barW, bottom - top, rt, r, r, rb});
                 else pieces.push_back({w - barW, top, barW, bottom - top, r, rt, rb, r});
                 // Round the inside corners where the bar meets my row.
-                if (own >= 0 && ownBottom > ownTop) {
+                if (hasOwn && ownBottom > ownTop) {
                     double ex = parentOnLeft ? barW : w - barW;
                     int dx = parentOnLeft ? 1 : -1;
                     if (top < ownTop - 0.5) fillets.push_back({ex, ownTop, dx, -1});
