@@ -29,11 +29,12 @@ PROTOCOLS = \
 	ext-workspace-v1 \
 	xdg-activation-v1 \
 	fractional-scale-v1 \
-	viewporter
+	viewporter \
+	zkde-screencast-unstable-v1
 
 PKGS = wayland-client wayland-egl wayland-cursor egl opengl cairo pangocairo \
        librsvg-2.0 gdk-pixbuf-2.0 gio-unix-2.0 libpulse libpulse-mainloop-glib libcurl \
-       xkbcommon
+       xkbcommon libpipewire-0.3
 
 PROTO_HEADERS = $(patsubst %,$(GEN_DIR)/%-client-protocol.h,$(PROTOCOLS))
 PROTO_SOURCES = $(patsubst %,$(GEN_DIR)/%-protocol.c,$(PROTOCOLS))

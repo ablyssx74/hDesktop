@@ -1,13 +1,13 @@
 # Maintainer: Kris Beazley <hDesktop@epluribusunix.net>
 # Build and install on Arch / CachyOS:  cd linux && makepkg -si
 pkgname=hdesktop-git
-pkgver=1.0.51.r148.3ec748a
+pkgver=1.0.54.r174.37d81f4
 pkgrel=1
 pkgdesc="hDesktop OpenGL dock for Wayland (KDE Plasma, Hyprland, Sway, niri, labwc...)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/ablyssx74/hDesktop"
 license=('MIT')
-depends=('wayland' 'libglvnd' 'mesa' 'cairo' 'pango' 'librsvg' 'gdk-pixbuf2' 'glib2' 'libpulse' 'curl' 'libxkbcommon')
+depends=('wayland' 'libglvnd' 'mesa' 'cairo' 'pango' 'librsvg' 'gdk-pixbuf2' 'glib2' 'libpulse' 'curl' 'libxkbcommon' 'pipewire')
 makedepends=('git')
 optdepends=('pavucontrol: mixer opened by clicking the volume bar'
             'power-profiles-daemon: "Power saving" toggle in the CPU menu')

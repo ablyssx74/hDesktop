@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="zkde_screencast_unstable_v1">
+  <copyright><![CDATA[
+    SPDX-FileCopyrightText: 2020-2021 Aleix Pol Gonzalez <aleixpol@kde.org>
+    SPDX-License-Identifier: LGPL-2.1-or-later
+  ]]></copyright>
+  <interface name="zkde_screencast_unstable_v1" version="6">
+    <description summary="Protocol for managing PipeWire feeds of displays and windows"/>
+    <enum name="pointer">
+      <description summary="Stream consumer attachment attributes"/>
+      <entry name="hidden" value="1" summary="No cursor"/>
+      <entry name="embedded" value="2" summary="Render cursor on stream"/>
+      <entry name="metadata" value="4" summary="Send cursor metadata via PipeWire"/>
+    </enum>
+    <request name="stream_output">
+      <description summary="Request feed from given output"/>
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+    </request>
+    <request name="stream_window">
+      <description summary="Request feed from given window"/>
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="window_uuid" type="string" summary="Window identifier"/>
+      <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+    </request>
+    <request name="destroy" type="destructor">
+      <description summary="Destroy the object"/>
+    </request>
+    <request name="stream_virtual_output" since="2">
+      <description summary="Request feed from new virtual output"/>
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="name" type="string" summary="Output name"/>
+      <arg name="width" type="int" summary="Logical width resolution"/>
+      <arg name="height" type="int" summary="Logical height resolution"/>
+      <arg name="scale" type="fixed" summary="Scaling factor"/>
+      <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+    </request>
+    <request name="stream_region" since="3">
+      <description summary="Request feed from workspace region"/>
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="x" type="int" summary="Logical left position"/>
+      <arg name="y" type="int" summary="Logical top position"/>
+      <arg name="width" type="uint" summary="Logical width resolution"/>
+      <arg name="height" type="uint" summary="Logical height resolution"/>
+      <arg name="scale" type="fixed" summary="Scaling factor"/>
+      <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+    </request>
+    <request name="stream_virtual_output_with_description" since="4">
+      <description summary="Request feed from new virtual output"/>
+      <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+      <arg name="name" type="string" summary="Output name"/>
+      <arg name="description" type="string" summary="User-visible description"/>
+      <arg name="width" type="int" summary="Logical width resolution"/>
+      <arg name="height" type="int" summary="Logical height resolution"/>
+      <arg name="scale" type="fixed" summary="Scaling factor"/>
+      <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+    </request>
+  </interface>
+  <interface name="zkde_screencast_stream_unstable_v1" version="6">
+    <request name="close" type="destructor">
+      <description summary="End stream communication"/>
+    </request>
+    <event name="closed">
+      <description summary="Server stopped the stream"/>
+    </event>
+    <event name="created">
+      <description summary="PipeWire feed created (deprecated since version 6)"/>
+      <arg name="node" type="uint" summary="PipeWire buffer node"/>
+    </event>
+    <event name="failed">
+      <description summary="Error message"/>
+      <arg name="error" type="string" summary="Human-readable error"/>
+    </event>
+    <event name="serial" since="6">
+      <description summary="PipeWire object serial"/>
+      <arg name="object_serial_hi" type="uint" summary="High bits"/>
+      <arg name="object_serial_low" type="uint" summary="Low bits"/>
+    </event>
+  </interface>
+</protocol>
