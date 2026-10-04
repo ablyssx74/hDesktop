@@ -191,6 +191,7 @@ struct Settings {
     float  dockAlpha = 0.32f;
     int    dockColor[3] = {216, 216, 216}; // backplate RGB; Haiku's default panel grey
     int    effectDurationMs = 750;
+    int    previewWidth = 180;        // window preview card width (logical px); height follows 180:110
     int    openEffect = kEffectSpin;
     int    closeEffect = kEffectNone;
     std::set<std::string> favorites;  // desktop file ids, e.g. "org.kde.dolphin.desktop"
@@ -251,6 +252,7 @@ static void SaveConfiguration() {
         gSettings.dockColor[2]);
     g_key_file_set_string(kf, g, "dock_color", colorHex);
     g_key_file_set_integer(kf, g, "effect_duration", gSettings.effectDurationMs);
+    g_key_file_set_integer(kf, g, "preview_width", gSettings.previewWidth);
     g_key_file_set_string(kf, g, "open_effect", kEffectNames[gSettings.openEffect]);
     g_key_file_set_string(kf, g, "close_effect", kEffectNames[gSettings.closeEffect]);
     g_key_file_set_string(kf, g, "output", gSettings.output.c_str());
@@ -333,6 +335,7 @@ static void LoadConfiguration() {
         gSettings.dockColor[2] = static_cast<int>(b);
     }
     getInt("effect_duration", gSettings.effectDurationMs);
+    getInt("preview_width", gSettings.previewWidth);
     std::string effect;
     getString("open_effect", effect);
     gSettings.openEffect = EffectFromName(effect.c_str(), gSettings.openEffect);
@@ -363,6 +366,7 @@ static void LoadConfiguration() {
     gSettings.iconZoom = std::clamp(gSettings.iconZoom, 1.0f, 2.5f);
     gSettings.dockAlpha = std::clamp(gSettings.dockAlpha, 0.0f, 1.0f);
     gSettings.effectDurationMs = std::clamp(gSettings.effectDurationMs, 200, 1500);
+    gSettings.previewWidth = std::clamp(gSettings.previewWidth, 120, 360);
     gSettings.titleLabel = false; // Label Mode was retired; the popup list is the title overlay
 }
 
@@ -2416,7 +2420,7 @@ public:
             if (it.wantThumb) {
                 // The title sits right above the thumbnail it names.
                 textY = y + (kRowH - textH) / 2.0;
-                DrawThumbCard(cr, it, kPadX, y + kRowH, w - kPadX * 2, kThumbH);
+                DrawThumbCard(cr, it, (w - ThumbW()) / 2, y + kRowH, ThumbW(), ThumbH());   // fixed size, centered
             }
 
             if (it.check != kCheckNone) {
@@ -2606,11 +2610,11 @@ private:
     static constexpr double kArrowH = 16.0;   // scroll arrow strips at the top and bottom
     static constexpr double kScreenMargin = 24.0;
 
-    static constexpr double kThumbW = 180.0;
-    static constexpr double kThumbH = 110.0;
+    static double ThumbW() { return gSettings.previewWidth; }
+    static double ThumbH() { return gSettings.previewWidth * 110.0 / 180.0; }
     static double RowHeight(const MenuItem& it) {
         if (it.separator) return kSepH;
-        return it.wantThumb ? kRowH + kThumbH + 8.0 : kRowH;   // title line, then its thumbnail
+        return it.wantThumb ? kRowH + ThumbH() + 8.0 : kRowH;   // title line, then its thumbnail
     }
 
     static void DrawThumbCard(cairo_t* cr, const MenuItem& it, double x, double y, double w, double h) {
@@ -2673,7 +2677,7 @@ private:
         } else {
             w = std::clamp(left + maxLabel + kPadX + 22, 150.0, 420.0);
         }
-        if (hasThumbs) w = std::max(w, kThumbW + kPadX * 2);
+        if (hasThumbs) w = std::max(w, ThumbW() + kPadX * 2);
         fWidth = static_cast<int>(std::ceil(w));
         fContentH = h;
         fHeight = static_cast<int>(std::ceil(std::min(h, MaxHeight())));
@@ -3504,7 +3508,23 @@ public:
     }
 
     void Request(const std::string& uuid) {
-        if (!Available() || uuid.empty() || fJobs.count(uuid) || !InitPipeWire()) return;
+        if (!Available() || uuid.empty()) return;
+        fWanted.insert(uuid);
+        fRetries[uuid] = 0;
+        Start(uuid);
+    }
+
+private:
+    // A brand-new window (Dolphin just launched from the Tracker icon, say)
+    // may not be streamable for a moment: KWin refuses or closes the stream.
+    // Keep trying while the popup that wants it is still up.
+    void Retry(const std::string& uuid) {
+        if (!fWanted.count(uuid) || fRetries[uuid]++ >= 10) return;
+        RunAfter(300, [this, uuid]() { if (fWanted.count(uuid)) Start(uuid); });
+    }
+
+    void Start(const std::string& uuid) {
+        if (fJobs.count(uuid) || !InitPipeWire()) return;
         auto job = std::make_unique<Job>();
         job->owner = this;
         job->uuid = uuid;
@@ -3516,6 +3536,7 @@ public:
             it->second->timeout = 0;
             DebugLog("preview: timed out for %s\n", uuid.c_str());
             Finish(uuid);
+            Retry(uuid);
         });
         fJobs[uuid] = std::move(job);
         wl_display_flush(gWl.display);
@@ -3536,12 +3557,15 @@ private:
 public:
     // Closes every stream (the hover popup went away). Cached frames stay.
     void StopAll() {
+        fWanted.clear();
         std::vector<std::string> uuids;
         for (auto& kv : fJobs) uuids.push_back(kv.first);
         for (auto& u : uuids) Finish(u);
     }
 
 private:
+    std::set<std::string> fWanted;
+    std::map<std::string, int> fRetries;
     guint fFlushTimer = 0;
     bool fFlushRebuild = false;
 
@@ -3617,7 +3641,7 @@ private:
             auto* j = static_cast<Job*>(data);
             if (state == PW_STREAM_STATE_ERROR) {
                 DebugLog("preview: stream error: %s\n", error ? error : "?");
-                RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); });
+                RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); o->Retry(uuid); });
             }
         };
         e.param_changed = [](void* data, uint32_t id, const spa_pod* param) {
@@ -3656,6 +3680,7 @@ private:
 
     void OnFrame(Job* j, const spa_data& d) {
         if (j->timeout) { g_source_remove(j->timeout); j->timeout = 0; }
+        fRetries[j->uuid] = 0;
         IconRef& slot = fThumbs[j->uuid];
         bool rebuilt = false;
         if (!ScaleFrame(j->fmt, d, slot, &rebuilt)) return;
@@ -3697,7 +3722,9 @@ private:
         }
         if (cairo_surface_status(source) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(source); return false; }
 
-        double scale = std::min(1.0, std::min(360.0 / w, 220.0 / h));
+        // Up to 2x the card, so HiDPI stays sharp.
+        double maxW = gSettings.previewWidth * 2.0, maxH = maxW * 110.0 / 180.0;
+        double scale = std::min(1.0, std::min(maxW / w, maxH / h));
         int tw = std::max(1, static_cast<int>(std::lround(w * scale)));
         int th = std::max(1, static_cast<int>(std::lround(h * scale)));
         if (!slot || cairo_image_surface_get_width(slot.get()) != tw || cairo_image_surface_get_height(slot.get()) != th) {
@@ -3739,7 +3766,7 @@ static void InstallPreviewHooks() {
 const zkde_screencast_stream_unstable_v1_listener WindowPreviews::kStreamListener = {
     .closed = [](void* data, zkde_screencast_stream_unstable_v1*) {
         auto* j = static_cast<Job*>(data);
-        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); });
+        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); o->Retry(uuid); });
     },
     .created = [](void* data, zkde_screencast_stream_unstable_v1*, uint32_t node) {
         auto* j = static_cast<Job*>(data);
@@ -3748,7 +3775,7 @@ const zkde_screencast_stream_unstable_v1_listener WindowPreviews::kStreamListene
     .failed = [](void* data, zkde_screencast_stream_unstable_v1*, const char* error) {
         auto* j = static_cast<Job*>(data);
         DebugLog("preview: compositor refused stream: %s\n", error ? error : "?");
-        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); });
+        RunLater([o = j->owner, uuid = j->uuid]() { o->Finish(uuid); o->Retry(uuid); });
     },
     .serial = [](void* data, zkde_screencast_stream_unstable_v1*, uint32_t hi, uint32_t lo) {
         auto* j = static_cast<Job*>(data);
@@ -8974,6 +9001,7 @@ public:
             default:
                 break;
         }
+        if (fBuiltPreviews != (gSettings.windowPreviews && gPreviews.Available())) Relayout();
         Redraw();
     }
 
@@ -9023,6 +9051,21 @@ private:
         button("About hdesktop", RGBA{0.35, 0.55, 0.86, 1}, []() { ShowAboutAlert(); });
         y += 10;
 
+        auto slider = [&](const std::string& label, double min, double max, const char* minL, const char* maxL,
+            std::function<double()> get, std::function<void(double)> set) {
+            Widget w;
+            w.type = Widget::kSlider;
+            w.label = label;
+            w.min = min;
+            w.max = max;
+            w.minLabel = minL;
+            w.maxLabel = maxL;
+            w.getDouble = std::move(get);
+            w.setDouble = std::move(set);
+            w.rect = HRect{40, y, kWidth - 40.0f, y + 52};
+            fWidgets.push_back(w);
+            y += 58;
+        };
         auto check = [&](const std::string& label, bool* value, float x = 40, bool newRow = true, bool enabled = true,
             const char* help = nullptr) {
             Widget w;
@@ -9058,6 +9101,14 @@ private:
         check("Check for Updates", &gSettings.checkForUpdates, 317);
         check("Window Previews", &gSettings.windowPreviews, 40, true, gPreviews.Available(),
             "Thumbnails when hovering dock icons (KDE Plasma)");
+        fBuiltPreviews = gSettings.windowPreviews && gPreviews.Available();
+        if (fBuiltPreviews) {
+            y += 6;
+            slider("Preview Size", 120, 360, "Small", "Large",
+                []() { return static_cast<double>(gSettings.previewWidth); },
+                [](double v) { gSettings.previewWidth = static_cast<int>(std::lround(v)); });
+            y -= 6;
+        }
 
         {
             Widget info;
@@ -9105,21 +9156,6 @@ private:
             y += 30;
         }
 
-        auto slider = [&](const std::string& label, double min, double max, const char* minL, const char* maxL,
-            std::function<double()> get, std::function<void(double)> set) {
-            Widget w;
-            w.type = Widget::kSlider;
-            w.label = label;
-            w.min = min;
-            w.max = max;
-            w.minLabel = minL;
-            w.maxLabel = maxL;
-            w.getDouble = std::move(get);
-            w.setDouble = std::move(set);
-            w.rect = HRect{40, y, kWidth - 40.0f, y + 52};
-            fWidgets.push_back(w);
-            y += 58;
-        };
         slider("Effect Speed (ms)", 200, 1500, "Fast", "Slow",
             []() { return static_cast<double>(gSettings.effectDurationMs); },
             [](double v) { gSettings.effectDurationMs = static_cast<int>(std::lround(v)); });
@@ -9165,6 +9201,20 @@ private:
         if (onDone) onDone();
     }
 
+    // The preview-size slider only exists while previews are on: rebuild the
+    // rows and resize the panel when that flips.
+    void Relayout() {
+        fWidgets.clear();
+        fHovered = -1;
+        fDragging = -1;
+        BuildWidgets();
+        if (layerSurface) {
+            zwlr_layer_surface_v1_set_size(layerSurface, kWidth, static_cast<uint32_t>(fContentHeight));
+            wl_surface_commit(surface);
+        }
+    }
+
+    bool fBuiltPreviews = false;
     std::vector<Widget> fWidgets;
     float fContentHeight = 700;
     int fHovered = -1;
