@@ -2283,10 +2283,6 @@ public:
         bool centered);
     void UpdateHover(std::vector<MenuItem> items);
     void RedrawHover();
-    // Window previews: a second popup (the title list) stacked above the thumbnail one.
-    void OpenHoverTitles(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor, std::vector<MenuItem> items);
-    void UpdateHoverTitles(std::vector<MenuItem> items);
-    int HoverHeight() const;
 
     void CloseAll();
     void CloseHover();
@@ -2302,7 +2298,6 @@ private:
     friend class PopupMenu;
     std::unique_ptr<PopupMenu> fRoot;
     std::unique_ptr<PopupMenu> fHover;
-    std::unique_ptr<PopupMenu> fHoverTitles;
     uint64_t fClosedAt = 0;
 };
 
@@ -2419,9 +2414,9 @@ public:
             double textY = y + (rh - textH) / 2.0;
             double left = fHasLeftColumn ? kLeftColumn : kPadX;
             if (it.wantThumb) {
-                DrawThumbCard(cr, it, kPadX, y + 5, w - kPadX * 2, kThumbH);
-                y += rh;
-                continue;
+                // The title sits right above the thumbnail it names.
+                textY = y + (kRowH - textH) / 2.0;
+                DrawThumbCard(cr, it, kPadX, y + kRowH, w - kPadX * 2, kThumbH);
             }
 
             if (it.check != kCheckNone) {
@@ -2615,7 +2610,7 @@ private:
     static constexpr double kThumbH = 110.0;
     static double RowHeight(const MenuItem& it) {
         if (it.separator) return kSepH;
-        return it.wantThumb ? kThumbH + 10.0 : kRowH;
+        return it.wantThumb ? kRowH + kThumbH + 8.0 : kRowH;   // title line, then its thumbnail
     }
 
     static void DrawThumbCard(cairo_t* cr, const MenuItem& it, double x, double y, double w, double h) {
@@ -2663,7 +2658,7 @@ private:
             if (it.icon || !it.iconName.empty() || it.check != kCheckNone) fHasLeftColumn = true;
             if (it.barPercent >= 0) hasBars = true;
             if (it.submenu) hasSubmenus = true;
-            if (it.wantThumb) { hasThumbs = true; continue; }
+            if (it.wantThumb) hasThumbs = true;
             double tw = 0;
             MeasureText(it.label, kFontSize, it.header, &tw, nullptr);
             maxLabel = std::max(maxLabel, tw);
@@ -2902,27 +2897,8 @@ void MenuManager::RedrawHover() {
     if (fHover) fHover->Redraw();
 }
 
-int MenuManager::HoverHeight() const {
-    return fHover ? fHover->MeasuredHeight() : 0;
-}
-
-void MenuManager::OpenHoverTitles(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor,
-    std::vector<MenuItem> items) {
-    if (!fHover || items.empty()) return;
-    auto menu = std::make_unique<PopupMenu>(std::move(items), nullptr, false, true);
-    PopupAnchor a = anchor;
-    a.constraints |= XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y;
-    if (!menu->CreatePopup(parentLayer, nullptr, a, menu->MeasuredWidth(), menu->MeasuredHeight(), 0)) return;
-    menu->onDismissed = [this]() { CloseHover(); };
-    fHoverTitles = std::move(menu);
-}
-
-void MenuManager::UpdateHoverTitles(std::vector<MenuItem> items) {
-    if (fHoverTitles) fHoverTitles->ReplaceItems(std::move(items));
-}
-
 bool MenuManager::PointerInHover() const {
-    return (fHover && fHover->PointerInside()) || (fHoverTitles && fHoverTitles->PointerInside());
+    return fHover && fHover->PointerInside();
 }
 
 void MenuManager::CloseAll() {
@@ -2935,10 +2911,6 @@ void MenuManager::CloseAll() {
 }
 
 void MenuManager::CloseHover() {
-    if (fHoverTitles) {
-        PopupMenu* raw = fHoverTitles.release();
-        RunLater([raw]() { delete raw; });
-    }
     if (fHover) {
         PopupMenu* raw = fHover.release();
         RunLater([raw]() { delete raw; });
@@ -6552,14 +6524,8 @@ private:
                     a.offsetY = -12;
                 }
                 const bool previews = PreviewsOn();
-                gMenus.OpenHover(layerSurface, a, WindowListItems(*hovered, previews), !previews);
+                gMenus.OpenHover(layerSurface, a, WindowListItems(*hovered, previews), true);
                 if (previews && gMenus.HoverOpen()) {
-                    // Titles can run long, so they get their own popup stacked
-                    // above (below, for a top dock) the thumbnail cards.
-                    PopupAnchor ta = a;
-                    int stack = gMenus.HoverHeight() + 6;
-                    ta.offsetY = top ? a.offsetY + stack : a.offsetY - stack;
-                    gMenus.OpenHoverTitles(layerSurface, ta, WindowListItems(*hovered, false));
                     // After OpenHover: opening closes the previous popup, which stops its streams.
                     gPreviews.onUpdated = [this](bool rebuild) {
                         if (rebuild) RefreshHoverPopup();
@@ -6605,7 +6571,6 @@ private:
             if (app.windows.size() == fHoverWindowCount) {
                 const bool previews = PreviewsOn();
                 gMenus.UpdateHover(WindowListItems(app, previews));
-                if (previews) gMenus.UpdateHoverTitles(WindowListItems(app, false));
             } else {
                 gMenus.CloseHover();
                 fHoverKey.clear();
