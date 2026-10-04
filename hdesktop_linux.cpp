@@ -8464,6 +8464,18 @@ public:
                         cairo_set_line_width(cr, 1);
                     }
                     DrawText(cr, w.label, w.rect.left + 22, w.rect.top + 1, 12, false, w.enabled ? text : dim);
+                    if (!w.help.empty()) {
+                        bool hh = static_cast<int>(i) == fHelpHover;
+                        double cx = (w.helpRect.left + w.helpRect.right) / 2, cy = (w.helpRect.top + w.helpRect.bottom) / 2;
+                        cairo_arc(cr, cx, cy, 7, 0, 2 * M_PI);
+                        cairo_set_source_rgba(cr, 70 / 255.0, 110 / 255.0, 200 / 255.0, hh ? 0.45 : 0.15);
+                        cairo_fill_preserve(cr);
+                        cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, hh ? 1 : 0.7);
+                        cairo_stroke(cr);
+                        double qw, qh;
+                        MeasureText("?", 10, true, &qw, &qh);
+                        DrawText(cr, "?", cx - qw / 2, cy - qh / 2, 10, true, hh ? text : dim);
+                    }
                     break;
                 }
                 case Widget::kLabel:
@@ -8529,10 +8541,25 @@ public:
                 }
             }
         }
+
+        if (fHelpHover >= 0) {
+            const Widget& w = fWidgets[fHelpHover];
+            double hw, hh;
+            MeasureText(w.help, 11, false, &hw, &hh);
+            double bw = hw + 16, bh = hh + 10;
+            double bx = std::min<double>(w.helpRect.left, width - 8 - bw);
+            double by = w.helpRect.bottom + 4;
+            RoundedRectPath(cr, bx + 0.5, by + 0.5, bw - 1, bh - 1, 4);
+            cairo_set_source_rgba(cr, 40 / 255.0, 42 / 255.0, 50 / 255.0, 1);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, 1);
+            cairo_stroke(cr);
+            DrawText(cr, w.help, bx + 8, by + 5, 11, false, text);
+        }
     }
 
     void PointerEnter(double x, double y) override { PointerMotion(x, y); }
-    void PointerLeave() override { fHovered = -1; fMouseX = fMouseY = -1; Redraw(); }
+    void PointerLeave() override { fHovered = fHelpHover = -1; fMouseX = fMouseY = -1; Redraw(); }
 
     void PointerMotion(double x, double y) override {
         fMouseX = x;
@@ -8543,8 +8570,12 @@ public:
             return;
         }
         int hit = WidgetAt(x, y);
-        if (hit != fHovered || (hit >= 0 && fWidgets[hit].type == Widget::kSegmented)) {
+        int helpHit = -1;
+        for (size_t i = 0; i < fWidgets.size(); ++i)
+            if (!fWidgets[i].help.empty() && fWidgets[i].helpRect.Contains(x, y)) helpHit = static_cast<int>(i);
+        if (hit != fHovered || helpHit != fHelpHover || (hit >= 0 && fWidgets[hit].type == Widget::kSegmented)) {
             fHovered = hit;
+            fHelpHover = helpHit;
             Redraw();
         }
     }
@@ -8613,6 +8644,8 @@ private:
         std::string minLabel, maxLabel;
         std::function<double()> getDouble;
         std::function<void(double)> setDouble;
+        std::string help;   // hover text for the [?] badge after a checkbox label
+        HRect helpRect;
     };
 
     static constexpr int kWidth = 560;
@@ -8633,7 +8666,8 @@ private:
         button("About hdesktop", RGBA{0.35, 0.55, 0.86, 1}, []() { ShowAboutAlert(); });
         y += 10;
 
-        auto check = [&](const std::string& label, bool* value, float x = 40, bool newRow = true, bool enabled = true) {
+        auto check = [&](const std::string& label, bool* value, float x = 40, bool newRow = true, bool enabled = true,
+            const char* help = nullptr) {
             Widget w;
             w.type = Widget::kCheck;
             w.label = label;
@@ -8643,6 +8677,11 @@ private:
             double tw;
             MeasureText(label, 12, false, &tw, nullptr);
             w.rect = HRect{x, y, static_cast<float>(x + 26 + tw), y + 20};
+            if (help) {
+                w.help = help;
+                float cx = w.rect.right + 6;
+                w.helpRect = HRect{cx, y + 2, cx + 16, y + 18};
+            }
             fWidgets.push_back(w);
             if (newRow) y += 24;
         };
@@ -8656,10 +8695,10 @@ private:
         check("Show CPU Graph", &gSettings.showCpuGraph, 317);
         check("Title Overlays: Popup List", &gSettings.titlePopup, 40, false);
         check("Show Workspace Switcher", &gSettings.workspaceSwitcher, 317, true, gWorkspaces.Available());
-        check("Reserve Screen Space (windows stop at the dock)", &gSettings.reserveSpace);
-        check("24-Hour Clock", &gSettings.clock24h);
-        check("Check for Updates", &gSettings.checkForUpdates);
-        check("Notifications (hDesktop shows desktop notifications)", &gSettings.notificationServer);
+        check("Reserve Screen Space", &gSettings.reserveSpace, 40, false, true, "Windows stop at the dock");
+        check("24-Hour Clock", &gSettings.clock24h, 317);
+        check("Notifications", &gSettings.notificationServer, 40, false, true, "hDesktop shows desktop notifications");
+        check("Check for Updates", &gSettings.checkForUpdates, 317);
 
         {
             Widget info;
@@ -8770,6 +8809,7 @@ private:
     std::vector<Widget> fWidgets;
     float fContentHeight = 700;
     int fHovered = -1;
+    int fHelpHover = -1;
     int fDragging = -1;
     double fMouseX = -1, fMouseY = -1;
 };
