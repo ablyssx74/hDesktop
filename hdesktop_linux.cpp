@@ -8560,7 +8560,13 @@ public:
             return;
         }
         if (button == kButtonLeft && LogoutRect().Contains(x, y)) {
-            RunDetached("loginctl terminate-session \"$XDG_SESSION_ID\"");
+            // End this login session. XDG_SESSION_ID is normally the graphical one, but a dock
+            // started from a terminal or over SSH carries that shell's session instead; in that
+            // case (or with none set) fall back to the user's graphical session.
+            RunDetached(R"sh(sid="$XDG_SESSION_ID"; t=$(loginctl show-session "$sid" -p Type --value 2>/dev/null); )sh"
+                R"sh(if [ -z "$sid" ] || [ "$t" = tty ] || [ "$t" = unspecified ]; then )sh"
+                R"sh(sid=$(loginctl show-user "$(id -u)" -p Display --value); fi; )sh"
+                R"sh(loginctl terminate-session "$sid")sh");
             CloseAppDrawer();
             return;
         }
