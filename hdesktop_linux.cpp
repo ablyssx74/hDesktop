@@ -4274,7 +4274,88 @@ public:
         }
     }
 
+    // ---- Windows as the compositor's own command interface reports them ----
+    // Sway and Hyprland don't tell a Wayland client which workspace a window is on
+    // or where it sits, but their IPC does -- and can move a window to another
+    // workspace. The workspace preview popup uses this where it is available.
+    struct WsWindow {
+        std::string key;         // Sway container id / Hyprland address
+        std::string title, appId;
+        std::string workspace;   // as the compositor names it
+        int x = 0, y = 0, w = 0, h = 0;
+        bool focused = false;
+    };
+
+    bool HasWindowSource() const { return g_getenv("SWAYSOCK") || g_getenv("HYPRLAND_INSTANCE_SIGNATURE"); }
+
+    std::vector<WsWindow> QueryWindows() {
+        std::vector<WsWindow> out;
+        if (g_getenv("SWAYSOCK")) {
+            Json tree = Json::Parse(SwayRequest(4, ""));
+            CollectSwayWindows(tree, std::string(), out);
+        } else if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) {
+            Json all = Json::Parse(HyprRequest("j/clients"));
+            for (const auto& c : all.arr) {
+                const Json* ws = c.Get("workspace");
+                if (!c.Bool("mapped") || c.Bool("hidden") || !ws || ws->Num("id", 0) <= 0) continue;
+                WsWindow w;
+                w.key = c.Str("address");
+                w.title = c.Str("title");
+                w.appId = c.Str("class");
+                w.workspace = ws->Str("name");
+                const Json* at = c.Get("at");
+                const Json* size = c.Get("size");
+                if (at && at->arr.size() >= 2) { w.x = static_cast<int>(at->arr[0].num); w.y = static_cast<int>(at->arr[1].num); }
+                if (size && size->arr.size() >= 2) { w.w = static_cast<int>(size->arr[0].num); w.h = static_cast<int>(size->arr[1].num); }
+                w.focused = c.Num("focusHistoryID", -1) == 0;
+                out.push_back(std::move(w));
+            }
+        }
+        return out;
+    }
+
+    void MoveWindow(const WsWindow& win, const std::string& workspace) {
+        if (g_getenv("SWAYSOCK")) {
+            SwayRequest(0, "[con_id=" + win.key + "] move container to workspace " + SwayQuote(workspace));
+        } else if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) {
+            bool numeric = !workspace.empty() && workspace.find_first_not_of("0123456789") == std::string::npos;
+            HyprRequest("dispatch movetoworkspacesilent " + (numeric ? workspace : "name:" + workspace) +
+                ",address:" + win.key);
+        }
+    }
+
+    void FocusWindow(const WsWindow& win) {
+        if (g_getenv("SWAYSOCK")) SwayRequest(0, "[con_id=" + win.key + "] focus");
+        else if (g_getenv("HYPRLAND_INSTANCE_SIGNATURE")) HyprRequest("dispatch focuswindow address:" + win.key);
+    }
+
 private:
+    static void CollectSwayWindows(const Json& node, const std::string& workspace, std::vector<WsWindow>& out) {
+        std::string type = node.Str("type");
+        std::string ws = type == "workspace" ? node.Str("name") : workspace;
+        const Json* nodes = node.Get("nodes");
+        const Json* floating = node.Get("floating_nodes");
+        bool leaf = (!nodes || nodes->arr.empty()) && (!floating || floating->arr.empty());
+        if ((type == "con" || type == "floating_con") && leaf && !ws.empty() && ws.compare(0, 2, "__") != 0) {
+            WsWindow w;
+            w.key = std::to_string(static_cast<long long>(node.Num("id")));
+            w.title = node.Str("name");
+            w.appId = node.Str("app_id");
+            if (w.appId.empty()) {
+                if (const Json* props = node.Get("window_properties")) w.appId = props->Str("class");
+            }
+            w.workspace = ws;
+            if (const Json* r = node.Get("rect")) {
+                w.x = static_cast<int>(r->Num("x")); w.y = static_cast<int>(r->Num("y"));
+                w.w = static_cast<int>(r->Num("width")); w.h = static_cast<int>(r->Num("height"));
+            }
+            w.focused = node.Bool("focused");
+            out.push_back(std::move(w));
+        }
+        if (nodes) for (const auto& c : nodes->arr) CollectSwayWindows(c, ws, out);
+        if (floating) for (const auto& c : floating->arr) CollectSwayWindows(c, ws, out);
+    }
+
     enum Backend { kNone, kPlasma, kExt, kHyprland, kSway };
 
     void Changed() {
@@ -5621,11 +5702,17 @@ struct DockApp {
 // =========================================================================
 // WORKSPACE PREVIEW POPUP (the WorkspacePreviewWindow equivalent)
 // =========================================================================
-// Opened by clicking the workspace widget: every workspace as a small copy of
-// the desktop with a box per window. Click a mini desktop to switch to it,
-// click a box to raise that window, and (on KDE) drag a box onto another mini
-// desktop to move the window there. A window can't be positioned from outside
-// on Wayland, so unlike Haiku's popup a drag only changes its workspace.
+// Opened by right-clicking the workspace widget: every workspace as a small copy
+// of the desktop with a box per window. Click a mini desktop to switch to it,
+// click a box to raise that window, and drag a box onto another mini desktop to
+// move the window there. A window can't be positioned from outside on Wayland,
+// so unlike Haiku's popup a drag only changes its workspace.
+//
+// Where the windows come from depends on the compositor: KWin reports each
+// window's position and desktops over plasma-window-management; on Sway and
+// Hyprland the compositor's own IPC supplies them and does the moving. Anywhere
+// else (labwc, ...) there is nothing to draw in the mini desktops, so the popup is
+// just a way to pick a workspace.
 class WorkspacePopup : public PopupSurface {
 public:
     WorkspacePopup(zwlr_layer_surface_v1* parent, const PopupAnchor& anchor, uint32_t serial) {
@@ -5644,10 +5731,11 @@ public:
         fCellH = std::clamp(static_cast<int>(std::lround(fCellW * static_cast<double>(fScreenH) / fScreenW)), 90, 220);
         int w = fCols * fCellW + kGap * (fCols + 1) + 2;
         int h = fRows * fCellH + kGap * (fRows + 1) + 2;
+        Gather();
         CreatePopup(parent, nullptr, anchor, w, h, serial);
         fRefreshTimer = g_timeout_add(250, [](gpointer p) -> gboolean {
             auto* self = static_cast<WorkspacePopup*>(p);
-            if (!self->fDragging) self->Redraw();   // windows move on their own
+            if (!self->fDragging) { self->Gather(); self->Redraw(); }   // windows move on their own
             return G_SOURCE_CONTINUE;
         }, this);
     }
@@ -5656,7 +5744,7 @@ public:
         if (fRefreshTimer) g_source_remove(fRefreshTimer);
     }
 
-    void Refresh() { Redraw(); }
+    void Refresh() { if (!fDragging) { Gather(); Redraw(); } }
 
     void Paint(cairo_t* cr) override {
         const double w = width, h = height;
@@ -5667,13 +5755,12 @@ public:
         cairo_set_line_width(cr, 1.0);
         cairo_stroke(cr);
 
-        const std::vector<Toplevel*> windows = gToplevels.Windows();
         const int dropCell = fDragging ? CellAt(fPointerX, fPointerY) : -1;
+        const bool overBox = !fDragging && BoxAt(fPointerX, fPointerY) != nullptr;
         for (int ws = 0; ws < static_cast<int>(fList.size()); ++ws) {
             HRect c = CellRect(ws);
             bool active = fList[ws].active;
-            bool hot = (ws == dropCell && ws != fDragFrom) || (!fDragging && ws == CellAt(fPointerX, fPointerY) &&
-                BoxAt(fPointerX, fPointerY, windows) == nullptr);
+            bool hot = (ws == dropCell && ws != fDragFrom) || (!fDragging && !overBox && ws == CellAt(fPointerX, fPointerY));
             RoundedRectPath(cr, c.left + 0.5, c.top + 0.5, c.Width() - 1, c.Height() - 1, 4.0);
             cairo_set_source_rgba(cr, 14 / 255.0, 14 / 255.0, 18 / 255.0, 1.0);
             cairo_fill_preserve(cr);
@@ -5687,12 +5774,12 @@ public:
             cairo_save(cr);
             RoundedRectPath(cr, c.left + 1, c.top + 1, c.Width() - 2, c.Height() - 2, 3.5);
             cairo_clip(cr);
-            for (Toplevel* t : windows) {
-                if (!OnWorkspace(t, ws)) continue;
-                if (fDragging && t->uid == fDragUid && ws == fDragFrom) continue;   // drawn as the ghost
+            for (const Win& win : fWins) {
+                if (!OnWorkspace(win, ws)) continue;
+                if (fDragging && win.key == fDragKey && ws == fDragFrom) continue;   // drawn as the ghost
                 HRect b;
-                if (!BoxRect(t, c, &b)) continue;
-                DrawBox(cr, t, b, t->uid == fHoverUid && !fDragging, false);
+                if (!BoxRect(win, c, &b)) continue;
+                DrawBox(cr, win, b, win.key == fHoverKey && !fDragging, false);
             }
             cairo_restore(cr);
 
@@ -5703,13 +5790,13 @@ public:
         }
 
         if (fDragging) {
-            for (Toplevel* t : windows) {
-                if (t->uid != fDragUid) continue;
-                HRect b{static_cast<float>(fPointerX - fDragGrabX), static_cast<float>(fPointerY - fDragGrabY),
-                    0, 0};
+            for (const Win& win : fWins) {
+                if (win.key != fDragKey) continue;
+                HRect b{static_cast<float>(fPointerX - fDragGrabX), static_cast<float>(fPointerY - fDragGrabY), 0, 0};
                 b.right = b.left + fDragW;
                 b.bottom = b.top + fDragH;
-                DrawBox(cr, t, b, true, true);
+                DrawBox(cr, win, b, true, true);
+                break;
             }
         }
     }
@@ -5718,22 +5805,23 @@ public:
 
     void PointerLeave() override {
         fPointerX = fPointerY = -1000;
-        fHoverUid = 0;
+        fHoverKey.clear();
         if (!fDragging) Redraw();
     }
 
     void PointerMotion(double x, double y) override {
         fPointerX = x;
         fPointerY = y;
-        const std::vector<Toplevel*> windows = gToplevels.Windows();
-        if (fPressUid && !fDragging &&
-            std::hypot(x - fPressX, y - fPressY) > 5 && gToplevels.CanMoveToWorkspace(FindWindow(windows, fPressUid))) {
-            fDragging = true;
-            fDragUid = fPressUid;
+        if (!fPressKey.empty() && !fDragging && std::hypot(x - fPressX, y - fPressY) > 5) {
+            const Win* win = FindWin(fPressKey);
+            if (win && CanDrag(*win)) {
+                fDragging = true;
+                fDragKey = fPressKey;
+            }
         }
         if (!fDragging) {
-            Toplevel* t = BoxAt(x, y, windows);
-            fHoverUid = t ? t->uid : 0;
+            const Win* win = BoxAt(x, y);
+            fHoverKey = win ? win->key : std::string();
         }
         Redraw();
     }
@@ -5741,16 +5829,15 @@ public:
     void PointerButton(int button, bool pressed, uint32_t) override {
         if (button != kButtonLeft) return;
         double x = gWl.pointerX, y = gWl.pointerY;
-        const std::vector<Toplevel*> windows = gToplevels.Windows();
         if (pressed) {
-            Toplevel* t = BoxAt(x, y, windows);
-            if (!t) return;
-            fPressUid = t->uid;
+            const Win* win = BoxAt(x, y);
+            if (!win) return;
+            fPressKey = win->key;
             fPressX = x;
             fPressY = y;
             fDragFrom = CellAt(x, y);
             HRect b;
-            if (fDragFrom >= 0 && BoxRect(t, CellRect(fDragFrom), &b)) {
+            if (fDragFrom >= 0 && BoxRect(*win, CellRect(fDragFrom), &b)) {
                 fDragGrabX = x - b.left;
                 fDragGrabY = y - b.top;
                 fDragW = b.Width();
@@ -5761,21 +5848,21 @@ public:
         // Release
         if (fDragging) {
             int target = CellAt(x, y);
-            Toplevel* t = FindWindow(windows, fDragUid);
-            if (t && target >= 0 && target != fDragFrom) gToplevels.MoveToWorkspace(t, fList[target].id);
+            const Win* win = FindWin(fDragKey);
+            if (win && target >= 0 && target != fDragFrom) MoveTo(*win, target);
             fDragging = false;
-            fPressUid = 0;
-            fDragUid = 0;
+            fPressKey.clear();
+            fDragKey.clear();
             Redraw();
             return;
         }
-        if (fPressUid) {
-            Toplevel* t = FindWindow(windows, fPressUid);
-            fPressUid = 0;
-            if (t) {
+        if (!fPressKey.empty()) {
+            const Win* win = FindWin(fPressKey);
+            fPressKey.clear();
+            if (win) {
                 int ws = fDragFrom;
                 if (ws >= 0 && !fList[ws].active) gWorkspaces.Activate(ws);
-                gToplevels.Activate(t);
+                Raise(*win);
                 Close();
             }
             return;
@@ -5796,7 +5883,77 @@ public:
 private:
     static constexpr int kGap = 8;
 
+    // One window as the popup draws it, whichever compositor supplied it.
+    struct Win {
+        std::string key;
+        std::string title, appId;
+        std::vector<int> wss;            // workspace indexes it is on
+        int gx = 0, gy = 0, gw = 0, gh = 0;
+        bool minimized = false, activated = false;
+        Toplevel* t = nullptr;           // KWin windows
+        WorkspaceManager::WsWindow ipc;  // Sway / Hyprland windows
+        bool viaIpc = false;
+    };
+
     void Close() { if (onClose) onClose(); }
+
+    void Gather() {
+        std::vector<Win> wins;
+        if (gWorkspaces.HasWindowSource()) {
+            for (auto& w : gWorkspaces.QueryWindows()) {
+                Win win;
+                win.key = w.key;
+                win.title = w.title;
+                win.appId = w.appId;
+                win.gx = w.x; win.gy = w.y; win.gw = w.w; win.gh = w.h;
+                win.activated = w.focused;
+                for (int i = 0; i < static_cast<int>(fList.size()); ++i) {
+                    if (fList[i].name == w.workspace || fList[i].id == w.workspace) win.wss.push_back(i);
+                }
+                win.ipc = w;
+                win.viaIpc = true;
+                wins.push_back(std::move(win));
+            }
+        } else {
+            for (Toplevel* t : gToplevels.Windows()) {
+                if (!t->hasGeometry) continue;
+                Win win;
+                win.key = "t" + std::to_string(t->uid);
+                win.title = t->title;
+                win.appId = t->appId;
+                win.gx = t->gx; win.gy = t->gy; win.gw = t->gw; win.gh = t->gh;
+                win.minimized = t->minimized;
+                win.activated = t->activated;
+                win.t = t;
+                for (int i = 0; i < static_cast<int>(fList.size()); ++i) {
+                    if (t->onAllDesktops || (t->desktops.empty() && fList[i].active) ||
+                        (!fList[i].id.empty() && t->desktops.count(fList[i].id))) win.wss.push_back(i);
+                }
+                wins.push_back(std::move(win));
+            }
+        }
+        fWins = std::move(wins);
+    }
+
+    const Win* FindWin(const std::string& key) const {
+        for (const Win& w : fWins) if (w.key == key) return &w;
+        return nullptr;
+    }
+
+    bool CanDrag(const Win& w) const { return w.viaIpc || (w.t && gToplevels.CanMoveToWorkspace(w.t)); }
+
+    void MoveTo(const Win& w, int target) {
+        if (w.viaIpc) {
+            gWorkspaces.MoveWindow(w.ipc, fList[target].name.empty() ? fList[target].id : fList[target].name);
+        } else if (w.t) {
+            gToplevels.MoveToWorkspace(w.t, fList[target].id);
+        }
+    }
+
+    void Raise(const Win& w) {
+        if (w.viaIpc) gWorkspaces.FocusWindow(w.ipc);
+        else if (w.t) gToplevels.Activate(w.t);
+    }
 
     // The dock's output in the compositor's logical space (windows report their
     // geometry in that space).
@@ -5830,18 +5987,16 @@ private:
         return -1;
     }
 
-    bool OnWorkspace(const Toplevel* t, int ws) const {
-        if (t->onAllDesktops) return true;
-        if (t->desktops.empty()) return fList[ws].active;   // not reported: assume the current one
-        return !fList[ws].id.empty() && t->desktops.count(fList[ws].id) > 0;
+    static bool OnWorkspace(const Win& w, int ws) {
+        return std::find(w.wss.begin(), w.wss.end(), ws) != w.wss.end();
     }
 
     // The window's box in a cell (the cell is a scaled copy of the screen); false if off this screen.
-    bool BoxRect(const Toplevel* t, const HRect& cell, HRect* out) const {
-        if (!t->hasGeometry || t->gw <= 0 || t->gh <= 0) return false;
+    bool BoxRect(const Win& w, const HRect& cell, HRect* out) const {
+        if (w.gw <= 0 || w.gh <= 0) return false;
         double sx = cell.Width() / fScreenW, sy = cell.Height() / fScreenH;
-        double l = cell.left + (t->gx - fScreenX) * sx, tp = cell.top + (t->gy - fScreenY) * sy;
-        double r = l + std::max(6.0, t->gw * sx), b = tp + std::max(6.0, t->gh * sy);
+        double l = cell.left + (w.gx - fScreenX) * sx, tp = cell.top + (w.gy - fScreenY) * sy;
+        double r = l + std::max(6.0, w.gw * sx), b = tp + std::max(6.0, w.gh * sy);
         l = std::max<double>(l, cell.left + 1);
         tp = std::max<double>(tp, cell.top + 1);
         r = std::min<double>(r, cell.right - 1);
@@ -5851,52 +6006,48 @@ private:
         return true;
     }
 
-    // Topmost box under the point, among the cell it is in.
-    Toplevel* BoxAt(double x, double y, const std::vector<Toplevel*>& windows) const {
+    // Topmost box under the point, within the cell it is in.
+    const Win* BoxAt(double x, double y) const {
         int ws = CellAt(x, y);
         if (ws < 0) return nullptr;
         HRect cell = CellRect(ws);
-        Toplevel* hit = nullptr;
-        for (Toplevel* t : windows) {
+        const Win* hit = nullptr;
+        for (const Win& w : fWins) {
             HRect b;
-            if (OnWorkspace(t, ws) && BoxRect(t, cell, &b) && b.Contains(x, y)) hit = t;   // later = on top
+            if (OnWorkspace(w, ws) && BoxRect(w, cell, &b) && b.Contains(x, y)) hit = &w;   // later = on top
         }
         return hit;
     }
 
-    static Toplevel* FindWindow(const std::vector<Toplevel*>& windows, uint64_t uid) {
-        for (Toplevel* t : windows) if (t->uid == uid) return t;
-        return nullptr;
-    }
-
-    void DrawBox(cairo_t* cr, const Toplevel* t, const HRect& b, bool hot, bool ghost) {
+    void DrawBox(cairo_t* cr, const Win& win, const HRect& b, bool hot, bool ghost) {
         RoundedRectPath(cr, b.left + 0.5, b.top + 0.5, b.Width() - 1, b.Height() - 1, 2.0);
-        double a = t->minimized ? 0.55 : 0.95;
+        double a = win.minimized ? 0.55 : 0.95;
         cairo_set_source_rgba(cr, (hot ? 62 : 46) / 255.0, (hot ? 66 : 49) / 255.0, (hot ? 80 : 60) / 255.0,
             ghost ? 0.85 : a);
         cairo_fill_preserve(cr);
-        if (t->activated || hot) SetAccent(cr, 1.0);
-        else cairo_set_source_rgba(cr, 120 / 255.0, 125 / 255.0, 140 / 255.0, t->minimized ? 0.6 : 1.0);
-        cairo_set_line_width(cr, t->activated || hot ? 1.5 : 1.0);
+        if (win.activated || hot) SetAccent(cr, 1.0);
+        else cairo_set_source_rgba(cr, 120 / 255.0, 125 / 255.0, 140 / 255.0, win.minimized ? 0.6 : 1.0);
+        cairo_set_line_width(cr, win.activated || hot ? 1.5 : 1.0);
         cairo_stroke(cr);
         cairo_set_line_width(cr, 1.0);
         if (b.Width() > 34 && b.Height() > 14) {
-            std::string title = t->title.empty() ? t->appId : t->title;
+            std::string title = win.title.empty() ? win.appId : win.title;
             DrawText(cr, title, b.left + 4, b.top + 2, 9, false, RGBA{215 / 255.0, 218 / 255.0, 228 / 255.0, 1.0},
                 b.Width() - 8);
         }
     }
 
     std::vector<WorkspaceInfo> fList;
+    std::vector<Win> fWins;
     int fCols = 1, fRows = 1, fCellW = 200, fCellH = 112;
     int fScreenX = 0, fScreenY = 0, fScreenW = 1920, fScreenH = 1080;
     double fPointerX = -1000, fPointerY = -1000;
-    uint64_t fHoverUid = 0;
+    std::string fHoverKey;
     // A press on a box becomes a drag once the pointer has moved a few pixels.
-    uint64_t fPressUid = 0;
+    std::string fPressKey;
     double fPressX = 0, fPressY = 0;
     bool fDragging = false;
-    uint64_t fDragUid = 0;
+    std::string fDragKey;
     int fDragFrom = -1;
     double fDragGrabX = 0, fDragGrabY = 0, fDragW = 20, fDragH = 14;
     guint fRefreshTimer = 0;
