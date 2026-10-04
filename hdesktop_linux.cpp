@@ -9160,6 +9160,7 @@ public:
                     if (!w.help.empty()) {
                         bool hh = static_cast<int>(i) == fHelpHover;
                         double cx = (w.helpRect.left + w.helpRect.right) / 2, cy = (w.helpRect.top + w.helpRect.bottom) / 2;
+                        cairo_new_path(cr);   // the label text leaves a current point; without this a hairline joins it to the circle
                         cairo_arc(cr, cx, cy, 7, 0, 2 * M_PI);
                         SetAccent(cr, hh ? 0.45 : 0.15);
                         cairo_fill_preserve(cr);
