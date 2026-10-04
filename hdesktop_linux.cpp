@@ -6537,6 +6537,7 @@ private:
                 fHoverKey = hovered->key;
                 fHoverRect = hoveredRect;
                 fHoverWindowCount = ShownWindows(*hovered);
+                fHoverLayout = HoverLayout(*hovered);
                 PopupAnchor a;
                 a.x = static_cast<int>(hoveredRect.left);
                 a.w = static_cast<int>(hoveredRect.Width());
@@ -6578,6 +6579,16 @@ private:
 
     // Windows the hover popup lists: all of them with title overlays on,
     // otherwise only the minimized ones that get a preview card.
+    // Which rows carry a preview card ('1') and which are plain titles ('0').
+    static std::string HoverLayout(const DockApp& app) {
+        std::string sig;
+        for (Toplevel* t : app.windows) {
+            if (!gSettings.titlePopup && !t->minimized) continue;
+            sig += (PreviewsOn() && t->minimized) ? '1' : '0';
+        }
+        return sig;
+    }
+
     static size_t ShownWindows(const DockApp& app) {
         if (gSettings.titlePopup) return app.windows.size();
         if (!PreviewsOn()) return 0;
@@ -6614,7 +6625,11 @@ private:
         if (!gMenus.HoverOpen() || fHoverKey.empty()) return;
         for (auto& app : fApps) {
             if (app.key != fHoverKey || app.closing) continue;
-            if (ShownWindows(app) == fHoverWindowCount) {
+            // A popup is sized once, when it opens. If a window was minimized or
+            // restored since, its card appeared or went away and the width no
+            // longer fits (a squeezed card, or a wide bar over a short title),
+            // so reopen it instead of patching rows in.
+            if (ShownWindows(app) == fHoverWindowCount && HoverLayout(app) == fHoverLayout) {
                 const bool previews = PreviewsOn();
                 gMenus.UpdateHover(WindowListItems(app, previews));
                 if (previews) RequestPreviews(app);   // a window may have just been minimized
@@ -7429,6 +7444,7 @@ private:
     std::string fHoverKey;
     HRect fHoverRect;
     size_t fHoverWindowCount = 0;
+    std::string fHoverLayout;   // see HoverLayout()
     guint fHoverCloseTimer = 0;
     uint64_t fLabelHoverStart = 0;
     std::string fLabelHoverKey;
