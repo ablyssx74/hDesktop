@@ -6504,8 +6504,11 @@ private:
     // app's windows in a popup above its icon. The popup is its own surface,
     // so opening it never resizes the dock.
     void UpdateHoverTitles(const DockApp* app, const HRect& iconRect) {
-        if (!gSettings.titlePopup || gMenus.IsOpen()) {
-            if (gMenus.HoverOpen() && !gSettings.titlePopup) gMenus.CloseHover();
+        // Two independent switches feed this popup: title overlays list every
+        // window; previews add a thumbnail card to each minimized one (and
+        // can show just those when the title overlays are off).
+        if ((!gSettings.titlePopup && !PreviewsOn()) || gMenus.IsOpen()) {
+            if (gMenus.HoverOpen() && !gSettings.titlePopup && !PreviewsOn()) gMenus.CloseHover();
             return;
         }
         // A wider proximity zone than the icon itself (Haiku: icon +/- 40px
@@ -6528,12 +6531,12 @@ private:
         }
         (void)app;
         (void)iconRect;
-        if (hovered && !hovered->closing && !hovered->windows.empty()) {
+        if (hovered && !hovered->closing && ShownWindows(*hovered) > 0) {
             CancelHoverClose();
             if (fHoverKey != hovered->key || !gMenus.HoverOpen()) {
                 fHoverKey = hovered->key;
                 fHoverRect = hoveredRect;
-                fHoverWindowCount = hovered->windows.size();
+                fHoverWindowCount = ShownWindows(*hovered);
                 PopupAnchor a;
                 a.x = static_cast<int>(hoveredRect.left);
                 a.w = static_cast<int>(hoveredRect.Width());
@@ -6558,7 +6561,7 @@ private:
                         if (rebuild) RefreshHoverPopup();
                         else gMenus.RedrawHover();
                     };
-                    for (Toplevel* t : hovered->windows) gPreviews.Request(t->uuid);
+                    RequestPreviews(*hovered);
                 }
             }
         } else if (gMenus.HoverOpen()) {
@@ -6566,14 +6569,30 @@ private:
         }
     }
 
+    // Only minimized windows get a thumbnail: a window you can already see doesn't need one.
+    static void RequestPreviews(const DockApp& app) {
+        for (Toplevel* t : app.windows) if (t->minimized) gPreviews.Request(t->uuid);
+    }
+
     static bool PreviewsOn() { return gSettings.windowPreviews && gPreviews.Available(); }
+
+    // Windows the hover popup lists: all of them with title overlays on,
+    // otherwise only the minimized ones that get a preview card.
+    static size_t ShownWindows(const DockApp& app) {
+        if (gSettings.titlePopup) return app.windows.size();
+        if (!PreviewsOn()) return 0;
+        size_t n = 0;
+        for (Toplevel* t : app.windows) if (t->minimized) ++n;
+        return n;
+    }
 
     std::vector<MenuItem> WindowListItems(const DockApp& app, bool thumbs) {
         std::vector<MenuItem> items;
         for (Toplevel* t : app.windows) {
+            if (!gSettings.titlePopup && !t->minimized) continue;
             MenuItem m;
             m.label = t->title.empty() ? app.displayName : t->title;
-            if (thumbs) {
+            if (thumbs && t->minimized) {   // visible windows speak for themselves
                 m.wantThumb = true;
                 m.thumb = gPreviews.Get(t->uuid);
             }
@@ -6595,9 +6614,10 @@ private:
         if (!gMenus.HoverOpen() || fHoverKey.empty()) return;
         for (auto& app : fApps) {
             if (app.key != fHoverKey || app.closing) continue;
-            if (app.windows.size() == fHoverWindowCount) {
+            if (ShownWindows(app) == fHoverWindowCount) {
                 const bool previews = PreviewsOn();
                 gMenus.UpdateHover(WindowListItems(app, previews));
+                if (previews) RequestPreviews(app);   // a window may have just been minimized
             } else {
                 gMenus.CloseHover();
                 fHoverKey.clear();
