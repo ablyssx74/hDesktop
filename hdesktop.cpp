@@ -1672,6 +1672,16 @@ public:
     }
 };
 
+// The settings window keeps the (optional) window-preview controls at the
+// bottom so that, with thumbnails off, they take no room: the window and its
+// backing tray grow only as far as the controls actually showing.
+//   off: just the toggle row   on: + size slider   on + Advanced: + FPS slider
+static float ConfigContentBottom() {
+    if (!fShowWindowThumbnails) return 662.0f;
+    return fShowAdvancedOptions ? 812.0f : 760.0f;
+}
+static float ConfigWindowHeight() { return ConfigContentBottom() + 82.0f; }
+
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
@@ -1778,7 +1788,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         AddChild(fWorkspaceSwitcherCheckbox);
 
         // Row 6: Window Preview Thumbnails
-        BRect thumbnailsCheckboxRect(35.0f, 222.0f, 55.0f, 238.0f);
+        BRect thumbnailsCheckboxRect(35.0f, 627.0f, 55.0f, 643.0f);
         fThumbnailsCheckbox = new BCheckBox(thumbnailsCheckboxRect, "thumbnails_cb", nullptr,
             new BMessage(MSG_THUMBNAILS_TOGGLED));
         fThumbnailsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -1790,7 +1800,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // feature itself (Row 6 above) is enabled. Reserves its row either
         // way (like every other conditional row here) so nothing below has
         // to reflow when it's toggled.
-        BRect advancedCheckboxRect(35.0f, 262.0f, 55.0f, 278.0f);
+        BRect advancedCheckboxRect(35.0f, 735.0f, 55.0f, 751.0f);
         fAdvancedCheckbox = new BCheckBox(advancedCheckboxRect, "advanced_cb", nullptr,
             new BMessage(MSG_ADVANCED_TOGGLED));
         fAdvancedCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -1803,7 +1813,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7b: Thumbnail Preview FPS Slider -- only meaningful, and only
         // shown, while both Row 6 and Row 7 above are checked. Reserves its
         // row regardless, same as every other conditional row here.
-        BRect thumbnailFpsSliderRect(35.0f, 282.0f, frame.Width() - 35.0f, 332.0f);
+        BRect thumbnailFpsSliderRect(35.0f, 755.0f, frame.Width() - 35.0f, 805.0f);
         BString thumbnailFpsLabel;
         thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
         fThumbnailFpsSlider = new BSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
@@ -1832,7 +1842,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7c: Thumbnail Size Slider -- shown whenever the thumbnails
         // themselves are enabled (no Advanced needed). Same reserved-row and
         // IsHidden()-guarded Show()/Hide() convention as the FPS slider above.
-        BRect thumbnailSizeSliderRect(35.0f, 342.0f, frame.Width() - 35.0f, 392.0f);
+        BRect thumbnailSizeSliderRect(35.0f, 663.0f, frame.Width() - 35.0f, 713.0f);
         BString thumbnailSizeLabel;
         thumbnailSizeLabel << "Thumbnail Size: " << fThumbnailSize << " px";
         fThumbnailSizeSlider = new BSlider(thumbnailSizeSliderRect, "thumbnail_size_slider", thumbnailSizeLabel.String(),
@@ -1857,7 +1867,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         dockLocationPopup->AddItem(dockBottomItem);
 
         // Dock Location Dropdown (Label drawn manually in Draw())
-        BRect dockLocationMenuRect(145.0f, 412.0f, frame.Width() - 35.0f, 437.0f);
+        BRect dockLocationMenuRect(145.0f, 222.0f, frame.Width() - 35.0f, 247.0f);
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
@@ -1891,7 +1901,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 454.0f, frame.Width() - 35.0f, 479.0f);
+        BRect effectsMenuRect(145.0f, 264.0f, frame.Width() - 35.0f, 289.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -1925,14 +1935,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 487.0f, frame.Width() - 35.0f, 512.0f);
+        BRect closeEffectsMenuRect(145.0f, 297.0f, frame.Width() - 35.0f, 322.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
 
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 537.0f, frame.Width() - 35.0f, 587.0f);
+        BRect speedSliderRect(35.0f, 347.0f, frame.Width() - 35.0f, 397.0f);
         fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed",
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1942,7 +1952,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 607.0f, frame.Width() - 35.0f, 657.0f);
+        BRect sliderRect(35.0f, 417.0f, frame.Width() - 35.0f, 467.0f);
         fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency",
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1952,7 +1962,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 677.0f, frame.Width() - 35.0f, 727.0f);
+        BRect sizeSliderRect(35.0f, 487.0f, frame.Width() - 35.0f, 537.0f);
         fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size",
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -1963,7 +1973,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
         // Icon Zoom Size Slider Row -- peak hover magnification, in percent
         // (100 = no zoom, 180 = the original fixed zoom).
-        BRect zoomSliderRect(35.0f, 747.0f, frame.Width() - 35.0f, 797.0f);
+        BRect zoomSliderRect(35.0f, 557.0f, frame.Width() - 35.0f, 607.0f);
         fIconZoomSlider = new BSlider(zoomSliderRect, "zoom_slider", "Icon Zoom Size",
             new BMessage(MSG_ICON_ZOOM_CHANGED), 100, 250);
         fIconZoomSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -2045,7 +2055,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
 		// 6. BALANCED BACKING CONTAINER
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, 812.0f);
+        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, ConfigContentBottom());
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
@@ -2062,7 +2072,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Show CPU Graph", BPoint(317.0f, 174.0f));
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
-        DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 234.0f));
+        DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 639.0f));
 
         // Smaller, italicized note under the Thumbnails checkbox -- the row
         // below it (Row 7, Advanced Thumbnail Settings) was shifted down
@@ -2073,7 +2083,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         SetFont(&expFont);
         SetHighColor(rgb_color{140, 150, 170, 255});
         DrawString("(Experimental) app_server compositing not required but some features are limited.",
-            BPoint(62.0f, 248.0f));
+            BPoint(62.0f, 653.0f));
 
         // Reset back to plain before the rest of this method's labels --
         // otherwise every DrawString() below would inherit the 9pt italic.
@@ -2084,16 +2094,16 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Kept in sync with the checkbox's own Show()/Hide() state -- only
         // meaningful while Window Preview Thumbnails above is enabled.
         if (fShowWindowThumbnails) {
-            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 274.0f));
+            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 747.0f));
         }
-        DrawString("Dock Location:", BPoint(35.0f, 429.0f));
+        DrawString("Dock Location:", BPoint(35.0f, 239.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 471.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 504.0f));
+        DrawString("Open App Effects:", BPoint(35.0f, 281.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 314.0f));
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -2127,6 +2137,18 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
         Invalidate();
+    }
+
+    // Grow/shrink the settings window to fit the preview controls now showing
+    // (see ConfigContentBottom()). The bottom-anchored Close button and the
+    // backing tray both follow Bounds(), so only the window needs resizing.
+    void FitWindowToContent() {
+        if (Window() == nullptr) return;
+        float h = ConfigWindowHeight();
+        if (Window()->Bounds().Height() != h) {
+            Window()->ResizeTo(Window()->Bounds().Width(), h);
+        }
+        Invalidate(); // repaint the tray and Close button at their new spots
     }
 
 	virtual void MouseDown(BPoint point) {
@@ -2268,6 +2290,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 } else if (!fShowWindowThumbnails && !fThumbnailSizeSlider->IsHidden()) {
                     fThumbnailSizeSlider->Hide();
                 }
+                FitWindowToContent();
                 SaveConfiguration();
                 Invalidate();
                 break;
@@ -2285,6 +2308,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 } else if (!fShowAdvancedOptions && !fThumbnailFpsSlider->IsHidden()) {
                     fThumbnailFpsSlider->Hide();
                 }
+                FitWindowToContent();
                 SaveConfiguration();
                 break;
             }
@@ -2693,9 +2717,9 @@ public:
                 B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                 B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
 
-        ResizeTo(560.0f, 927.0f);
+        ResizeTo(560.0f, ConfigWindowHeight());
         float targetX = centralAnchor.left + (centralAnchor.Width() - 560.0f) / 2.0f;
-        float targetY = centralAnchor.top + (centralAnchor.Height() - 927.0f) / 2.0f;
+        float targetY = centralAnchor.top + (centralAnchor.Height() - ConfigWindowHeight()) / 2.0f;
         MoveTo(targetX, targetY);
 
         ConfigView* configView = new ConfigView(Bounds());
@@ -6750,7 +6774,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        if (chosenAction != nullptr && chosenAction->Message() != nullptr) {
 									if (chosenAction->Message()->what == 'lCFG') {
 									    float winWidth = 560.0f;
-									    float winHeight = 894.0f;
+									    float winHeight = ConfigWindowHeight();
 
 									    BScreen screen(B_MAIN_SCREEN_ID);
 									    BRect screenFrame = screen.Frame();
