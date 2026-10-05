@@ -75,7 +75,10 @@ Settings are stored in `~/.config/hdesktop/settings.ini`. That file also has
 `clock_command`, `mixer_command` and `icon_theme` keys to override auto-detection.
 
 ### Screenshots
-<img width="1920" height="1080" alt="Image" src="https://github.com/user-attachments/assets/8a88dad8-85ae-4f46-8962-f2f73c913df9" />
-<img width="1920" height="1080" alt="Image" src="https://github.com/user-attachments/assets/7e525ce9-7770-49a8-bb52-c9553db015f8" />
+Haiku
+<img width="1920" height="1080" alt="Haiku" src="https://github.com/user-attachments/assets/8a88dad8-85ae-4f46-8962-f2f73c913df9" />
+
+Linux
+<img width="1920" height="1080" alt="Linux" src="https://github.com/user-attachments/assets/7e525ce9-7770-49a8-bb52-c9553db015f8" />
 
 
