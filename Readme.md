@@ -1,5 +1,5 @@
 # hDesktop
-SDL2 OpenGL Hybrid Haiku OS Inspired Desktop Manager 
+SDL2 OpenGL Haiku OS Inspired Desktop Manager 
 
 ### Haiku (32/64bit)
 ```
