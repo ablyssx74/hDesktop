@@ -25,8 +25,12 @@ sudo make -f Makefile.linux install      # installs /usr/bin/hdesktop
 ```
 or `cd linux && makepkg -si` (the PKGBUILD builds from the default branch).
 
-Start it with `hdesktop` (`-d` for debug output, `-o DP-1` to choose a monitor). Only one
-copy runs at a time; a second one just exits. To start it with your session:
+Start it with `hdesktop` (`-d` for debug output, `-o DP-1` to choose a monitor). One dock
+runs per Wayland session, so you can run it in several sessions at once (KDE on one tty,
+Sway on another); starting a second one in the same session just exits. Sessions share your
+user D-Bus and `settings.ini`: tray icons show in every dock, and only one program can
+serve notifications, so the other sessions' docks won't show toasts. To start it with your
+session:
 
 | Session | How |
 |---|---|
