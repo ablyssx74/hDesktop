@@ -5069,7 +5069,7 @@ public:
     TitleListPreviewView(BRect frame, team_id team, const std::vector<TrackedWindowInfo>& entries, float rowHeight)
         : BView(frame, "TitleListPreviewView", B_FOLLOW_ALL, B_WILL_DRAW),
           fEntries(entries), fTeam(team), fHoveredRow(-1), fRowHeight(rowHeight) {
-        SetViewColor(rgb_color{24, 24, 28, 255});
+        SetViewColor(NavUI::CurrentPalette().bg);
     }
 
     team_id Team() const { return fTeam; }
@@ -5102,7 +5102,9 @@ public:
         EndPicture();
         ClipToPicture(&clipShape);
 
-        SetHighColor(rgb_color{24, 24, 28, 255});
+        // Colours follow Haiku's current colour scheme, like the custom Tracker menu.
+        const NavUI::Palette pal = NavUI::CurrentPalette();
+        SetHighColor(pal.bg);
         FillRoundRect(bounds, 6.0f, 6.0f);
 
         SetFont(be_plain_font);
@@ -5124,7 +5126,7 @@ public:
 
             float accentLum = (0.2126f * gNavAccent.red + 0.7152f * gNavAccent.green + 0.0722f * gNavAccent.blue) / 255.0f;
             rgb_color hoverText = accentLum > 0.62f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
-            SetHighColor(hovered ? hoverText : rgb_color{220, 220, 225, 255});
+            SetHighColor(hovered ? hoverText : pal.text);
             BString truncTitle = fEntries[i].title;
             font.TruncateString(&truncTitle, B_TRUNCATE_END, bounds.Width() - 16.0f);
             // Centered, not left-aligned at a fixed offset -- matches the
@@ -5143,7 +5145,7 @@ public:
         // draws straddling the outline itself, and the fill's clip would
         // otherwise cut off its outer half.
         ConstrainClippingRegion(NULL);
-        SetHighColor(rgb_color{48, 50, 58, 255});
+        SetHighColor(pal.border);
         StrokeRoundRect(bounds, 6.0f, 6.0f);
     }
 
