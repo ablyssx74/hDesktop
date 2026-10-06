@@ -4848,7 +4848,7 @@ public:
             DrawString(label, textPos);
         }
 
-        SetHighColor(fHovered ? rgb_color{70, 110, 200, 255} : rgb_color{48, 50, 58, 255});
+        SetHighColor(fHovered ? gNavAccent : rgb_color{48, 50, 58, 255});
         StrokeRect(bounds);
         if (fHovered) StrokeRect(bounds.InsetByCopy(1.0f, 1.0f));
     }
@@ -5118,11 +5118,13 @@ public:
 
             bool hovered = (static_cast<int32>(i) == fHoveredRow);
             if (hovered) {
-                SetHighColor(rgb_color{70, 110, 200, 255});
+                SetHighColor(gNavAccent);   // the Selector Color, same as the Tracker menu's snake trail
                 FillRect(rowRect);
             }
 
-            SetHighColor(hovered ? rgb_color{255, 255, 255, 255} : rgb_color{220, 220, 225, 255});
+            float accentLum = (0.2126f * gNavAccent.red + 0.7152f * gNavAccent.green + 0.0722f * gNavAccent.blue) / 255.0f;
+            rgb_color hoverText = accentLum > 0.62f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
+            SetHighColor(hovered ? hoverText : rgb_color{220, 220, 225, 255});
             BString truncTitle = fEntries[i].title;
             font.TruncateString(&truncTitle, B_TRUNCATE_END, bounds.Width() - 16.0f);
             // Centered, not left-aligned at a fixed offset -- matches the
