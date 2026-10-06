@@ -80,7 +80,7 @@
 #include <NavMenu.h>
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.54"
+#define APP_LOCAL_VERSION "v1.0.55"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow;
