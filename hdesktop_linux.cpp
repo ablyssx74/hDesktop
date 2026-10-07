@@ -2936,6 +2936,14 @@ private:
             double tr = cutTop ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
             double br = cutBottom ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
             double bl = cutBottom ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expBottom);
+            if (tab) {
+                // the row itself runs out into the margin, rounded at its outer end (two pixels: the
+                // outline adds the third)
+                hasTab = true;
+                const double kT = kTabW - 1;
+                if (bulgeRight) { x1 = w + kT; tr = cutTop ? 0 : kR; br = cutBottom ? 0 : kR; }
+                else { x0 = -kT; tl = cutTop ? 0 : kR; bl = cutBottom ? 0 : kR; }
+            }
             pieces.push_back({x0, t, x1 - x0, b - t, tl, tr, br, bl});
         };
 
@@ -2955,11 +2963,7 @@ private:
                     // the selected row (the open or hovered one) carries the tab, when it is fully in view
                     bool tab = !arrowDir && static_cast<int>(i) == own && y + 1 >= ViewTop() && y + rh - 1 <= ViewBottom();
                     addPiece(y + 1, y + rh - 1, open && trail, childOnRight, parentRow, false, tab);
-                    if (tab) {   // the tab itself, two pixels wide: the outline adds the third
-                        hasTab = true;
-                        const double kT = kTabW - 1;
-                        pieces.push_back({bulgeRight ? w : -kT, y + 1, kT, rh - 2, 0, 0, 0, 0});
-                    }
+
                 }
             }
             y += rh;
