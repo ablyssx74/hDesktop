@@ -80,7 +80,7 @@
 #include <NavMenu.h>
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.55"
+#define APP_LOCAL_VERSION "v1.0.56"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow;
@@ -134,6 +134,9 @@ bool fShowAdvancedOptions = false;
 // "snake trail" through the open submenus (Settings > Snake Trail), and the selector's accent colour
 // (Settings > Selector Color). The bevel's light and dark edges are worked out from it.
 bool gNavSnakeTrail = true;
+// Flat selector: one colour inside the outline. Off brings back the light top / dark bottom edges
+// (Settings > Flat). Shared with Tracker's menus through the "nav_snake_flat" setting.
+bool gNavSnakeFlat = true;
 rgb_color gNavAccent = {70, 110, 200, 255};
 
 // Live window preview thumbnails (taskbar hover). Sizing for the popup
@@ -233,6 +236,7 @@ enum {
     MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
     MSG_THUMBNAIL_SIZE_SLIDER_CHANGED = 'tsiz',
     MSG_SNAKETRAIL_TOGGLED = 'sntg',
+    MSG_SNAKEFLAT_TOGGLED = 'snfl',
     MSG_SELECTOR_COLOR_OPEN = 'slco',
     MSG_SELECTOR_COLOR_CHANGED = 'slcc',
     MSG_SELECTOR_COLOR_DEFAULT = 'slcd',
@@ -753,6 +757,9 @@ struct Rgb { float r, g, b; };
 inline Rgb Accent() { return Rgb{static_cast<float>(gNavAccent.red), static_cast<float>(gNavAccent.green), static_cast<float>(gNavAccent.blue)}; }
 inline Rgb Light(Rgb c) { return Rgb{c.r + (255 - c.r) * 0.35f, c.g + (255 - c.g) * 0.35f, c.b + (255 - c.b) * 0.35f}; }
 inline Rgb Dark(Rgb c) { return Rgb{c.r * 0.62f, c.g * 0.62f, c.b * 0.62f}; }
+// The one pixel dark outline round the selector, and the tab ("bulge") of it that sticks out of the menu.
+inline Rgb OutlineRgb(Rgb c) { return Rgb{c.r * 0.28f, c.g * 0.28f, c.b * 0.28f}; }
+const int kBulgeW = 3;
 inline rgb_color AccentText() {   // white on dark accents, near-black on light ones
     Rgb c = Accent();
     float lum = (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) / 255.0f;
@@ -888,6 +895,73 @@ struct NavMenuState {
 };
 static NavMenuState gNavMenu;
 
+// The selected row's bulge: a small borderless window just outside the menu's outer edge, so the
+// row seems to stick out of the menu. A window can't have see-through corners, so the tab is square.
+class NavBulgeView : public BView {
+public:
+    NavBulgeView(BRect frame) : BView(frame, "NavBulgeView", B_FOLLOW_ALL, B_WILL_DRAW) {
+        SetViewColor(B_TRANSPARENT_COLOR);
+    }
+    void Set(rgb_color accent, bool right) { fAccent = accent; fRight = right; Invalidate(); }
+    virtual void Draw(BRect) {
+        BRect b = Bounds();
+        SetHighColor(fAccent);
+        FillRect(b);
+        NavUI::Rgb o = NavUI::OutlineRgb(NavUI::Accent());
+        SetHighColor(static_cast<uint8>(o.r), static_cast<uint8>(o.g), static_cast<uint8>(o.b));
+        StrokeLine(b.LeftTop(), b.RightTop());
+        StrokeLine(b.LeftBottom(), b.RightBottom());
+        float x = fRight ? b.right : b.left;
+        StrokeLine(BPoint(x, b.top), BPoint(x, b.bottom));
+    }
+private:
+    rgb_color fAccent = {0, 0, 0, 255};
+    bool fRight = true;
+};
+
+class NavBulgeWindow : public BWindow {
+public:
+    NavBulgeWindow()
+        : BWindow(BRect(0, 0, NavUI::kBulgeW - 1, 9), "Tracker Menu Tab", B_NO_BORDER_WINDOW_LOOK,
+              B_FLOATING_ALL_WINDOW_FEEL,
+              B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_RESIZABLE | B_AVOID_FOCUS) {
+        SetSizeLimits(0, NavUI::kBulgeW - 1, 0, 4000);
+        fView = new NavBulgeView(Bounds());
+        AddChild(fView);
+    }
+
+    // From the menu's thread. Nothing is touched unless the tab moved or changed (a needless resize
+    // or redraw flickers); if this window is busy, the next redraw of the menu places it.
+    void Place(BRect screenRect, bool right, rgb_color accent) {
+        if (LockWithTimeout(20000) != B_OK) return;
+        bool same = !IsHidden() && screenRect == fRect && right == fRight && accent.red == fAccent.red &&
+            accent.green == fAccent.green && accent.blue == fAccent.blue;
+        if (!same) {
+            fRect = screenRect;
+            fRight = right;
+            fAccent = accent;
+            ResizeTo(screenRect.Width(), screenRect.Height());
+            MoveTo(screenRect.left, screenRect.top);
+            fView->Set(accent, right);
+            if (IsHidden()) Show();
+        }
+        Unlock();
+    }
+
+    void Away() {
+        if (LockWithTimeout(20000) != B_OK) return;
+        if (!IsHidden()) Hide();
+        fRect = BRect();
+        Unlock();
+    }
+
+private:
+    NavBulgeView* fView;
+    BRect fRect;
+    bool fRight = true;
+    rgb_color fAccent = {0, 0, 0, 255};
+};
+
 class NavMenuView : public BView {
 public:
     NavMenuView(BRect frame, NavMenuWindow* owner);
@@ -991,7 +1065,26 @@ public:
 
     virtual bool QuitRequested() {
         CloseChild(false);
+        if (fBulge != nullptr) {
+            NavBulgeWindow* bulge = fBulge;
+            fBulge = nullptr;
+            if (bulge->Lock()) bulge->Quit();
+        }
         return true;
+    }
+
+    // The selected row's tab outside the menu's outer edge (row < 0: none).
+    void UpdateBulge(float rowTop, bool right) {
+        if (rowTop < 0) {
+            if (fBulge != nullptr) fBulge->Away();
+            return;
+        }
+        if (fBulge == nullptr) fBulge = new NavBulgeWindow();
+        float x = right ? fFrame.right + 1 : fFrame.left - NavUI::kBulgeW;
+        float top = fFrame.top + rowTop;   // the selector's outline rows included: it is outlined all round
+        fBulge->Place(BRect(x, top, x + NavUI::kBulgeW - 1, top + NavUI::kRowH - 1), right,
+            rgb_color{static_cast<uint8>(gNavAccent.red), static_cast<uint8>(gNavAccent.green),
+                static_cast<uint8>(gNavAccent.blue), 255});
     }
 
     // ---- geometry shared with the view ----
@@ -1094,6 +1187,7 @@ public:
     int fChildRow = -1;
     bool fChildOnRight = true;
     int fScrollDir = 0;
+    NavBulgeWindow* fBulge = nullptr;
 
     void ScrollBy(float delta) {
         float before = fScroll;
@@ -1259,13 +1353,16 @@ void NavMenuView::RenderBackdrop() {
         if (o->fScrollDir < 0 && o->fScroll > 0.5f) arrowDir = -1;
         else if (o->fScrollDir > 0 && o->fScroll < o->MaxScroll() - 0.5f) arrowDir = 1;
     }
-    auto addPiece = [&](float top, float bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow) {
+    // The side the selected row's tab sticks out of: away from the neighbouring menu.
+    const bool bulgeRight = o->fLink.valid ? o->fLink.parentOnLeft : (o->fChildRow >= 0 ? !o->fChildOnRight : true);
+    float tabRowTop = -1;
+    auto addPiece = [&](float top, float bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow, bool tab) {
         float vt = arrow ? 0.0f : o->ViewTop(), vb = arrow ? static_cast<float>(h) : o->ViewBottom();
         bool cutTop = top < vt, cutBottom = bottom > vb;
         float t = std::max(top, vt), b = std::min(bottom, vb);
         if (b <= t) return;
-        bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft);
-        bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft);
+        bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft) || (tab && !bulgeRight);
+        bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft) || (tab && bulgeRight);
         float x0 = leftFlush ? 0.0f : 3.0f, x1 = rightFlush ? static_cast<float>(w) : w - 3.0f;
         bool expTop = onTrail && top < pTop - 0.5f, expBottom = onTrail && bottom > pBottom + 0.5f;
         float tl = cutTop ? 0.0f : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
@@ -1284,14 +1381,17 @@ void NavMenuView::RenderBackdrop() {
         if (parentRow) { ownTop = y + 1; ownBottom = y + kRowH - 1; hasOwn = true; }
         if ((hovered || open || parentRow) && y + kRowH > o->ViewTop() && y < o->ViewBottom()) {
             bool childOnRight = open && o->fChildOnRight;
-            addPiece(y + 1, y + kRowH - 1, open && gNavSnakeTrail, childOnRight, parentRow, false);
+            // the selected row (the open or hovered one, as the trail sees it) carries the tab
+            bool tab = !arrowDir && i == own && y + 1 >= o->ViewTop() && y + kRowH - 1 <= o->ViewBottom();
+            if (tab) tabRowTop = y;
+            addPiece(y + 1, y + kRowH - 1, open && gNavSnakeTrail, childOnRight, parentRow, false, tab);
         }
     }
     if (arrowDir) {
         ownTop = arrowDir < 0 ? 2.0f : h - kArrowH + 1;
         ownBottom = arrowDir < 0 ? kArrowH - 1 : h - 2.0f;
         hasOwn = true;
-        addPiece(ownTop, ownBottom, false, false, parentLink, true);
+        addPiece(ownTop, ownBottom, false, false, parentLink, true, false);
     }
     if (parentLink) {
         float top = pTop, bottom = pBottom;
@@ -1311,6 +1411,8 @@ void NavMenuView::RenderBackdrop() {
             }
         }
     }
+
+    o->UpdateBulge(tabRowTop, bulgeRight);
 
     // Union coverage map of the selector.
     std::vector<float> cover(static_cast<size_t>(w) * h, 0.0f);
@@ -1338,7 +1440,8 @@ void NavMenuView::RenderBackdrop() {
     }
 
     // ---- composite: background, border, selector with bevel ----
-    const Rgb base = Accent(), light = Light(base), dark = Dark(base);
+    const Rgb base = Accent(), light = gNavSnakeFlat ? base : Light(base), dark = gNavSnakeFlat ? base : Dark(base);
+    const Rgb outline = OutlineRgb(base);
     const Palette pal = CurrentPalette();
     uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
     const int32 bpr = fBackdrop->BytesPerRow();
@@ -1356,6 +1459,12 @@ void NavMenuView::RenderBackdrop() {
             float ring = Clamp01(outer - inner);   // the 1px border; the corners outside it stay background
             cr += (pal.border.red - cr) * ring; cg += (pal.border.green - cg) * ring; cb += (pal.border.blue - cb) * ring;
             float c0 = at(x, y);
+            if (c0 < 1.0f) {   // the one pixel dark outline just outside the selector
+                float ol = std::max(std::max(at(x - 1, y), at(x + 1, y)), std::max(at(x, y - 1), at(x, y + 1))) * (1.0f - c0);
+                if (ol > 0.0f) {
+                    cr += (outline.r - cr) * ol; cg += (outline.g - cg) * ol; cb += (outline.b - cb) * ol;
+                }
+            }
             if (c0 > 0.0f) {
                 float a1 = c0, a2 = c0 * at(x, y - 1), a3 = a2 * at(x, y + 1);
                 cr += (light.r - cr) * a1; cg += (light.g - cg) * a1; cb += (light.b - cb) * a1;
@@ -2517,6 +2626,7 @@ private:
     BCheckBox* fTextOverlaysCheckbox;    // Haiku mode
     BCheckBox* fTextOverlaysSDLCheckbox; // SDL mode -- mutually exclusive with the above
     BCheckBox* fSnakeTrailCheckbox;
+    BCheckBox* fSnakeFlatCheckbox;
     BButton*   fSelectorColorButton;
     BCheckBox* fThumbnailsCheckbox;
     BCheckBox* fAdvancedCheckbox;
@@ -2624,6 +2734,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSnakeTrailCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fSnakeTrailCheckbox->SetValue(gNavSnakeTrail ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSnakeTrailCheckbox);
+        // "Flat": the selector without its light top / dark bottom edge. Beside the trail checkbox
+        // so nothing below has to be reflowed.
+        BRect snakeFlatRect(222.0f, 202.0f, 242.0f, 218.0f);
+        fSnakeFlatCheckbox = new BCheckBox(snakeFlatRect, "snake_flat_cb", nullptr,
+            new BMessage(MSG_SNAKEFLAT_TOGGLED));
+        fSnakeFlatCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fSnakeFlatCheckbox->SetValue(gNavSnakeFlat ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fSnakeFlatCheckbox);
         fSelectorColorButton = new BButton(BRect(318.0f, 199.0f, 470.0f, 221.0f), "selector_color_btn",
             "Selector Color" B_UTF8_ELLIPSIS, new BMessage(MSG_SELECTOR_COLOR_OPEN));
         AddChild(fSelectorColorButton);
@@ -2914,6 +3032,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
         DrawString("Snake Trail (Tracker menu)", BPoint(62.0f, 214.0f));
+        DrawString("Flat", BPoint(249.0f, 214.0f));
         {   // the selector's current colour, beside its button
             BRect swatch(290.0f, 201.0f, 310.0f, 219.0f);
             SetHighColor(gNavAccent);
@@ -3053,6 +3172,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fThumbnailSizeSlider->SetTarget(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
         fSnakeTrailCheckbox->SetTarget(this);
+        fSnakeFlatCheckbox->SetTarget(this);
         fSelectorColorButton->SetTarget(this);
         fClockCheckbox->SetTarget(this);
         fVolumeCheckbox->SetTarget(this);
@@ -3179,6 +3299,12 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 BString thumbnailSizeLabel;
                 thumbnailSizeLabel << "Thumbnail Size: " << fThumbnailSize << " px";
                 fThumbnailSizeSlider->SetLabel(thumbnailSizeLabel.String());
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_SNAKEFLAT_TOGGLED: {
+                gNavSnakeFlat = (fSnakeFlatCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 break;
             }
@@ -11479,6 +11605,7 @@ void SaveConfiguration() {
             settingsMsg.AddInt32("thumbnail_size", fThumbnailSize);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
             settingsMsg.AddBool("nav_snake_trail", gNavSnakeTrail);
+            settingsMsg.AddBool("nav_snake_flat", gNavSnakeFlat);
             settingsMsg.AddInt32("nav_accent", (static_cast<int32>(gNavAccent.red) << 16) |
                 (static_cast<int32>(gNavAccent.green) << 8) | static_cast<int32>(gNavAccent.blue));
             settingsMsg.AddBool("show_clock", fShowClock);
@@ -11547,6 +11674,7 @@ void LoadConfiguration() {
                 }
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
                 if (settingsMsg.FindBool("nav_snake_trail", &valBool) == B_OK) gNavSnakeTrail = valBool;
+                if (settingsMsg.FindBool("nav_snake_flat", &valBool) == B_OK) gNavSnakeFlat = valBool;
                 if (settingsMsg.FindInt32("nav_accent", &valInt32) == B_OK) {
                     gNavAccent = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
                         static_cast<uint8>((valInt32 >> 8) & 0xFF), static_cast<uint8>(valInt32 & 0xFF), 255};
