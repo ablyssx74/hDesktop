@@ -104,7 +104,7 @@
 #include "viewporter-client-protocol.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
-#define APP_LOCAL_VERSION "v1.0.55"
+#define APP_LOCAL_VERSION "v1.0.56"
 
 // Linux input event codes (linux/input-event-codes.h), spelled out so the
 // build doesn't depend on kernel headers being installed.
@@ -177,6 +177,7 @@ struct Settings {
     bool   notificationServer = true; // own org.freedesktop.Notifications and draw toasts
     bool   windowPreviews = false;    // KWin: window thumbnails in the hover list (PipeWire screencast)
     bool   snakeTrail = true;         // menu selector stays joined across submenus
+    bool   snakeFlat = true;          // menu selector in one flat colour (off: light top / dark bottom edges)
     bool   keepAboveWindows = true;   // Haiku: "auto-raise" (floating feel on hover)
     bool   reserveSpace = true;       // Wayland only: exclusive zone so maximized windows stop at the dock
     bool   titlePopup = true;         // Haiku mode title overlay: clickable window list popup
@@ -237,6 +238,7 @@ static void SaveConfiguration() {
     g_key_file_set_boolean(kf, g, "notifications", gSettings.notificationServer);
     g_key_file_set_boolean(kf, g, "window_previews", gSettings.windowPreviews);
     g_key_file_set_boolean(kf, g, "snake_trail", gSettings.snakeTrail);
+    g_key_file_set_boolean(kf, g, "snake_flat", gSettings.snakeFlat);
     g_key_file_set_boolean(kf, g, "keep_above_windows", gSettings.keepAboveWindows);
     g_key_file_set_boolean(kf, g, "reserve_space", gSettings.reserveSpace);
     g_key_file_set_boolean(kf, g, "title_popup", gSettings.titlePopup);
@@ -320,6 +322,7 @@ static void LoadConfiguration() {
     getBool("notifications", gSettings.notificationServer);
     getBool("window_previews", gSettings.windowPreviews);
     getBool("snake_trail", gSettings.snakeTrail);
+    getBool("snake_flat", gSettings.snakeFlat);
     getBool("keep_above_windows", gSettings.keepAboveWindows);
     getBool("reserve_space", gSettings.reserveSpace);
     getBool("title_popup", gSettings.titlePopup);
@@ -502,6 +505,10 @@ static RGBA AccentLight() {   // toward white
 static RGBA AccentDark() {    // toward black
     RGBA c = AccentColor();
     return RGBA{c.r * 0.62, c.g * 0.62, c.b * 0.62, 1};
+}
+static RGBA AccentOutline() {  // the one pixel outline round the menu selector
+    RGBA c = AccentColor();
+    return RGBA{c.r * 0.28, c.g * 0.28, c.b * 0.28, 1};
 }
 static RGBA AccentTextColor() {   // white on dark accents, near-black on light ones
     RGBA c = AccentColor();
@@ -2433,7 +2440,8 @@ public:
     }
 
     void Paint(cairo_t* cr) override {
-        const double w = width, h = height;
+        const double w = BodyW(), h = height;
+        cairo_translate(cr, kTabW, 0);   // the menu itself; the margins on both sides are for the tab
         RoundedRectPath(cr, 0.5, 0.5, w - 1, h - 1, 6.0);
         cairo_set_source_rgba(cr, 24 / 255.0, 24 / 255.0, 28 / 255.0, 0.98);
         cairo_fill_preserve(cr);
@@ -2447,7 +2455,7 @@ public:
             // menus join, so it gets the full outline as its clip, not the inset one.
             cairo_save(cr);
             RoundedRectPath(cr, 0, 0, w, h, 6.0);
-            cairo_clip(cr);
+            cairo_clip(cr);   // (DrawHighlight widens it to the margin on the tab's side)
             DrawHighlight(cr);
             cairo_restore(cr);
         }
@@ -2675,6 +2683,10 @@ private:
     static constexpr double kSepH = 9.0;
     static constexpr double kPadX = 8.0;
     static constexpr double kPadY = 4.0;
+    // The surface is wider than the menu on both sides by this much: room for the selected row's
+    // tab ("bulge") to stick out of the menu's outer edge. Transparent otherwise.
+    static constexpr double kTabW = 3.0;
+    double BodyW() const { return width - 2 * kTabW; }
     static constexpr double kLeftColumn = 30.0;
     static constexpr double kValueColumnW = 54.0;
     static constexpr double kBarW = 80.0;
@@ -2749,7 +2761,7 @@ private:
             w = std::clamp(left + maxLabel + kPadX + 22, 150.0, 420.0);
         }
         if (hasThumbs) w = std::max(w, ThumbW() + kPadX * 2);
-        fWidth = static_cast<int>(std::ceil(w));
+        fWidth = static_cast<int>(std::ceil(w) + 2 * kTabW);
         fContentH = h;
         fHeight = static_cast<int>(std::ceil(std::min(h, MaxHeight())));
     }
@@ -2810,7 +2822,7 @@ private:
     }
 
     void DrawScrollArrows(cairo_t* cr) {
-        const double w = width, h = height;
+        const double w = BodyW(), h = height;
         auto arrow = [&](double cy, bool up, bool active, bool hot) {
             double cx = w / 2, d = up ? -1 : 1;   // (the lit strip itself is DrawHighlight's)
             cairo_new_path(cr);
@@ -2875,7 +2887,7 @@ private:
         struct Fillet { double x, y; int dx, dy; };
         std::vector<Piece> pieces;
         std::vector<Fillet> fillets;
-        const double w = width;
+        const double w = BodyW();
         const double kR = 4.0;     // corner radius of a lone selector row
 
         const bool trail = gSettings.snakeTrail;   // off: each menu keeps its own, unjoined selector
@@ -2907,19 +2919,31 @@ private:
         // One lit piece spanning [top, bottom]. `onTrail`: it is my link to the parent.
         // Clipped to the scrolling view, which is why it is done by hand: the arrow
         // strips lie outside it and must still be able to light up.
-        auto addPiece = [&](double top, double bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow) {
+        // The side the selected row's tab sticks out of: away from the neighbouring menu.
+        const bool bulgeRight = fParent ? parentOnLeft : (fChild ? fChild->popupX < 0 : true);
+        bool hasTab = false;
+        auto addPiece = [&](double top, double bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow,
+                            bool tab) {
             double vt = arrow ? 0 : ViewTop(), vb = arrow ? static_cast<double>(height) : ViewBottom();
             bool cutTop = top < vt, cutBottom = bottom > vb;
             double t = std::max(top, vt), b = std::min(bottom, vb);
             if (b <= t) return;
-            bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft);
-            bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft);
+            bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft) || (tab && !bulgeRight);
+            bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft) || (tab && bulgeRight);
             double x0 = leftFlush ? 0 : 3, x1 = rightFlush ? w : w - 3;
             bool expTop = onTrail && top < pTop - 0.5, expBottom = onTrail && bottom > pBottom + 0.5;
             double tl = cutTop ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
             double tr = cutTop ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
             double br = cutBottom ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
             double bl = cutBottom ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expBottom);
+            if (tab) {
+                // the row itself runs out into the margin, rounded at its outer end (two pixels: the
+                // outline adds the third)
+                hasTab = true;
+                const double kT = kTabW - 1;
+                if (bulgeRight) { x1 = w + kT; tr = cutTop ? 0 : kR; br = cutBottom ? 0 : kR; }
+                else { x0 = -kT; tl = cutTop ? 0 : kR; bl = cutBottom ? 0 : kR; }
+            }
             pieces.push_back({x0, t, x1 - x0, b - t, tl, tr, br, bl});
         };
 
@@ -2936,7 +2960,10 @@ private:
                 if (parentRow) { ownTop = y + 1; ownBottom = y + rh - 1; hasOwn = true; }
                 if ((hovered || open || parentRow) && y + rh > ViewTop() && y < ViewBottom()) {
                     bool childOnRight = open && fChild->popupX >= 0;
-                    addPiece(y + 1, y + rh - 1, open && trail, childOnRight, parentRow, false);
+                    // the selected row (the open or hovered one) carries the tab, when it is fully in view
+                    bool tab = !arrowDir && static_cast<int>(i) == own && y + 1 >= ViewTop() && y + rh - 1 <= ViewBottom();
+                    addPiece(y + 1, y + rh - 1, open && trail, childOnRight, parentRow, false, tab);
+
                 }
             }
             y += rh;
@@ -2945,7 +2972,7 @@ private:
             ownTop = arrowDir < 0 ? 2 : height - kArrowH + 1;
             ownBottom = arrowDir < 0 ? kArrowH - 1 : height - 2;
             hasOwn = true;
-            addPiece(ownTop, ownBottom, false, false, parentLink, true);
+            addPiece(ownTop, ownBottom, false, false, parentLink, true, false);
         }
         if (parentLink) {
             // Bridge my parent's row to mine.
@@ -2970,12 +2997,12 @@ private:
         if (pieces.empty()) return;
         const double kFillet = 3.0;
 
-        const RGBA base = AccentColor(), light = AccentLight(), dark = AccentDark();
-        auto addUnion = [&](double dy) {
-            for (const Piece& p : pieces) CornerRectPath(cr, p.x, p.y + dy, p.w, p.h, p.tl, p.tr, p.br, p.bl);
+        const RGBA base = AccentColor(), light = AccentLight(), dark = AccentDark(), outline = AccentOutline();
+        auto addUnion = [&](double dy, double dx = 0) {
+            for (const Piece& p : pieces) CornerRectPath(cr, p.x + dx, p.y + dy, p.w, p.h, p.tl, p.tr, p.br, p.bl);
             for (const Fillet& f : fillets) {
                 // Corner point, along one edge, a quarter arc around the circle centre, back along the other.
-                double px = f.x, py = f.y + dy, r = kFillet;
+                double px = f.x + dx, py = f.y + dy, r = kFillet;
                 double cx = px + f.dx * r, cy = py + f.dy * r;
                 cairo_new_sub_path(cr);
                 cairo_move_to(cr, px, py);
@@ -2986,21 +3013,48 @@ private:
                 cairo_close_path(cr);
             }
         };
-        // Union, then the same union nudged down and up a pixel: what the
-        // nudges miss at the top is the light edge, at the bottom the dark one.
+        // Clip to the menu, and to the margin on the tab's side only: the other margin belongs to
+        // the neighbouring menu's edge, which the outline mustn't leave a line on.
+        cairo_reset_clip(cr);
+        RoundedRectPath(cr, 0, 0, w, height, 6.0);
+        if (hasTab) cairo_rectangle(cr, bulgeRight ? w : -kTabW, 0, kTabW, height);
+        cairo_clip(cr);
+
+        // The one pixel dark outline: the union nudged a pixel each way, under the selector itself.
+        {
+            const double nudges[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+            for (const auto& n : nudges) {
+                cairo_save(cr);
+                addUnion(n[1], n[0]);
+                cairo_clip(cr);
+                cairo_set_source_rgba(cr, outline.r, outline.g, outline.b, 1);
+                cairo_paint(cr);
+                cairo_restore(cr);
+            }
+        }
         cairo_save(cr);
-        addUnion(0);
-        cairo_clip(cr);
-        cairo_set_source_rgba(cr, light.r, light.g, light.b, 1);
-        cairo_paint(cr);
-        addUnion(1);
-        cairo_clip(cr);
-        cairo_set_source_rgba(cr, dark.r, dark.g, dark.b, 1);
-        cairo_paint(cr);
-        addUnion(-1);
-        cairo_clip(cr);
-        cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
-        cairo_paint(cr);
+        if (gSettings.snakeFlat) {
+            // one flat colour
+            addUnion(0);
+            cairo_clip(cr);
+            cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
+            cairo_paint(cr);
+        } else {
+            // Union, then the same union nudged down and up a pixel: what the
+            // nudges miss at the top is the light edge, at the bottom the dark one.
+            addUnion(0);
+            cairo_clip(cr);
+            cairo_set_source_rgba(cr, light.r, light.g, light.b, 1);
+            cairo_paint(cr);
+            addUnion(1);
+            cairo_clip(cr);
+            cairo_set_source_rgba(cr, dark.r, dark.g, dark.b, 1);
+            cairo_paint(cr);
+            addUnion(-1);
+            cairo_clip(cr);
+            cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
+            cairo_paint(cr);
+        }
         cairo_restore(cr);
     }
 
@@ -3035,9 +3089,12 @@ private:
         }
         auto child = std::make_unique<PopupMenu>(std::move(sub), this, fGrabbing, false);
         PopupAnchor a;
-        a.x = 0;
+        // The anchor spans the menu minus its margins on both sides, so the submenu's edge meets ours
+        // whichever side it opens on: opening to the right it starts at the anchor's right end, flipped
+        // to the left it ends at the anchor's left end, and each surface has its own margin.
+        a.x = static_cast<int>(2 * kTabW);
         a.y = static_cast<int>(RowTop(row));
-        a.w = width;
+        a.w = width - static_cast<int>(4 * kTabW);
         a.h = static_cast<int>(kRowH);
         a.anchor = XDG_POSITIONER_ANCHOR_TOP_RIGHT;
         a.gravity = XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT;
@@ -10055,6 +10112,8 @@ private:
             "Thumbnails when hovering dock icons (KDE Plasma)");
         check("Snake Trail", &gSettings.snakeTrail, 317, true, true,
             "Menu highlight stays joined across submenus");
+        check("Flat Selector", &gSettings.snakeFlat, 40, true, true,
+            "Menu highlight in one flat colour (off: light top and dark bottom edges)");
         fBuiltPreviews = gSettings.windowPreviews && gPreviews.Available();
         if (fBuiltPreviews) {
             y += 6;
