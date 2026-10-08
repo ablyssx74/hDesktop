@@ -80,7 +80,7 @@
 #include <NavMenu.h>
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.56"
+#define APP_LOCAL_VERSION "v1.0.57"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow;
@@ -760,6 +760,7 @@ inline Rgb Dark(Rgb c) { return Rgb{c.r * 0.62f, c.g * 0.62f, c.b * 0.62f}; }
 // The one pixel dark outline round the selector, and the tab ("bulge") of it that sticks out of the menu.
 inline Rgb OutlineRgb(Rgb c) { return Rgb{c.r * 0.28f, c.g * 0.28f, c.b * 0.28f}; }
 const int kBulgeW = 3;
+const int kVBulgeW = 4;   // the vertical part's bulge into the parent menu, with the parent's border column
 inline rgb_color AccentText() {   // white on dark accents, near-black on light ones
     Rgb c = Accent();
     float lum = (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) / 255.0f;
@@ -902,47 +903,96 @@ public:
     NavBulgeView(BRect frame) : BView(frame, "NavBulgeView", B_FOLLOW_ALL, B_WILL_DRAW) {
         SetViewColor(B_TRANSPARENT_COLOR);
     }
-    void Set(rgb_color accent, bool right) { fAccent = accent; fRight = right; Invalidate(); }
+    void Set(rgb_color accent, bool right, bool edgeTop, bool edgeBottom, int skipFrom, int skipTo, bool rounded) {
+        fAccent = accent;
+        fRight = right;
+        fEdgeTop = edgeTop;
+        fEdgeBottom = edgeBottom;
+        fSkipFrom = skipFrom;
+        fSkipTo = skipTo;
+        fRounded = rounded;
+        Invalidate();
+    }
     virtual void Draw(BRect) {
         BRect b = Bounds();
+        const int w = static_cast<int>(b.Width()) + 1, h = static_cast<int>(b.Height()) + 1;
         SetHighColor(fAccent);
         FillRect(b);
         NavUI::Rgb o = NavUI::OutlineRgb(NavUI::Accent());
-        SetHighColor(static_cast<uint8>(o.r), static_cast<uint8>(o.g), static_cast<uint8>(o.b));
-        StrokeLine(b.LeftTop(), b.RightTop());
-        StrokeLine(b.LeftBottom(), b.RightBottom());
-        float x = fRight ? b.right : b.left;
-        StrokeLine(BPoint(x, b.top), BPoint(x, b.bottom));
+        const rgb_color edge = {static_cast<uint8>(o.r), static_cast<uint8>(o.g), static_cast<uint8>(o.b), 255};
+        SetHighColor(edge);
+        if (fEdgeTop) StrokeLine(b.LeftTop(), b.RightTop());
+        if (fEdgeBottom) StrokeLine(b.LeftBottom(), b.RightBottom());
+        // the side away from the menu it hangs on, except where it runs along a lit row
+        const float far = fRight ? b.right : b.left;
+        int from = 0;
+        if (fSkipFrom >= 0 && fSkipTo >= fSkipFrom) {
+            if (fSkipFrom > 0) StrokeLine(BPoint(far, 0), BPoint(far, fSkipFrom - 1));
+            from = fSkipTo + 1;
+        }
+        if (from < h) StrokeLine(BPoint(far, from), BPoint(far, h - 1));
+
+        // Rounded corners at the free ends. This tab hangs over the body of a menu, whose colour is known,
+        // so the pixels outside the curve are painted in it (a window can't be see-through).
+        if (fRounded) {
+            const rgb_color back = NavUI::CurrentPalette().bg;
+            for (int end = 0; end < 2; end++) {
+                if (end == 0 ? !fEdgeTop : !fEdgeBottom) continue;
+                for (int u = 0; u < 3; u++) {
+                    for (int v = 0; v < 3; v++) {
+                        float dx = u + 0.5f - 3.0f, dy = v + 0.5f - 3.0f;
+                        float d = std::sqrt(dx * dx + dy * dy);
+                        float outer = std::min(1.0f, std::max(0.0f, 3.0f - d + 0.5f));
+                        float inner = std::min(1.0f, std::max(0.0f, 2.0f - d + 0.5f));
+                        float r = back.red + (edge.red + (fAccent.red - edge.red) * inner - back.red) * outer;
+                        float g = back.green + (edge.green + (fAccent.green - edge.green) * inner - back.green) * outer;
+                        float bl = back.blue + (edge.blue + (fAccent.blue - edge.blue) * inner - back.blue) * outer;
+                        int x = fRight ? w - 1 - u : u;
+                        int y = end == 0 ? v : h - 1 - v;
+                        SetHighColor(static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(bl));
+                        FillRect(BRect(x, y, x, y));
+                    }
+                }
+            }
+        }
     }
 private:
     rgb_color fAccent = {0, 0, 0, 255};
-    bool fRight = true;
+    bool fRight = true, fEdgeTop = true, fEdgeBottom = true, fRounded = false;
+    int fSkipFrom = -1, fSkipTo = -1;
 };
 
 class NavBulgeWindow : public BWindow {
 public:
-    NavBulgeWindow()
-        : BWindow(BRect(0, 0, NavUI::kBulgeW - 1, 9), "Tracker Menu Tab", B_NO_BORDER_WINDOW_LOOK,
+    NavBulgeWindow(int width = NavUI::kBulgeW)
+        : BWindow(BRect(0, 0, width - 1, 9), "Tracker Menu Tab", B_NO_BORDER_WINDOW_LOOK,
               B_FLOATING_ALL_WINDOW_FEEL,
               B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_RESIZABLE | B_AVOID_FOCUS) {
-        SetSizeLimits(0, NavUI::kBulgeW - 1, 0, 4000);
+        SetSizeLimits(0, width - 1, 0, 4000);
         fView = new NavBulgeView(Bounds());
         AddChild(fView);
     }
 
     // From the menu's thread. Nothing is touched unless the tab moved or changed (a needless resize
     // or redraw flickers); if this window is busy, the next redraw of the menu places it.
-    void Place(BRect screenRect, bool right, rgb_color accent) {
+    void Place(BRect screenRect, bool right, rgb_color accent, bool edgeTop = true, bool edgeBottom = true,
+        int skipFrom = -1, int skipTo = -1, bool rounded = false) {
         if (LockWithTimeout(20000) != B_OK) return;
         bool same = !IsHidden() && screenRect == fRect && right == fRight && accent.red == fAccent.red &&
-            accent.green == fAccent.green && accent.blue == fAccent.blue;
+            accent.green == fAccent.green && accent.blue == fAccent.blue && edgeTop == fEdgeTop &&
+            edgeBottom == fEdgeBottom && skipFrom == fSkipFrom && skipTo == fSkipTo && rounded == fRounded;
         if (!same) {
             fRect = screenRect;
             fRight = right;
             fAccent = accent;
+            fEdgeTop = edgeTop;
+            fEdgeBottom = edgeBottom;
+            fSkipFrom = skipFrom;
+            fSkipTo = skipTo;
+            fRounded = rounded;
             ResizeTo(screenRect.Width(), screenRect.Height());
             MoveTo(screenRect.left, screenRect.top);
-            fView->Set(accent, right);
+            fView->Set(accent, right, edgeTop, edgeBottom, skipFrom, skipTo, rounded);
             if (IsHidden()) Show();
         }
         Unlock();
@@ -958,7 +1008,8 @@ public:
 private:
     NavBulgeView* fView;
     BRect fRect;
-    bool fRight = true;
+    bool fRight = true, fEdgeTop = true, fEdgeBottom = true, fRounded = false;
+    int fSkipFrom = -1, fSkipTo = -1;
     rgb_color fAccent = {0, 0, 0, 255};
 };
 
@@ -987,6 +1038,7 @@ public:
         bool valid = false;
         bool parentOnLeft = true;
         float parentRowTop = 0, parentRowBottom = 0;   // screen coordinates
+        float parentTop = 0, parentBottom = 0;          // the parent window's extent, screen coordinates
     };
 
     // `parentFrame` is empty for the root. `anchor` is where the root's bottom (bottom dock) or
@@ -1025,6 +1077,8 @@ public:
             fLink.parentOnLeft = right;
             fLink.parentRowTop = parentRowTop;
             fLink.parentRowBottom = parentRowTop + NavUI::kRowH;
+            fLink.parentTop = parentFrame.top;
+            fLink.parentBottom = parentFrame.bottom;
         }
         left = std::max(sf.left + 4, std::min(left, sf.right + 1 - fWidth - 4));
         top = std::max(sf.top + NavUI::kScreenMargin, std::min(top, sf.bottom + 1 - NavUI::kScreenMargin - fHeight));
@@ -1070,6 +1124,11 @@ public:
             fBulge = nullptr;
             if (bulge->Lock()) bulge->Quit();
         }
+        if (fVBulge != nullptr) {
+            NavBulgeWindow* bulge = fVBulge;
+            fVBulge = nullptr;
+            if (bulge->Lock()) bulge->Quit();
+        }
         return true;
     }
 
@@ -1085,6 +1144,25 @@ public:
         fBulge->Place(BRect(x, top, x + NavUI::kBulgeW - 1, top + NavUI::kRowH - 1), right,
             rgb_color{static_cast<uint8>(gNavAccent.red), static_cast<uint8>(gNavAccent.green),
                 static_cast<uint8>(gNavAccent.blue), 255});
+    }
+
+    // The vertical part of the trail, between the parent's row and this menu's row, hangs into the parent menu
+    // (top > bottom: none). Window coordinates; `skip` is the part of it beside the parent's own lit row.
+    void UpdateVBulge(float top, float bottom, bool parentOnLeft, bool edgeTop, bool edgeBottom, float rowTop,
+        float rowBottom) {
+        if (bottom <= top) {
+            if (fVBulge != nullptr) fVBulge->Away();
+            return;
+        }
+        if (fVBulge == nullptr) fVBulge = new NavBulgeWindow(NavUI::kVBulgeW);
+        float x = parentOnLeft ? fFrame.left - NavUI::kVBulgeW : fFrame.right + 1;
+        float sy0 = fFrame.top + top, sy1 = fFrame.top + bottom - 1;
+        // the free end is rounded only where it hangs over the parent's body, not over the desktop
+        bool overParent = edgeTop ? sy0 >= fLink.parentTop : sy1 <= fLink.parentBottom;
+        fVBulge->Place(BRect(x, sy0, x + NavUI::kVBulgeW - 1, sy1), !parentOnLeft,
+            rgb_color{static_cast<uint8>(gNavAccent.red), static_cast<uint8>(gNavAccent.green),
+                static_cast<uint8>(gNavAccent.blue), 255},
+            edgeTop, edgeBottom, static_cast<int>(rowTop - top), static_cast<int>(rowBottom - top) - 1, overParent);
     }
 
     // ---- geometry shared with the view ----
@@ -1188,6 +1266,7 @@ public:
     bool fChildOnRight = true;
     int fScrollDir = 0;
     NavBulgeWindow* fBulge = nullptr;
+    NavBulgeWindow* fVBulge = nullptr;
 
     void ScrollBy(float delta) {
         float before = fScroll;
@@ -1400,7 +1479,8 @@ void NavMenuView::RenderBackdrop() {
         bottom = std::min(bottom, static_cast<float>(h));
         if (bottom > top) {
             const float r = 3.0f;
-            const float rt = top < pTop - 0.5f ? kSelR : 0.0f, rb = bottom > pBottom + 0.5f ? kSelR : 0.0f;
+            // (the strip hanging into the parent menu carries the curve at the free end of the vertical part)
+            const float rt = 0.0f, rb = 0.0f;
             if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, rt, r, r, rb});
             else pieces.push_back({static_cast<float>(w) - kBarW, top, kBarW, bottom - top, r, rt, rb, r});
             if (hasOwn && ownBottom > ownTop) {
@@ -1413,6 +1493,16 @@ void NavMenuView::RenderBackdrop() {
     }
 
     o->UpdateBulge(tabRowTop, bulgeRight);
+
+    // the vertical part also hangs into the parent menu, where it runs past the parent's row
+    {
+        float vTop = 0, vBottom = -1;
+        if (parentLink && hasOwn && ownBottom > ownTop && (ownTop < pTop - 0.5f || ownBottom > pBottom + 0.5f)) {
+            vTop = std::max(0.0f, std::min(ownTop, pTop));
+            vBottom = std::min(static_cast<float>(h), std::max(ownBottom, pBottom));
+        }
+        o->UpdateVBulge(vTop, vBottom, parentOnLeft, ownTop < pTop - 0.5f, ownBottom > pBottom + 0.5f, pTop, pBottom);
+    }
 
     // Union coverage map of the selector.
     std::vector<float> cover(static_cast<size_t>(w) * h, 0.0f);

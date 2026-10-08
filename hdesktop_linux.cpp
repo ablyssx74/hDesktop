@@ -104,7 +104,7 @@
 #include "viewporter-client-protocol.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
-#define APP_LOCAL_VERSION "v1.0.56"
+#define APP_LOCAL_VERSION "v1.0.57"
 
 // Linux input event codes (linux/input-event-codes.h), spelled out so the
 // build doesn't depend on kernel headers being installed.
@@ -2922,6 +2922,7 @@ private:
         // The side the selected row's tab sticks out of: away from the neighbouring menu.
         const bool bulgeRight = fParent ? parentOnLeft : (fChild ? fChild->popupX < 0 : true);
         bool hasTab = false;
+        bool hasVTab = false;   // the vertical part hangs into the margin on the parent's side
         auto addPiece = [&](double top, double bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow,
                             bool tab) {
             double vt = arrow ? 0 : ViewTop(), vb = arrow ? static_cast<double>(height) : ViewBottom();
@@ -2982,9 +2983,32 @@ private:
             bottom = std::min(bottom, static_cast<double>(height));
             if (bottom > top) {
                 const double barW = 7, r = 3;
-                const double rt = top < pTop - 0.5 ? kR : 0, rb = bottom > pBottom + 0.5 ? kR : 0;
-                if (parentOnLeft) pieces.push_back({0, top, barW, bottom - top, rt, r, r, rb});
-                else pieces.push_back({w - barW, top, barW, bottom - top, r, rt, rb, r});
+                const bool vExt = hasOwn && ownBottom > ownTop && (ownTop < pTop - 0.5 || ownBottom > pBottom + 0.5);
+                if (vExt) {
+                    // The vertical part: beside the parent's row it is the bar as before (its ends carry on into
+                    // the rest), and the rest, from there to my row, hangs out into the transparent margin on the
+                    // parent's side, a menu's edge away from where it ends, rounded at its free end.
+                    hasVTab = true;
+                    const double kT = kTabW - 1;   // two pixels: the outline adds the third
+                    const double rowTop = std::max(top, pTop), rowBottom = std::min(bottom, pBottom);
+                    if (rowBottom > rowTop) {
+                        if (parentOnLeft) pieces.push_back({0, rowTop, barW, rowBottom - rowTop, 0, r, r, 0});
+                        else pieces.push_back({w - barW, rowTop, barW, rowBottom - rowTop, r, 0, 0, r});
+                    }
+                    const double mx = parentOnLeft ? -kT : w - barW, mw = kT + barW;
+                    if (top < rowTop - 0.5) {   // the part above the parent's row; its top is the free end
+                        if (parentOnLeft) pieces.push_back({mx, top, mw, rowTop - top, kR, r, 0, 0});
+                        else pieces.push_back({mx, top, mw, rowTop - top, r, kR, 0, 0});
+                    }
+                    if (bottom > rowBottom + 0.5) {   // the part below it; its bottom is the free end
+                        if (parentOnLeft) pieces.push_back({mx, rowBottom, mw, bottom - rowBottom, 0, 0, r, kR});
+                        else pieces.push_back({mx, rowBottom, mw, bottom - rowBottom, 0, 0, kR, r});
+                    }
+                } else {
+                    const double rt = top < pTop - 0.5 ? kR : 0, rb = bottom > pBottom + 0.5 ? kR : 0;
+                    if (parentOnLeft) pieces.push_back({0, top, barW, bottom - top, rt, r, r, rb});
+                    else pieces.push_back({w - barW, top, barW, bottom - top, r, rt, rb, r});
+                }
                 // Round the inside corners where the bar meets my row.
                 if (hasOwn && ownBottom > ownTop) {
                     double ex = parentOnLeft ? barW : w - barW;
@@ -3018,6 +3042,7 @@ private:
         cairo_reset_clip(cr);
         RoundedRectPath(cr, 0, 0, w, height, 6.0);
         if (hasTab) cairo_rectangle(cr, bulgeRight ? w : -kTabW, 0, kTabW, height);
+        if (hasVTab) cairo_rectangle(cr, parentOnLeft ? -kTabW : w, 0, kTabW, height);
         cairo_clip(cr);
 
         // The one pixel dark outline: the union nudged a pixel each way, under the selector itself.
