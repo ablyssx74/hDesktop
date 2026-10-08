@@ -2923,6 +2923,7 @@ private:
         const bool bulgeRight = fParent ? parentOnLeft : (fChild ? fChild->popupX < 0 : true);
         bool hasTab = false;
         bool hasVTab = false;   // the vertical part hangs into the margin on the parent's side
+        double seamTop = 0, seamBottom = 0, seamX = 0;   // where it runs along my parent's row (no outline there)
         auto addPiece = [&](double top, double bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow,
                             bool tab) {
             double vt = arrow ? 0 : ViewTop(), vb = arrow ? static_cast<double>(height) : ViewBottom();
@@ -2991,11 +2992,15 @@ private:
                     hasVTab = true;
                     const double kT = kTabW - 1;   // two pixels: the outline adds the third
                     const double rowTop = std::max(top, pTop), rowBottom = std::min(bottom, pBottom);
-                    if (rowBottom > rowTop) {
-                        if (parentOnLeft) pieces.push_back({0, rowTop, barW, rowBottom - rowTop, 0, r, r, 0});
-                        else pieces.push_back({w - barW, rowTop, barW, rowBottom - rowTop, r, 0, 0, r});
-                    }
                     const double mx = parentOnLeft ? -kT : w - barW, mw = kT + barW;
+                    if (rowBottom > rowTop) {
+                        // Beside the parent's row the column is as wide as everywhere else, so the strip is one
+                        // shape; the outline it would leave across the end of that row is wiped further down.
+                        pieces.push_back({mx, rowTop, mw, rowBottom - rowTop, 0, 0, 0, 0});
+                        seamTop = rowTop;
+                        seamBottom = rowBottom;
+                        seamX = parentOnLeft ? -kT - 1 : w + kT;
+                    }
                     if (top < rowTop - 0.5) {   // the part above the parent's row; its top is the free end
                         if (parentOnLeft) pieces.push_back({mx, top, mw, rowTop - top, kR, r, 0, 0});
                         else pieces.push_back({mx, top, mw, rowTop - top, r, kR, 0, 0});
@@ -3056,6 +3061,12 @@ private:
                 cairo_paint(cr);
                 cairo_restore(cr);
             }
+        }
+        if (seamBottom > seamTop) {
+            // my parent's row runs on into this column: no line across it
+            cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
+            cairo_rectangle(cr, seamX, seamTop, 1, seamBottom - seamTop);
+            cairo_fill(cr);
         }
         cairo_save(cr);
         if (gSettings.snakeFlat) {
