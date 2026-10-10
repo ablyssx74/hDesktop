@@ -80,7 +80,7 @@
 #include <NavMenu.h>
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.57"
+#define APP_LOCAL_VERSION "v1.0.58"
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow;
@@ -816,6 +816,403 @@ struct Piece { float x, y, w, h, tl, tr, br, bl; };
 struct Fillet { float x, y; int dx, dy; };
 
 }  // namespace NavUI
+
+// The title popup is a row of pills (the same look as Tracker's selected labels). A BWindow is always a rectangle,
+// so the corners next to a pill's round ends would show as squares; instead the screen behind the popup is captured
+// just before it is shown and drawn as the window's background, which makes those corners look transparent.
+static const float kTitlePillGap = 3.0f;
+
+static BBitmap* CaptureScreenBehind(BRect screenRect) {
+    BScreen screen(B_MAIN_SCREEN_ID);
+    if (!screen.IsValid()) return nullptr;
+    BRect clipped = screenRect & screen.Frame();
+    if (!clipped.IsValid()) return nullptr;
+    BBitmap* bitmap = nullptr;
+    if (screen.GetBitmap(&bitmap, false, &clipped) != B_OK) return nullptr;
+    return bitmap;
+}
+
+static float TitleColorLuminance(rgb_color c) {
+    return (0.299f * c.red + 0.587f * c.green + 0.114f * c.blue);
+}
+
+// =========================================================================
+// Popup menus in the pill look of the title popup: each choice is a pill, in the Selector Color's light tint (the
+// hovered one in the Selector Color itself), over a capture of the screen behind it so the corners look transparent.
+// A stock BMenu is a plain rectangular window and can't have round ends, so the menus that should match use
+// PillPopupMenu: it is called like a BPopUpMenu (AddItem, AddSeparatorItem, SetTargetForItems, Go) and returns the
+// chosen BMenuItem. Submenus are not supported; menus that need them stay stock menus.
+// =========================================================================
+// One popup at a time. A pill popup captures the screen behind it when it opens, so another popup still visible then
+// would be frozen into its corners (and blend with it while they settle). So: opening a pill popup closes any other
+// pill popup and the dock's hover popups (title list, thumbnail, workspace preview) and waits until they are gone;
+// the dock opens no hover popup while a menu is open (MenuPopupOpen()); and the stock menus (the Tracker folder menu,
+// the CPU menu) close an open pill popup as they start (ClosePillPopup()).
+class ThumbnailPreviewWindow;
+class TitleListPreviewWindow;
+class WorkspacePreviewWindow;
+extern ThumbnailPreviewWindow* gActiveThumbnailPreview;
+extern TitleListPreviewWindow* gActiveTitleListPreview;
+extern WorkspacePreviewWindow* gActiveWorkspacePreview;
+
+static std::atomic<int> gPillPopupCount(0);
+static BLocker gPillRegistryLock("pill popup registry");
+static BMessenger gActivePillMessenger;
+
+static bool PillPopupOpen() { return gPillPopupCount.load() > 0; }
+
+// Asks the open pill popup (if any) to close; it closes on its own thread a moment later.
+static void ClosePillPopup() {
+    BAutolock lock(gPillRegistryLock);
+    if (gActivePillMessenger.IsValid()) gActivePillMessenger.SendMessage('ppcl');
+}
+
+struct PillRow {
+    BString label;
+    bool separator;
+    bool enabled;
+    bool marked;
+    PillRow() : separator(true), enabled(false), marked(false) {}
+    PillRow(const char* l, bool e, bool m) : label(l), separator(false), enabled(e), marked(m) {}
+};
+
+typedef std::function<void(int32)> PillDoneFn;   // chosen row, or -1 for none; called once, on the popup's thread
+
+class PillPopupView : public BView {
+    std::vector<PillRow> fRows;
+    std::vector<BRect> fRects;
+    int32 fHovered;
+    BBitmap* fBackdrop;
+    PillDoneFn fOnDone;
+public:
+    PillPopupView(BRect frame, const std::vector<PillRow>& rows, const std::vector<BRect>& rects, PillDoneFn onDone)
+        : BView(frame, "PillPopupView", B_FOLLOW_ALL, B_WILL_DRAW),
+          fRows(rows), fRects(rects), fHovered(-1), fBackdrop(nullptr), fOnDone(onDone) {
+        SetViewColor(B_TRANSPARENT_COLOR);
+    }
+    virtual ~PillPopupView() { delete fBackdrop; }
+
+    void SetBackdrop(BBitmap* bitmap) { delete fBackdrop; fBackdrop = bitmap; }
+
+    // Ends the popup (-1 = no choice): the first call wins, the window then closes itself.
+    void Finish(int32 row) {
+        if (!fOnDone) return;
+        PillDoneFn done = fOnDone;
+        fOnDone = nullptr;
+        done(row);
+        if (Window() != nullptr) Window()->PostMessage(B_QUIT_REQUESTED);
+    }
+
+    int32 RowAt(BPoint p) const {
+        for (size_t i = 0; i < fRects.size(); ++i)
+            if (!fRows[i].separator && fRects[i].Contains(p)) return static_cast<int32>(i);
+        return -1;
+    }
+
+    void UpdateHover(BPoint p) {
+        int32 row = RowAt(p);
+        if (row >= 0 && !fRows[row].enabled) row = -1;
+        if (row != fHovered) { fHovered = row; Invalidate(); }
+    }
+
+    virtual void Draw(BRect) {
+        BRect bounds = Bounds();
+        const NavUI::Palette pal = NavUI::CurrentPalette();
+        SetDrawingMode(B_OP_COPY);
+        if (fBackdrop != nullptr && fBackdrop->IsValid()) {
+            DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+        } else {
+            SetHighColor(pal.bg);
+            FillRect(bounds);
+        }
+
+        SetFont(be_plain_font);
+        SetFontSize(11.0f);
+        BFont font;
+        GetFont(&font);
+        font_height fh;
+        font.GetHeight(&fh);
+
+        const bool darkTheme = TitleColorLuminance(pal.bg) < 128.0f;
+        const rgb_color white = rgb_color{255, 255, 255, 255};
+        const rgb_color pillColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.62f : 0.42f);
+        const rgb_color hotColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.18f : 0.0f);
+        const rgb_color dark = rgb_color{20, 22, 28, 255};
+
+        for (size_t i = 0; i < fRows.size(); ++i) {
+            if (fRows[i].separator) continue;      // just a gap between the pills
+            BRect row = fRects[i];
+            const bool hot = (static_cast<int32>(i) == fHovered);
+            rgb_color fill = hot ? hotColor : pillColor;
+            if (!fRows[i].enabled) fill = NavUI::MixColor(fill, pal.bg, 0.55f);   // a muted pill: not available
+
+            SetDrawingMode(B_OP_ALPHA);
+            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            SetHighColor(fill);
+            FillRoundRect(row, row.Height() / 2.0f, row.Height() / 2.0f);
+            SetDrawingMode(B_OP_COPY);
+
+            rgb_color text = TitleColorLuminance(fill) > 140.0f ? dark : white;
+            if (!fRows[i].enabled) text = NavUI::MixColor(text, pillColor, 0.45f);
+            SetHighColor(text);
+
+            BString label = fRows[i].label;
+            font.TruncateString(&label, B_TRUNCATE_END, row.Width() - row.Height());
+            float textLeft = (row.Width() - font.StringWidth(label.String())) / 2.0f;
+            if (textLeft < 4.0f) textLeft = 4.0f;
+            DrawString(label.String(),
+                BPoint(textLeft, row.top + fh.ascent + ((row.Height() + 1.0f - (fh.ascent + fh.descent)) / 2.0f)));
+
+            if (fRows[i].marked) {                 // the current choice of a dropdown: a dot in the left end
+                float d = 5.0f;
+                float cx = row.left + row.Height() / 2.0f;
+                float cy = row.top + row.Height() / 2.0f;
+                FillEllipse(BRect(cx - d / 2.0f, cy - d / 2.0f, cx + d / 2.0f, cy + d / 2.0f));
+            }
+        }
+    }
+
+    virtual void MouseMoved(BPoint where, uint32, const BMessage*) { UpdateHover(where); }
+
+    virtual void MouseDown(BPoint where) {
+        int32 row = RowAt(where);
+        if (row >= 0 && fRows[row].enabled) Finish(row);
+    }
+};
+
+class PillPopupWindow : public BWindow {
+    PillPopupView* fView;
+    BMessageRunner* fTicker;
+    bigtime_t fOpenedAt;
+public:
+    PillPopupWindow(BPoint where, const std::vector<PillRow>& rows, float minWidth, PillDoneFn onDone, bool upward = false)
+        : BWindow(BRect(0, 0, 10, 10), "Popup", B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
+          fView(nullptr), fTicker(nullptr), fOpenedAt(system_time()) {
+        // From now the dock opens no hover popups; close another pill popup, and wait (briefly) until the others are
+        // gone, so the screen captured below holds none of them.
+        gPillPopupCount++;
+        ClosePillPopup();
+        bool waited = false;
+        for (int i = 0; i < 40; ++i) {
+            bool others = gPillPopupCount.load() > 1 || gActiveTitleListPreview != nullptr
+                || gActiveThumbnailPreview != nullptr || gActiveWorkspacePreview != nullptr;
+            if (!others) break;
+            waited = true;
+            snooze(5000);
+        }
+        if (waited) snooze(30000);       // and the screen needs a moment to repaint without them
+
+        BFont font(be_plain_font);
+        font.SetSize(11.0f);
+        font_height fh;
+        font.GetHeight(&fh);
+        float rowHeight = fh.ascent + fh.descent + fh.leading + 8.0f;
+
+        float widest = 0.0f;
+        for (size_t i = 0; i < rows.size(); ++i)
+            if (!rows[i].separator) widest = std::max(widest, font.StringWidth(rows[i].label.String()));
+        float w = std::max(std::max(100.0f, minWidth), widest + rowHeight + 4.0f);
+
+        std::vector<BRect> rects;
+        float y = 0.0f;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            if (rows[i].separator) {
+                rects.push_back(BRect(0, y, w, y + 2.0f));
+                y += 2.0f + kTitlePillGap;
+            } else {
+                rects.push_back(BRect(0, y, w, y + rowHeight - 1.0f));
+                y += rowHeight + kTitlePillGap;
+            }
+        }
+        float h = std::max(rowHeight, y - kTitlePillGap);
+
+        // where is the top left corner, kept on the screen
+        BScreen screen(B_MAIN_SCREEN_ID);
+        BRect sf = screen.Frame();
+        float x = std::min(where.x, sf.right - w - 4.0f);
+        float top = std::min(upward ? where.y - h : where.y, sf.bottom - h - 4.0f);   // upward: where.y is the bottom edge
+        MoveTo(std::max(x, sf.left + 4.0f), std::max(top, sf.top + 4.0f));
+        ResizeTo(w, h);
+
+        fView = new PillPopupView(Bounds(), rows, rects, onDone);
+        AddChild(fView);
+        fView->SetBackdrop(CaptureScreenBehind(Frame()));   // the screen behind, taken now: not shown yet
+        {
+            BAutolock lock(gPillRegistryLock);
+            gActivePillMessenger = BMessenger(this);
+        }
+
+        BMessage tick('pptk');
+        fTicker = new BMessageRunner(BMessenger(this), &tick, 30000);
+    }
+
+    virtual ~PillPopupWindow() {
+        delete fTicker;
+        {
+            BAutolock lock(gPillRegistryLock);
+            if (gActivePillMessenger == BMessenger(this)) gActivePillMessenger = BMessenger();
+        }
+        gPillPopupCount--;
+    }
+
+    virtual bool QuitRequested() {
+        if (fView != nullptr) fView->Finish(-1);   // closed any other way: no choice
+        return true;
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        if (message->what == 'ppcl') {          // another popup is opening: this one closes
+            if (fView != nullptr) fView->Finish(-1);
+            return;
+        }
+        if (message->what != 'pptk') { BWindow::MessageReceived(message); return; }
+        if (IsHidden() || fView == nullptr) return;
+        BPoint p;
+        uint32 buttons = 0;
+        fView->GetMouse(&p, &buttons, false);
+        fView->UpdateHover(p);
+        // a press outside closes the popup (not in the first moments: the click that opened it may still be down)
+        if (buttons != 0 && !fView->Bounds().Contains(p) && system_time() - fOpenedAt > 300000)
+            fView->Finish(-1);
+    }
+};
+
+// Shows the popup and returns at once; onDone gets the chosen row (-1: none) on the popup's own thread.
+static void PillPopupShow(BPoint where, const std::vector<PillRow>& rows, float minWidth, PillDoneFn onDone, bool upward = false) {
+    PillPopupWindow* window = new PillPopupWindow(where, rows, minWidth, onDone, upward);
+    window->Show();
+}
+
+// Shows the popup and waits for the choice, like BPopUpMenu::Go(). Returns the chosen row or -1.
+static int32 PillPopupGo(BPoint where, const std::vector<PillRow>& rows, float minWidth = 0.0f, bool upward = false) {
+    if (rows.empty()) return -1;
+    sem_id done = create_sem(0, "pill popup done");
+    if (done < 0) return -1;
+    int32 result = -1;
+    PillPopupShow(where, rows, minWidth, [&result, done](int32 row) {
+        result = row;
+        release_sem(done);
+    }, upward);
+    acquire_sem(done);       // released by the popup when a choice was made or it was dismissed
+    delete_sem(done);
+    return result;
+}
+
+class PillPopupMenu {
+    struct Entry { BMenuItem* item; };      // item == nullptr: a separator
+    std::vector<Entry> fEntries;
+    BHandler* fTarget;
+    bool fUpward;
+public:
+    PillPopupMenu(const char* = nullptr, bool = false, bool = false) : fTarget(nullptr), fUpward(false) {}
+    ~PillPopupMenu() {
+        for (size_t i = 0; i < fEntries.size(); ++i) delete fEntries[i].item;
+    }
+    void SetRadioMode(bool) {}
+    bool AddItem(BMenuItem* item) { fEntries.push_back(Entry{item}); return true; }
+    bool AddSeparatorItem() { fEntries.push_back(Entry{nullptr}); return true; }
+    status_t SetTargetForItems(BHandler* target) { fTarget = target; return B_OK; }
+    // The menu opens upward: the point given to Go() is then its bottom edge instead of its top left.
+    void SetOpensUpward(bool up) { fUpward = up; }
+
+    std::vector<PillRow> Rows() const {
+        std::vector<PillRow> rows;
+        for (size_t i = 0; i < fEntries.size(); ++i) {
+            BMenuItem* item = fEntries[i].item;
+            rows.push_back(item == nullptr ? PillRow() : PillRow(item->Label(), item->IsEnabled(), item->IsMarked()));
+        }
+        return rows;
+    }
+
+    // Like BPopUpMenu::Go(): synchronous returns the chosen item (or nullptr). With async the popup is shown and
+    // Go() returns nullptr at once; the chosen item's message (when deliverMessage) goes to the target and the menu
+    // deletes itself afterwards, as a BPopUpMenu does.
+    BMenuItem* Go(BPoint where, bool deliverMessage = false, bool = false, bool async = false) {
+        std::vector<PillRow> rows = Rows();
+        if (!async) {
+            int32 row = PillPopupGo(where, rows, 0.0f, fUpward);
+            BMenuItem* item = (row >= 0 && row < (int32)fEntries.size()) ? fEntries[row].item : nullptr;
+            if (item != nullptr && deliverMessage && item->Message() != nullptr && fTarget != nullptr) {
+                BMessage copy(*item->Message());
+                BMessenger(fTarget).SendMessage(&copy);
+            }
+            return item;
+        }
+        PillPopupShow(where, rows, 0.0f, [this, deliverMessage](int32 row) {
+            BMenuItem* item = (row >= 0 && row < (int32)fEntries.size()) ? fEntries[row].item : nullptr;
+            if (item != nullptr && deliverMessage && item->Message() != nullptr && fTarget != nullptr) {
+                BMessage copy(*item->Message());
+                BMessenger(fTarget).SendMessage(&copy);
+            }
+            delete this;
+        }, fUpward);
+        return nullptr;
+    }
+};
+
+// A dropdown (BMenuField) whose list should be pills: a transparent view laid over the field takes the click, shows the
+// pill list under the field, and hands the choice to the field's own menu item, so whatever handles that item (its
+// message, the marks, the label) works as before. Add it right after the field, so it is on top.
+class PillMenuFieldOverlay : public BView {
+    BMenuField* fField;
+public:
+    PillMenuFieldOverlay(BMenuField* field)
+        : BView(field->Frame(), "pill_menu_overlay", B_FOLLOW_NONE, 0), fField(field) {
+        SetViewColor(B_TRANSPARENT_COLOR);
+    }
+
+    virtual void MouseDown(BPoint) {
+        BMenu* menu = fField->Menu();
+        if (menu == nullptr) return;
+        std::vector<PillRow> rows;
+        for (int32 i = 0; i < menu->CountItems(); ++i) {
+            BMenuItem* item = menu->ItemAt(i);
+            rows.push_back(dynamic_cast<BSeparatorItem*>(item) != nullptr ? PillRow()
+                : PillRow(item->Label(), item->IsEnabled(), item->IsMarked()));
+        }
+        BPoint below = ConvertToScreen(BPoint(0.0f, Bounds().Height() + 2.0f));
+        BMessenger self(this);
+        PillPopupShow(below, rows, Bounds().Width(), [self](int32 row) mutable {
+            if (row < 0) return;
+            BMessage choice('pmfc');
+            choice.AddInt32("row", row);
+            self.SendMessage(&choice);
+        });
+    }
+
+    virtual void MessageReceived(BMessage* message) {
+        if (message->what != 'pmfc') { BView::MessageReceived(message); return; }
+        int32 row = -1;
+        BMenu* menu = fField->Menu();
+        if (menu == nullptr || message->FindInt32("row", &row) != B_OK) return;
+        BMenuItem* item = menu->ItemAt(row);
+        if (item == nullptr || !item->IsEnabled()) return;
+        if (menu->IsRadioMode()) item->SetMarked(true);   // as the menu itself would
+        if (item->Message() != nullptr) {                 // what BMenuItem::Invoke() sends
+            BMessage copy(*item->Message());
+            BHandler* target = item->Target();
+            BMessenger(target != nullptr ? target : static_cast<BHandler*>(Window())).SendMessage(&copy);
+        }
+    }
+};
+
+// Where a dock icon's popup menu goes: clear of the icon at its full hover size (it is still growing when the menu
+// opens, and the menu's corners show the screen behind it as captured at that moment). A bottom dock opens the menu
+// upward from above the icon, a top dock downward from below it. iconCenterY is the icon's centre line, which icons
+// grow around.
+static void PillDockAnchor(PillPopupMenu* menu, float iconCenterY, BPoint* where) {
+    const float clearance = fBaseIconSize * fIconZoom / 2.0f + 8.0f;
+    if (gDockLocation == kDockLocationTop) {
+        where->y = iconCenterY + clearance;
+        menu->SetOpensUpward(false);
+    } else {
+        where->y = iconCenterY - clearance;
+        menu->SetOpensUpward(true);
+    }
+}
+
+
 
 struct NavItem {
     BString label;
@@ -2920,6 +3317,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
+        AddChild(new PillMenuFieldOverlay(fDockLocationMenuField));
 
         // Open App Effects Dropdown Menu
         BPopUpMenu* effectsPopup = new BPopUpMenu("Open Effects");
@@ -2954,6 +3352,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
+        AddChild(new PillMenuFieldOverlay(fEffectsMenuField));
 
         // Close App Effects Dropdown Menu
         BPopUpMenu* closeEffectsPopup = new BPopUpMenu("Close Effects");
@@ -2989,6 +3388,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
         fCloseEffectsMenuField->Show();
+        AddChild(new PillMenuFieldOverlay(fCloseEffectsMenuField));
 
 		// Effect Speed Slider Row
         BRect speedSliderRect(35.0f, 347.0f, frame.Width() - 35.0f, 397.0f);
@@ -4352,7 +4752,7 @@ public:
                     std::string pathKey(itemPath.Path());
 
                     if (buttons & B_SECONDARY_MOUSE_BUTTON) {
-                        BPopUpMenu* contextMenu = new BPopUpMenu("Context", false, false);
+                        PillPopupMenu* contextMenu = new PillPopupMenu("Context", false, false);
                         BMessage* toggleMsg = new BMessage('tfav');
                         toggleMsg->AddString("path", pathKey.c_str());
                         contextMenu->AddItem(new BMenuItem("Remove Favorite", toggleMsg));
@@ -4387,7 +4787,7 @@ public:
                 std::string pathKey(itemPath.Path());
 
                 if (buttons & B_SECONDARY_MOUSE_BUTTON) {
-                    BPopUpMenu* contextMenu = new BPopUpMenu("Context", false, false);
+                    PillPopupMenu* contextMenu = new PillPopupMenu("Context", false, false);
                     BMessage* toggleMsg = new BMessage('tfav');
                     toggleMsg->AddString("path", pathKey.c_str());
                     contextMenu->AddItem(new BMenuItem("Add Favorite", toggleMsg));
@@ -5280,12 +5680,25 @@ private:
     team_id fTeam;
     int32 fHoveredRow;
     float fRowHeight;
+    BBitmap* fBackdrop; // the screen behind the popup, see CaptureScreenBehind()
 
 public:
     TitleListPreviewView(BRect frame, team_id team, const std::vector<TrackedWindowInfo>& entries, float rowHeight)
         : BView(frame, "TitleListPreviewView", B_FOLLOW_ALL, B_WILL_DRAW),
-          fEntries(entries), fTeam(team), fHoveredRow(-1), fRowHeight(rowHeight) {
-        SetViewColor(NavUI::CurrentPalette().bg);
+          fEntries(entries), fTeam(team), fHoveredRow(-1), fRowHeight(rowHeight), fBackdrop(nullptr) {
+        // Draw() paints every pixel itself (backdrop, then the pills), so there is nothing to erase first.
+        SetViewColor(B_TRANSPARENT_COLOR);
+    }
+
+    virtual ~TitleListPreviewView() {
+        delete fBackdrop;
+    }
+
+    // Takes ownership. Window must be locked (or not yet shown).
+    void SetBackdrop(BBitmap* bitmap) {
+        delete fBackdrop;
+        fBackdrop = bitmap;
+        Invalidate();
     }
 
     team_id Team() const { return fTeam; }
@@ -5302,26 +5715,17 @@ public:
 
     virtual void Draw(BRect updateRect) {
         BRect bounds = Bounds();
-
-        // Same 6px corner radius WorkspacePreviewView's own cells use, for a
-        // consistent look across the dock's popups -- but a round-rect
-        // background alone isn't enough: a full-width row highlight below
-        // is a plain FillRect, and painting that straight over the rounded
-        // background draws square corners right back on top of it. That's
-        // the clipped-square artifact. Recording the round rect into a
-        // BPicture and clipping to it means nothing drawn afterward -- the
-        // background fill, every row highlight, the text -- can paint
-        // outside the rounded outline at all, however many rows there are.
-        BPicture clipShape;
-        BeginPicture(&clipShape);
-        FillRoundRect(bounds, 6.0f, 6.0f);
-        EndPicture();
-        ClipToPicture(&clipShape);
-
-        // Colours follow Haiku's current colour scheme, like the custom Tracker menu.
         const NavUI::Palette pal = NavUI::CurrentPalette();
-        SetHighColor(pal.bg);
-        FillRoundRect(bounds, 6.0f, 6.0f);
+
+        // Background: the screen as it was behind the popup, so the corners beside the pills' round ends look
+        // transparent. Without a capture fall back to the menu colour (square corners, as before).
+        SetDrawingMode(B_OP_COPY);
+        if (fBackdrop != nullptr && fBackdrop->IsValid()) {
+            DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+        } else {
+            SetHighColor(pal.bg);
+            FillRect(bounds);
+        }
 
         SetFont(be_plain_font);
         SetFontSize(11.0f);
@@ -5330,39 +5734,38 @@ public:
         font_height fh;
         font.GetHeight(&fh);
 
+        // The colours of Tracker's selected labels: a very light tint of the Selector Color on a dark theme, a
+        // little deeper on a light one; the hovered row gets the Selector Color itself.
+        const bool darkTheme = TitleColorLuminance(pal.bg) < 128.0f;
+        const rgb_color white = rgb_color{255, 255, 255, 255};
+        const rgb_color pillColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.62f : 0.42f);
+        const rgb_color hotColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.18f : 0.0f);
+        const rgb_color dark = rgb_color{20, 22, 28, 255};
+
         for (size_t i = 0; i < fEntries.size(); ++i) {
-            BRect rowRect(0.0f, (float)i * fRowHeight, bounds.Width(), (float)(i + 1) * fRowHeight);
+            float top = (float)i * (fRowHeight + kTitlePillGap);
+            BRect rowRect(0.0f, top, bounds.Width(), top + fRowHeight - 1.0f);
             fEntries[i].hitBox = rowRect;
 
             bool hovered = (static_cast<int32>(i) == fHoveredRow);
-            if (hovered) {
-                SetHighColor(gNavAccent);   // the Selector Color, same as the Tracker menu's snake trail
-                FillRect(rowRect);
-            }
+            rgb_color fill = hovered ? hotColor : pillColor;
 
-            float accentLum = (0.2126f * gNavAccent.red + 0.7152f * gNavAccent.green + 0.0722f * gNavAccent.blue) / 255.0f;
-            rgb_color hoverText = accentLum > 0.62f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
-            SetHighColor(hovered ? hoverText : pal.text);
+            SetDrawingMode(B_OP_ALPHA);
+            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            SetHighColor(fill);
+            FillRoundRect(rowRect, rowRect.Height() / 2.0f, rowRect.Height() / 2.0f);
+            SetDrawingMode(B_OP_COPY);
+
+            SetHighColor(TitleColorLuminance(fill) > 140.0f ? dark : white);
             BString truncTitle = fEntries[i].title;
-            font.TruncateString(&truncTitle, B_TRUNCATE_END, bounds.Width() - 16.0f);
-            // Centered, not left-aligned at a fixed offset -- matches the
-            // window itself now auto-sizing to the text (see
-            // TitleListPreviewWindow::ResizeAndReposition()), so a short
-            // title sits centered in its own tightly-fit box instead of
-            // hugging the left edge of what's still a wide, fixed panel.
+            // keep the text clear of the round ends
+            font.TruncateString(&truncTitle, B_TRUNCATE_END, bounds.Width() - fRowHeight);
             float textWidth = font.StringWidth(truncTitle.String());
             float textLeft = (bounds.Width() - textWidth) / 2.0f;
             if (textLeft < 4.0f) textLeft = 4.0f;
             DrawString(truncTitle.String(),
-                BPoint(textLeft, rowRect.top + fh.ascent + ((fRowHeight - (fh.ascent + fh.descent)) / 2.0f)));
+                BPoint(textLeft, rowRect.top + fh.ascent + ((rowRect.Height() + 1.0f - (fh.ascent + fh.descent)) / 2.0f)));
         }
-
-        // Drop the picture clip before the border stroke -- StrokeRoundRect
-        // draws straddling the outline itself, and the fill's clip would
-        // otherwise cut off its outer half.
-        ConstrainClippingRegion(NULL);
-        SetHighColor(pal.border);
-        StrokeRoundRect(bounds, 6.0f, 6.0f);
     }
 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) {
@@ -5432,6 +5835,8 @@ private:
     float fStackOffset;
     float fRequestedStackOffset = 0.0f; // render thread's own copy, to skip redundant posts
     std::vector<TrackedWindowInfo> fLastEntries;
+    BRect fBackdropFrame; // where the view's backdrop was captured
+    bool fBackdropTried = false;
     // Width auto-sizes to the widest title (see ResizeAndReposition()),
     // clamped to this range -- small for a short one-word title, but capped
     // well before it could grow into an unwieldy banner for a long path or
@@ -5456,12 +5861,13 @@ public:
         font.SetSize(11.0f);
         font_height fh;
         font.GetHeight(&fh);
-        fRowHeight = fh.ascent + fh.descent + fh.leading + 10.0f;
+        fRowHeight = fh.ascent + fh.descent + fh.leading + 8.0f;
 
         ResizeAndReposition(entries);
 
         fView = new TitleListPreviewView(Bounds(), team, entries, fRowHeight);
         AddChild(fView);
+        UpdateBackdrop();
 
         // Self-closing poll, same 100ms cadence and relevance check as
         // WorkspacePreviewWindow's own 'tick' -- no reason for this one to
@@ -5502,7 +5908,7 @@ public:
     void ResizeAndReposition(const std::vector<TrackedWindowInfo>& entries) {
         fLastEntries = entries;
         size_t rowCount = entries.empty() ? 1 : entries.size();
-        float panelH = fRowHeight * (float)rowCount + 2.0f; // +2 for the 1px stroke on each edge
+        float panelH = fRowHeight * (float)rowCount + kTitlePillGap * (float)(rowCount - 1); // one pill per row
 
         BFont font(be_plain_font);
         font.SetSize(11.0f);
@@ -5511,7 +5917,7 @@ public:
             float w = font.StringWidth(entries[i].title.String());
             if (w > widestTitle) widestTitle = w;
         }
-        float panelW = widestTitle + 16.0f; // matches Draw()'s own left+right margin budget
+        float panelW = widestTitle + fRowHeight + 4.0f; // room for the pills' round ends, as Draw() truncates
         if (panelW < kMinPanelWidth) panelW = kMinPanelWidth;
         if (panelW > kMaxPanelWidth) panelW = kMaxPanelWidth;
 
@@ -5523,17 +5929,41 @@ public:
         if (targetX + panelW > screenFrame.right - 10.0f) targetX = screenFrame.right - 10.0f - panelW;
 
         // Bottom dock: open upward above the icon. Top dock: open downward below it.
+        // Clear of the icon at its full hover size: it may still be growing now, and this popup's corners show the
+        // screen as captured at this moment.
+        float iconCenter = (fAnchorIconRect.top + fAnchorIconRect.bottom) / 2.0f;
+        float peakHalf = fBaseIconSize * fIconZoom / 2.0f;
         float targetY;
         if (gDockLocation == kDockLocationTop) {
-            targetY = fAnchorIconRect.bottom + 12.0f + fStackOffset;
+            targetY = std::max(fAnchorIconRect.bottom, iconCenter + peakHalf) + 12.0f + fStackOffset;
         } else {
-            targetY = fAnchorIconRect.top - panelH - 12.0f - fStackOffset;
+            targetY = std::min(fAnchorIconRect.top, iconCenter - peakHalf) - panelH - 12.0f - fStackOffset;
         }
         if (targetY < 10.0f) targetY = 10.0f;
         if (targetY + panelH > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelH;
 
         MoveTo(targetX, targetY);
         ResizeTo(panelW, panelH);
+        UpdateBackdrop();
+    }
+
+    // Captures the screen behind the popup for the view's background (see CaptureScreenBehind()). Only when the
+    // popup's frame changed; an already shown popup is hidden for the capture, which is rare (a window opened or
+    // closed, or the thumbnail popup appeared) and short.
+    void UpdateBackdrop() {
+        if (fView == nullptr) return;
+        BRect frame = Frame();
+        if (fBackdropTried && frame == fBackdropFrame) return; // already captured (or tried) for this frame
+        bool wasShown = !IsHidden();
+        if (wasShown) {
+            Hide();
+            snooze(40000); // let the screen repaint what was under the popup
+        }
+        BBitmap* bitmap = CaptureScreenBehind(frame);
+        if (wasShown) Show();
+        fBackdropTried = true;
+        fBackdropFrame = frame;
+        fView->SetBackdrop(bitmap);
     }
 
     // Called from RenderFrame()'s thread every hover pass with where the
@@ -7232,6 +7662,7 @@ void SyncDockWithRunningDeskbarApps() {
                             }
 
                             fTrackerMenuIsActive = true;
+                            ClosePillPopup();   // one popup at a time
                             int winX = 0, winY = 0;
                             //int32 winX = 0, winY = 0;
                             SDL_Window* activeWin = SDL_GetMouseFocus();
@@ -7271,7 +7702,7 @@ void SyncDockWithRunningDeskbarApps() {
                                     // Synchronous query happens entirely inside this worker thread context!
                                     if (deskbarMessenger.SendMessage(&menuRequest, &menuReply) == B_OK) {
 
-                                        BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
+                                        PillPopupMenu* localMenu = new PillPopupMenu("SystrayContext", false, false);
                                         localMenu->SetRadioMode(false);
 
                                         BMessage archivedItem;
@@ -7339,6 +7770,7 @@ void SyncDockWithRunningDeskbarApps() {
 										float anchoredMenuX = static_cast<float>(threadArgs->winX) + threadArgs->popupCenterX;
 										float anchoredMenuY = threadArgs->popupCenterY;
 										BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+										PillDockAnchor(localMenu, anchoredMenuY, &screenClickPoint);
 
 										BMenuItem* chosenItem = localMenu->Go(screenClickPoint, false, false);
 
@@ -7875,7 +8307,7 @@ void SyncDockWithRunningDeskbarApps() {
 		            // LEAF ICON RIGHT-CLICK: ASYNCHRONOUS NON-BLOCKING POPUP ENGINE
 		            // =========================================================================
 		                if (button == SDL_BUTTON_RIGHT) {
-		                    if (fLeafMenuIsActive) return;
+		                    if (fLeafMenuIsActive || fTrackerMenuIsActive || fCpuMenuIsActive) return;
 		                    fLeafMenuIsActive = true;
 
 		                    // FIX 1: Declared exactly ONCE so initialization properties are preserved
@@ -7915,8 +8347,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                            return B_ERROR;
 		                        }
 
-		                        BPopUpMenu* leafMenu = new BPopUpMenu("LeafPopup", false, false);
-		                        leafMenu->SetRadioMode(false);
+		                        PillPopupMenu* leafMenu = new PillPopupMenu("LeafPopup", false, false);
 		                        leafMenu->AddItem(new BMenuItem("Preferences…", new BMessage('lCFG')));
 
 		                        float anchoredMenuX = static_cast<float>(threadArgs->winX + threadArgs->mouseX) - 15.0f;
@@ -7928,6 +8359,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                        float anchoredMenuY = threadArgs->popupCenterY;
 
 		                        BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+		                        PillDockAnchor(leafMenu, anchoredMenuY, &screenClickPoint);
 
 		                        BMenuItem* chosenAction = leafMenu->Go(screenClickPoint, false, false);
 
@@ -8156,6 +8588,7 @@ void SyncDockWithRunningDeskbarApps() {
 				        }
 
 				        fTrackerMenuIsActive = true; // Engage active state safety latch
+				        ClosePillPopup();   // one popup at a time: an open pill popup closes before this menu shows
 
 				        TrackerMenuArgs* args = new TrackerMenuArgs();
 				        args->engine = this; // Pass engine instance pointer safely
@@ -8479,7 +8912,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                // Establish a native messenger channel directly to Tracker
 	                BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 
-	                BPopUpMenu* trashMenu = new BPopUpMenu("TrashPopup", false, false);
+	                PillPopupMenu* trashMenu = new PillPopupMenu("TrashPopup", false, false);
 	                trashMenu->SetRadioMode(false);
 
 	                // Streamlined to match the exact 2 clean operational choices
@@ -8496,6 +8929,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                // Open the popup centered right over the trash icon itself.
 	                float anchoredMenuY = threadArgs->popupCenterY;
 	                BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+	                PillDockAnchor(trashMenu, anchoredMenuY, &screenClickPoint);
 
 	                // Open synchronously inside our background thread
 	                BMenuItem* chosenAction = trashMenu->Go(screenClickPoint, false, false);
@@ -8590,7 +9024,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                        // CASE 1: RIGHT-CLICK -> PARSE AND PRESENT REAL CONTEXT DROPDOWNS (STABLE)
 	                        // =========================================================================
 	                        if (button == SDL_BUTTON_RIGHT) {
-	                            BPopUpMenu* localMenu = new BPopUpMenu("SystrayContext", false, false);
+	                            PillPopupMenu* localMenu = new PillPopupMenu("SystrayContext", false, false);
 	                            bool foundItems = false;
 
 	                            BMessage menuRequest(B_GET_PROPERTY);
@@ -8672,6 +9106,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                            float anchoredMenuX = static_cast<float>(nativeWinX) + localTrayTrackerX + (iconHitboxSize / 2.0f);
 	                            float anchoredMenuY = trayItemCenterY;
 	                            BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
+	                            PillDockAnchor(localMenu, anchoredMenuY, &screenClickPoint);
 
 	                            // STABILITY FIX 2: Added explicit parameters down to Go()
 	                            // false = Don't auto-send messages immediately (let our loop process it)
@@ -8791,6 +9226,7 @@ void SyncDockWithRunningDeskbarApps() {
 
 	            if (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
 	                fCpuMenuIsActive = true;
+	                ClosePillPopup();   // one popup at a time
 
 	                CpuMenuArgs* args = new CpuMenuArgs();
 	                args->engine = this;
@@ -8873,7 +9309,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                    if (gActiveWorkspacePreview->Lock()) {
 	                        gActiveWorkspacePreview->Quit();
 	                    }
-	                } else {
+	                } else if (!MenuPopupOpen()) {
 	                    BPoint anchorPoint((workspaceBounds.left + workspaceBounds.right) / 2.0f,
 	                                        (workspaceBounds.top + workspaceBounds.bottom) / 2.0f);
 	                    gActiveWorkspacePreview = new WorkspacePreviewWindow(anchorPoint);
@@ -9025,6 +9461,22 @@ void SyncDockWithRunningDeskbarApps() {
 
 	    UpdateLiveClockTexture();
 	    UpdateGlobalCpuLoadTracker();
+
+	    // A menu is open: no hover popup may stay (or appear) next to it.
+	    if (MenuPopupOpen()) {
+	        if (gActiveTitleListPreview != nullptr) {
+	            if (gActiveTitleListPreview->Lock()) gActiveTitleListPreview->Quit();
+	            gActiveTitleListPreview = nullptr;
+	        }
+	        if (gActiveThumbnailPreview != nullptr) {
+	            if (gActiveThumbnailPreview->Lock()) gActiveThumbnailPreview->Quit();
+	            gActiveThumbnailPreview = nullptr;
+	        }
+	        if (gActiveWorkspacePreview != nullptr) {
+	            if (gActiveWorkspacePreview->Lock()) gActiveWorkspacePreview->Quit();
+	            gActiveWorkspacePreview = nullptr;
+	        }
+	    }
 		static bigtime_t mouseLeftTime = 0;
 		bool mouseIsOverAnyIcon = false;
 
@@ -10236,7 +10688,7 @@ void SyncDockWithRunningDeskbarApps() {
 		  // Suppressed while the Tracker right-click popup is open, so navigating its
 		  // folder submenus near the icon doesn't also trigger the hover title overlay's
 		  // restore-minimized-window behavior.
-		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL || fShowWindowThumbnails) && !fTrackerMenuIsActive) {
+		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL || fShowWindowThumbnails) && !MenuPopupOpen()) {
 			bool cursorNearIcon = (gDockLocation == kDockLocationTop)
 			    ? (fMouseY >= iconBounds.top && fMouseY <= (iconBounds.bottom + 40.0f))
 			    : (fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom);
@@ -10859,8 +11311,8 @@ void SyncDockWithRunningDeskbarApps() {
                     fCpuTooltipTex = RenderTextToTexture(fLastCpuTooltipStr.c_str(), &fCpuTooltipW, &fCpuTooltipH);
                 }
 
-                float tooltipW = static_cast<float>(fCpuTooltipW) + 12.0f;
                 float tooltipH = static_cast<float>(fCpuTooltipH) + 8.0f;
+                float tooltipW = static_cast<float>(fCpuTooltipW) + tooltipH; // pill: room for the round ends
                 float tooltipLeft = cpuGraphBounds.left + (cpuGraphBounds.Width() / 2.0f) - (tooltipW / 2.0f);
 
                 // Bottom-anchored dock: pop the tooltip up above the graph. Top-anchored
@@ -10874,13 +11326,9 @@ void SyncDockWithRunningDeskbarApps() {
                     float tooltipBottom = cpuGraphBounds.top - 1.0f;
                     tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
                 }
-                DrawFilledRect(tooltipBounds, 0.15f, 0.15f, 0.15f, 0.75f);
-
-                glColor4f(0.10f, 0.10f, 0.10f, 0.5f);
-                glBegin(GL_LINE_LOOP);
-                    glVertex2f(tooltipBounds.left,  tooltipBounds.top);   glVertex2f(tooltipBounds.right, tooltipBounds.top);
-                    glVertex2f(tooltipBounds.right, tooltipBounds.bottom); glVertex2f(tooltipBounds.left,  tooltipBounds.bottom);
-                glEnd();
+                // a pill in the same colours as before (the title popup's shape)
+                DrawGLRoundedRect(tooltipBounds, tooltipH / 2.0f, 0.15f, 0.15f, 0.15f, 0.75f, true);
+                DrawGLRoundedRect(tooltipBounds, tooltipH / 2.0f, 0.10f, 0.10f, 0.10f, 0.5f, false);
 
                 if (fCpuTooltipTex.id != 0) {
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
@@ -10888,7 +11336,7 @@ void SyncDockWithRunningDeskbarApps() {
                     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
                     glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PRIMARY_COLOR);
                     glColor4f(0.2f, 1.0f, 0.2f, 1.0f);
-                    float textX = tooltipBounds.left + 6.0f; float textY = tooltipBounds.top + 4.0f;
+                    float textX = tooltipBounds.left + (tooltipW - static_cast<float>(fCpuTooltipW)) / 2.0f; float textY = tooltipBounds.top + 4.0f;
 
                     glBegin(GL_QUADS);
                         glTexCoord2f(0.0f, 0.0f); glVertex2f(textX, textY);
@@ -11347,9 +11795,10 @@ private:
 	    localFont.GetHeight(&fontMetrics);
 	    float fontTotalHeight = fontMetrics.ascent + fontMetrics.descent + fontMetrics.leading;
 
-	    // Expand the allocation dimensions to perfectly containerize our rounded capsule edges
-	    int bitmapW = (int)(stringPixelWidth + 16.0f);
+	    // Expand the allocation dimensions to perfectly containerize our rounded capsule edges. The capsule is a pill:
+	    // fully rounded ends (radius = half the height), with that much room at each end for the text.
 	    int bitmapH = (int)(fontTotalHeight + 10.0f);
+	    int bitmapW = (int)(stringPixelWidth + (float)bitmapH);
 
 	    if (bitmapW % 2 != 0) bitmapW++;
 
@@ -11375,14 +11824,14 @@ private:
 
 	        // 2. Draw a native, perfect anti-aliased dark background capsule with rounded corners
 	        drawTarget->SetHighColor(15, 15, 15, 190); // 190 alpha sleek translucent dark bubble
-	        drawTarget->FillRoundRect(drawTarget->Bounds(), 5.0f, 5.0f); // 5.0f smooth corner radii
+	        drawTarget->FillRoundRect(drawTarget->Bounds(), bitmapH / 2.0f, bitmapH / 2.0f); // pill: radius = half the height
 
 	        // 3. Render the solid white bold system text safely on top of the capsule
 	        drawTarget->SetHighColor(255, 255, 255, 255);
 	        drawTarget->SetFont(&localFont);
 
 	        // Center the bold layout string context vertically and horizontally inside our bounding container
-	        float textX = 8.0f;
+	        float textX = bitmapH / 2.0f;
 	        float textY = fontMetrics.ascent + 5.0f;
 	        drawTarget->DrawString(labelText, BPoint(textX, textY));
 
@@ -11620,6 +12069,8 @@ public:
     bool fCpuMenuIsActive;
     bool fCursorIsInsideHitbox = false;
     bool fLeafMenuIsActive = false;
+    // Any menu open (stock or pill): the dock then opens no hover popup, and closes the ones that are open.
+    bool MenuPopupOpen() const { return fTrackerMenuIsActive || fLeafMenuIsActive || fCpuMenuIsActive || PillPopupOpen(); }
 	uint32 fLastLeafMenuCloseTime = 0;
 };
 
