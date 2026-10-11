@@ -737,19 +737,24 @@ public:
 // light top edge / dark bottom edge fall out of comparing that map with copies
 // of itself shifted a pixel down and up. That keeps the shape identical no
 // matter what the native drawing API can do, and anti-aliased.
+// The Tracker menu in the pill look (see NavMenuWindow); false gives the old rectangular menu with its beveled selector.
+static const bool kNavPillLook = true;
+
 namespace NavUI {
 
-const float kRowH = 22.0f;
+const float kRowH = 24.0f;      // a row's pill is kRowH - 2 high, with 2 pixels between pills
 const float kSepH = 9.0f;
-const float kPadX = 8.0f;
+const float kPadX = kNavPillLook ? 12.0f : 8.0f;
 const float kPadY = 4.0f;
-const float kLeftColumn = 30.0f;
+const float kLeftColumn = kNavPillLook ? 34.0f : 30.0f;
 const float kArrowH = 16.0f;
 const float kScreenMargin = 24.0f;
 const float kFontSize = 12.0f;
-const float kBarW = 7.0f;       // the elbow bar down a submenu's edge
-const float kSelR = 4.0f;       // corner radius of a lone selector row
-const float kFilletR = 3.0f;
+const float kBarW = kNavPillLook ? (kRowH - 2.0f) / 2.0f : 7.0f;   // the elbow bar down a submenu's edge (pill look: as wide as the pill's radius)
+const float kSelR = 4.0f;       // corner radius of a lone selector row (the old look)
+const float kPillR = (kRowH - 2.0f) / 2.0f;   // the pill look: round ends
+const float kOverlap = kNavPillLook ? 22.0f : 0.0f;   // a level opens this far over its parent, covering the parent's arrows (chevron at the right)
+const float kFilletR = kNavPillLook ? (kRowH - 2.0f) / 2.0f : 3.0f;   // the pill look: the trail's bends have the pill's radius
 const bigtime_t kSubmenuDelay = 180000;
 
 // The accent colour (Linux: Settings > Selector Color) and the shades worked out from it.
@@ -810,6 +815,92 @@ inline float FilletCoverage(float px, float py, float cx, float cy, int dx, int 
     float dSquare = std::min(std::max(qx, qy), 0.0f) + outside;
     float dCircle = r - std::sqrt((px - centreX) * (px - centreX) + (py - centreY) * (py - centreY));
     return Clamp01(0.5f - std::max(dSquare, dCircle));
+}
+
+// The pill look (shared with the title popup and the dock's menus): each row a pill in the Selector Color's light tint,
+// the lit ones and the trail in the Selector Color itself.
+inline float Luminance(rgb_color c) { return 0.299f * c.red + 0.587f * c.green + 0.114f * c.blue; }
+inline bool DarkTheme() { return Luminance(ui_color(B_MENU_BACKGROUND_COLOR)) < 128.0f; }
+inline rgb_color PillFill() {
+    return MixColor(gNavAccent, rgb_color{255, 255, 255, 255}, DarkTheme() ? 0.62f : 0.42f);
+}
+inline rgb_color PillHot() {
+    return MixColor(gNavAccent, rgb_color{255, 255, 255, 255}, DarkTheme() ? 0.18f : 0.0f);
+}
+inline rgb_color PillText(rgb_color fill) {
+    return Luminance(fill) > 140.0f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
+}
+
+// Raises the lit trail like a round bar (a quarter circle across its width, lit from the top left), for a touch of depth.
+// `lit` is the coverage of the lit shapes (0..1); the result at each pixel is how much lighter (+) or darker (-) than flat
+// it is, about -0.3..0.3.
+inline void RaisedShade(const std::vector<float>& lit, int w, int h, std::vector<float>& out) {
+    out.assign(static_cast<size_t>(w) * h, 0.0f);
+    // distance from each lit pixel to the nearest edge of the lit shape (the window's own edges are not edges)
+    const size_t n = (size_t)w * h;
+    std::vector<float> d(n, 0.0f);
+    const float big = 1e4f;
+    for (size_t k = 0; k < n; ++k)
+        d[k] = lit[k] > 0.5f ? big : 0.0f;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float& v = d[(size_t)y * w + x];
+            if (v == 0.0f) continue;
+            if (x > 0) v = std::min(v, d[(size_t)y * w + x - 1] + 1.0f);
+            if (y > 0) v = std::min(v, d[(size_t)(y - 1) * w + x] + 1.0f);
+            if (x > 0 && y > 0) v = std::min(v, d[(size_t)(y - 1) * w + x - 1] + 1.4142f);
+            if (x + 1 < w && y > 0) v = std::min(v, d[(size_t)(y - 1) * w + x + 1] + 1.4142f);
+        }
+    for (int y = h - 1; y >= 0; --y)
+        for (int x = w - 1; x >= 0; --x) {
+            float& v = d[(size_t)y * w + x];
+            if (v == 0.0f) continue;
+            if (x + 1 < w) v = std::min(v, d[(size_t)y * w + x + 1] + 1.0f);
+            if (y + 1 < h) v = std::min(v, d[(size_t)(y + 1) * w + x] + 1.0f);
+            if (x + 1 < w && y + 1 < h) v = std::min(v, d[(size_t)(y + 1) * w + x + 1] + 1.4142f);
+            if (x > 0 && y + 1 < h) v = std::min(v, d[(size_t)(y + 1) * w + x - 1] + 1.4142f);
+        }
+    // the height of a round bar: a quarter circle of radius R from the edge in
+    const float R = 7.0f;
+    std::vector<float> hgt(n, 0.0f);
+    for (size_t k = 0; k < n; ++k) {
+        if (d[k] <= 0.0f) continue;
+        float t = std::min(1.0f, (d[k] - 0.5f) / R);
+        if (t < 0.0f) t = 0.0f;
+        hgt[k] = R * sqrtf(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
+    }
+    std::vector<float> sm(n, 0.0f);   // a light blur takes the angles out of the distance map
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float sum = 0.0f;
+            int cnt = 0;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int xx = x + dx, yy = y + dy;
+                    if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                    sum += hgt[(size_t)yy * w + xx];
+                    ++cnt;
+                }
+            sm[(size_t)y * w + x] = sum / cnt;
+        }
+    // light from the top left; the result is how much lighter (+) or darker (-) than flat each pixel is
+    const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
+    const float ln = sqrtf(lx * lx + ly * ly + lz * lz);
+    const float strength = 0.55f;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            size_t k = (size_t)y * w + x;
+            if (lit[k] <= 0.0f) continue;
+            auto H = [&](int xx, int yy) {
+                xx = std::max(0, std::min(w - 1, xx));
+                yy = std::max(0, std::min(h - 1, yy));
+                return sm[(size_t)yy * w + xx];
+            };
+            float gx = (H(x + 1, y) - H(x - 1, y)) * 0.5f, gy = (H(x, y + 1) - H(x, y - 1)) * 0.5f;
+            float nn = sqrtf(gx * gx + gy * gy + 1.0f);
+            float dot = (-gx * lx - gy * ly + lz) / (nn * ln);
+            out[k] = (dot - lz / ln) * strength * lit[k];
+        }
 }
 
 struct Piece { float x, y, w, h, tl, tr, br, bl; };
@@ -1293,6 +1384,12 @@ struct NavMenuState {
 };
 static NavMenuState gNavMenu;
 
+// The pill look of the Tracker menu: each level is a window, and a window is a rectangle, so the pills' round ends and
+// the gaps between them would show square corners. Like the dock's pill popups, the screen behind is captured just
+// before the menu opens and each window draws its part of that as its background. One capture of the whole screen is
+// taken for the whole chain (no menu window is on screen then) and shared; the last level to close deletes it.
+static BBitmap* gNavScreenShot = nullptr;
+
 // The selected row's bulge: a small borderless window just outside the menu's outer edge, so the
 // row seems to stick out of the menu. A window can't have see-through corners, so the tab is square.
 class NavBulgeView : public BView {
@@ -1449,6 +1546,24 @@ public:
         BRect sf = screen.Frame();
         fScreen = sf;
 
+        if (kNavPillLook && parent == nullptr) {
+            // Another pill popup or the dock's hover popups still on screen would be frozen into the capture: close
+            // them and wait (briefly) until they are gone, then take the screen.
+            ClosePillPopup();
+            bool waited = false;
+            for (int i = 0; i < 40; ++i) {
+                bool others = PillPopupOpen() || gActiveTitleListPreview != nullptr
+                    || gActiveThumbnailPreview != nullptr || gActiveWorkspacePreview != nullptr;
+                if (!others) break;
+                waited = true;
+                snooze(5000);
+            }
+            if (waited) snooze(30000);
+            BAutolock lock(gNavMenu.lock);
+            delete gNavScreenShot;
+            gNavScreenShot = CaptureScreenBehind(sf);
+        }
+
         // Width: widest label, clamped like the Linux build's menus.
         BFont font(be_plain_font);
         font.SetSize(NavUI::kFontSize);
@@ -1469,7 +1584,7 @@ public:
             // First row level with the parent's row, to its right (or left when there is no room).
             top = parentRowTop - NavUI::kPadY;
             bool right = parentFrame.right + 1 + fWidth <= sf.right + 1;
-            left = right ? parentFrame.right + 1 : parentFrame.left - fWidth;
+            left = right ? parentFrame.right + 1 - NavUI::kOverlap : parentFrame.left - fWidth + NavUI::kOverlap;
             fLink.valid = true;
             fLink.parentOnLeft = right;
             fLink.parentRowTop = parentRowTop;
@@ -1509,6 +1624,8 @@ public:
             if (gNavMenu.windows.empty() && gNavMenu.anyOpen) {
                 gNavMenu.anyOpen = false;
                 closed = gNavMenu.onClosed;
+                delete gNavScreenShot;
+                gNavScreenShot = nullptr;
             }
         }
         if (closed) closed();
@@ -1822,7 +1939,10 @@ void NavMenuView::RenderBackdrop() {
         pTop = o->fLink.parentRowTop - frameTop + 1;
         pBottom = o->fLink.parentRowBottom - frameTop - 1;
     }
-    auto cornerR = [&](bool flush, bool exposed) { return (!flush || exposed) ? kSelR : 0.0f; };
+    auto cornerR = [&](bool flush, bool exposed) {
+        if (kNavPillLook) return (!flush || exposed) ? kPillR : 0.0f;   // pills: round free ends and bends
+        return (!flush || exposed) ? kSelR : 0.0f;
+    };
     int own = o->fChildRow >= 0 ? o->fChildRow : o->fHovered;
     int arrowDir = 0;
     if (o->Scrollable()) {
@@ -1858,7 +1978,7 @@ void NavMenuView::RenderBackdrop() {
         if ((hovered || open || parentRow) && y + kRowH > o->ViewTop() && y < o->ViewBottom()) {
             bool childOnRight = open && o->fChildOnRight;
             // the selected row (the open or hovered one, as the trail sees it) carries the tab
-            bool tab = !arrowDir && i == own && y + 1 >= o->ViewTop() && y + kRowH - 1 <= o->ViewBottom();
+            bool tab = !kNavPillLook && !arrowDir && i == own && y + 1 >= o->ViewTop() && y + kRowH - 1 <= o->ViewBottom();
             if (tab) tabRowTop = y;
             addPiece(y + 1, y + kRowH - 1, open && gNavSnakeTrail, childOnRight, parentRow, false, tab);
         }
@@ -1875,10 +1995,18 @@ void NavMenuView::RenderBackdrop() {
         top = std::max(top, 0.0f);
         bottom = std::min(bottom, static_cast<float>(h));
         if (bottom > top) {
-            const float r = 3.0f;
+            const float r = kNavPillLook ? kPillR : 3.0f;
             // (the strip hanging into the parent menu carries the curve at the free end of the vertical part)
             const float rt = 0.0f, rb = 0.0f;
-            if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, rt, r, r, rb});
+            if (kNavPillLook) {
+                // Where the bar runs past the parent's row, its free end (the corner on the parent's side) is round
+                // like a pill's end; otherwise the corner beside the lit row is.
+                const bool extTop = top < pTop - 0.5f, extBottom = bottom > pBottom + 0.5f;
+                const float outerT = extTop ? r : 0.0f, innerT = extTop ? 0.0f : r;
+                const float outerB = extBottom ? r : 0.0f, innerB = extBottom ? 0.0f : r;
+                if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, outerT, innerT, innerB, outerB});
+                else pieces.push_back({static_cast<float>(w) - kBarW, top, kBarW, bottom - top, innerT, outerT, outerB, innerB});
+            } else if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, rt, r, r, rb});
             else pieces.push_back({static_cast<float>(w) - kBarW, top, kBarW, bottom - top, r, rt, rb, r});
             if (hasOwn && ownBottom > ownTop) {
                 float ex = parentOnLeft ? kBarW : w - kBarW;
@@ -1889,12 +2017,12 @@ void NavMenuView::RenderBackdrop() {
         }
     }
 
-    o->UpdateBulge(tabRowTop, bulgeRight);
+    o->UpdateBulge(kNavPillLook ? -1.0f : tabRowTop, bulgeRight);   // (the pill look has no tab sticking out)
 
     // the vertical part also hangs into the parent menu, where it runs past the parent's row
     {
         float vTop = 0, vBottom = -1;
-        if (parentLink && hasOwn && ownBottom > ownTop && (ownTop < pTop - 0.5f || ownBottom > pBottom + 0.5f)) {
+        if (!kNavPillLook && parentLink && hasOwn && ownBottom > ownTop && (ownTop < pTop - 0.5f || ownBottom > pBottom + 0.5f)) {
             vTop = std::max(0.0f, std::min(ownTop, pTop));
             vBottom = std::min(static_cast<float>(h), std::max(ownBottom, pBottom));
         }
@@ -1924,6 +2052,70 @@ void NavMenuView::RenderBackdrop() {
                 float& dst = cover[static_cast<size_t>(y) * w + x];
                 dst = std::max(dst, c);
             }
+    }
+
+    if (kNavPillLook) {
+        // ---- the pill look: the captured screen, one solid pill for the level, the lit row and the trail in the
+        // Selector Color on top ----
+        const Palette pal = CurrentPalette();
+        const rgb_color fill = PillFill(), hot = PillHot();
+        // one solid pill for the whole level (the rows run into each other); the lit row and the trail sit on it
+        std::vector<float> pillCover(static_cast<size_t>(w) * h, 0.0f);
+        const float panelR = std::min(kPillR, std::min(w, h) / 2.0f);
+        // The corner next to the parent is square (it lies over the parent's panel, where a round one would show the picture
+        // of the empty desktop), and so is the one at the bottom when this level ends within its parent's height.
+        const bool overParent = o->fLink.valid && kOverlap > 0.0f;
+        const bool squareBottom = overParent && o->fFrame.bottom <= o->fLink.parentBottom;
+        const float tlR = (overParent && o->fLink.parentOnLeft) ? 0.0f : panelR;
+        const float trR = (overParent && !o->fLink.parentOnLeft) ? 0.0f : panelR;
+        const float blR = (squareBottom && o->fLink.parentOnLeft) ? 0.0f : panelR;
+        const float brR = (squareBottom && !o->fLink.parentOnLeft) ? 0.0f : panelR;
+        for (int yy = 0; yy < h; ++yy)
+            for (int xx = 0; xx < w; ++xx)
+                pillCover[static_cast<size_t>(yy) * w + xx] =
+                    RoundRectCoverage(xx + 0.5f, yy + 0.5f, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h),
+                        tlR, trR, brR, blR);
+
+        // the lit shapes, clipped to the panel, and the raised shading across them
+        std::vector<float> litShapes(static_cast<size_t>(w) * h), shadow;
+        for (size_t k = 0; k < litShapes.size(); ++k) litShapes[k] = cover[k] * pillCover[k];
+        RaisedShade(litShapes, w, h, shadow);
+
+        const BBitmap* shot = gNavScreenShot;
+        const uint8* sbits = (shot != nullptr && shot->IsValid()) ? static_cast<const uint8*>(shot->Bits()) : nullptr;
+        const int32 sbpr = sbits != nullptr ? shot->BytesPerRow() : 0;
+        const int sw = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerWidth()) + 1 : 0;
+        const int sh = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerHeight()) + 1 : 0;
+        const int ox = static_cast<int>(std::floor(o->fFrame.left)), oy = static_cast<int>(std::floor(o->fFrame.top));
+        uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
+        const int32 bpr = fBackdrop->BytesPerRow();
+        for (int y = 0; y < h; ++y) {
+            uint8* row = bits + y * bpr;
+            for (int x = 0; x < w; ++x) {
+                float cr = pal.bg.red, cg = pal.bg.green, cb = pal.bg.blue;
+                int sx = ox + x, sy = oy + y;
+                if (sbits != nullptr && sx >= 0 && sy >= 0 && sx < sw && sy < sh) {
+                    const uint8* sp = sbits + sy * sbpr + sx * 4;
+                    cb = sp[0]; cg = sp[1]; cr = sp[2];
+                }
+                size_t k = static_cast<size_t>(y) * w + x;
+                const float panelA = pillCover[k];
+                float a = panelA;
+                if (a > 0.0f) { cr += (fill.red - cr) * a; cg += (fill.green - cg) * a; cb += (fill.blue - cb) * a; }
+                a = cover[k] * panelA;   // (the lit row and the trail stay inside the rounded corners)
+                if (a > 0.0f) { cr += (hot.red - cr) * a; cg += (hot.green - cg) * a; cb += (hot.blue - cb) * a; }
+                const float rs = shadow[k];
+                if (rs > 0.0f) { cr += (255.0f - cr) * rs; cg += (255.0f - cg) * rs; cb += (255.0f - cb) * rs; }
+                else if (rs < 0.0f) { cr *= 1.0f + rs; cg *= 1.0f + rs; cb *= 1.0f + rs; }
+                uint8* px = row + x * 4;
+                px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
+                px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
+                px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
+                px[3] = 255;
+            }
+        }
+        fBackdropDirty = false;
+        return;
     }
 
     // ---- composite: background, border, selector with bevel ----
@@ -1999,6 +2191,11 @@ void NavMenuView::Draw(BRect updateRect) {
         // Is this row the one carrying the parent's trail into this menu?
         bool trailRow = gNavSnakeTrail && o->fLink.valid && o->fLinkActive && i == (o->fChildRow >= 0 ? o->fChildRow : o->fHovered);
         rgb_color textColor = !it.enabled ? disabled : ((lit || trailRow) ? AccentText() : normal);
+        if (kNavPillLook) {
+            if (lit || trailRow) textColor = PillText(PillHot());
+            else if (!it.enabled) textColor = MixColor(PillText(PillFill()), PillFill(), 0.45f);
+            else textColor = PillText(PillFill());
+        }
 
         o->LoadIcon(it);
         if (it.icon) {
@@ -7514,7 +7711,10 @@ void SyncDockWithRunningDeskbarApps() {
 	        // that keeps the dock's hover popups out of the way is released when the last level closes.
 	        HaikuGlDesktopEngine* engine = args->engine;
 	        bool below = (gDockLocation == kDockLocationTop);
-	        BPoint anchor(static_cast<float>(args->winX + args->mouseX), args->popupCenterY + (below ? 40.0f : -40.0f));
+	        // The pill look captures the screen behind the menu, so the root level opens clear of the icon's zoomed peak
+	        // (otherwise the zoomed icon would be frozen into its corners), like the dock's other pill popups.
+	        const float clearance = kNavPillLook ? fBaseIconSize * fIconZoom / 2.0f + 8.0f : 40.0f;
+	        BPoint anchor(static_cast<float>(args->winX + args->mouseX), args->popupCenterY + (below ? clearance : -clearance));
 	        bool opened = ShowTrackerNavMenu(anchor, below,
 	            [engine, trackerMessenger](const entry_ref& ref) {
 	                BMessage refsMessage(B_REFS_RECEIVED);
