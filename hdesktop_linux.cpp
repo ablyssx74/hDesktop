@@ -104,7 +104,7 @@
 #include "viewporter-client-protocol.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
-#define APP_LOCAL_VERSION "v1.0.59"
+#define APP_LOCAL_VERSION "v1.0.60"
 
 // Linux input event codes (linux/input-event-codes.h), spelled out so the
 // build doesn't depend on kernel headers being installed.
@@ -2393,6 +2393,122 @@ static int MenuScreenHeight() {
     return static_cast<int>(px / std::max(1.0, scale));
 }
 
+// ---- The pill look of the menus (as on Haiku): one solid pill per menu level, the lit row and the snake trail in the
+// Selector Color on it, shaded like a raised round bar. Drawn per pixel, in device pixels.
+namespace PillGfx {
+
+inline float Clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+// Coverage (0..1, anti-aliased) of a rounded rectangle at a pixel centre; each corner has its own radius.
+inline float RoundRectCoverage(float px, float py, float x, float y, float w, float h, float tl, float tr, float br,
+    float bl) {
+    float hx = w / 2, hy = h / 2;
+    float lx = px - (x + hx), ly = py - (y + hy);
+    float r = (lx > 0) ? ((ly > 0) ? br : tr) : ((ly > 0) ? bl : tl);
+    float qx = std::fabs(lx) - hx + r, qy = std::fabs(ly) - hy + r;
+    float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
+    float d = std::min(std::max(qx, qy), 0.0f) + outside - r;
+    return Clamp01(0.5f - d);
+}
+
+// The concave "fillet" where the elbow bar meets a row: a square at the corner point (cx, cy), extending toward (dx, dy),
+// minus the circle that rounds it.
+inline float FilletCoverage(float px, float py, float cx, float cy, int dx, int dy, float r) {
+    float centreX = cx + dx * r, centreY = cy + dy * r;
+    float lx = px - (cx + dx * r / 2), ly = py - (cy + dy * r / 2);
+    float qx = std::fabs(lx) - r / 2, qy = std::fabs(ly) - r / 2;
+    float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
+    float dSquare = std::min(std::max(qx, qy), 0.0f) + outside;
+    float dCircle = r - std::sqrt((px - centreX) * (px - centreX) + (py - centreY) * (py - centreY));
+    return Clamp01(0.5f - std::max(dSquare, dCircle));
+}
+
+// Raises the lit shapes like a round bar (a quarter circle across the width, lit from the top left). `lit` is the coverage of
+// the lit shapes (0..1); the result at each pixel is how much lighter (+) or darker (-) than flat it is. `scale` is the number
+// of device pixels per logical one.
+inline void RaisedShade(const std::vector<float>& lit, int w, int h, float scale, std::vector<float>& out) {
+    const size_t n = static_cast<size_t>(w) * h;
+    out.assign(n, 0.0f);
+    std::vector<float> d(n, 0.0f);
+    const float big = 1e4f;
+    for (size_t k = 0; k < n; ++k) d[k] = lit[k] > 0.5f ? big : 0.0f;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float& v = d[static_cast<size_t>(y) * w + x];
+            if (v == 0.0f) continue;
+            if (x > 0) v = std::min(v, d[static_cast<size_t>(y) * w + x - 1] + 1.0f);
+            if (y > 0) v = std::min(v, d[static_cast<size_t>(y - 1) * w + x] + 1.0f);
+            if (x > 0 && y > 0) v = std::min(v, d[static_cast<size_t>(y - 1) * w + x - 1] + 1.4142f);
+            if (x + 1 < w && y > 0) v = std::min(v, d[static_cast<size_t>(y - 1) * w + x + 1] + 1.4142f);
+        }
+    for (int y = h - 1; y >= 0; --y)
+        for (int x = w - 1; x >= 0; --x) {
+            float& v = d[static_cast<size_t>(y) * w + x];
+            if (v == 0.0f) continue;
+            if (x + 1 < w) v = std::min(v, d[static_cast<size_t>(y) * w + x + 1] + 1.0f);
+            if (y + 1 < h) v = std::min(v, d[static_cast<size_t>(y + 1) * w + x] + 1.0f);
+            if (x + 1 < w && y + 1 < h) v = std::min(v, d[static_cast<size_t>(y + 1) * w + x + 1] + 1.4142f);
+            if (x > 0 && y + 1 < h) v = std::min(v, d[static_cast<size_t>(y + 1) * w + x - 1] + 1.4142f);
+        }
+    const float R = 7.0f * scale;
+    std::vector<float> hgt(n, 0.0f);
+    for (size_t k = 0; k < n; ++k) {
+        if (d[k] <= 0.0f) continue;
+        float t = std::max(0.0f, std::min(1.0f, (d[k] - 0.5f) / R));
+        hgt[k] = R * std::sqrt(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
+    }
+    std::vector<float> sm(n, 0.0f);   // a light blur takes the angles out of the distance map
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float sum = 0.0f;
+            int cnt = 0;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int xx = x + dx, yy = y + dy;
+                    if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                    sum += hgt[static_cast<size_t>(yy) * w + xx];
+                    ++cnt;
+                }
+            sm[static_cast<size_t>(y) * w + x] = sum / cnt;
+        }
+    // light from the top left
+    const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
+    const float ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+    const float strength = 0.55f;
+    auto height = [&](int xx, int yy) {
+        xx = std::max(0, std::min(w - 1, xx));
+        yy = std::max(0, std::min(h - 1, yy));
+        return sm[static_cast<size_t>(yy) * w + xx];
+    };
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            size_t k = static_cast<size_t>(y) * w + x;
+            if (lit[k] <= 0.0f) continue;
+            float gx = (height(x + 1, y) - height(x - 1, y)) * 0.5f;
+            float gy = (height(x, y + 1) - height(x, y - 1)) * 0.5f;
+            float nn = std::sqrt(gx * gx + gy * gy + 1.0f);
+            float dot = (-gx * lx - gy * ly + lz) / (nn * ln);
+            out[k] = (dot - lz / ln) * strength * lit[k];
+        }
+}
+
+struct Piece { float x, y, w, h, tl, tr, br, bl; };
+struct Fillet { float x, y; int dx, dy; };
+
+inline RGBA Mix(RGBA a, RGBA b, double t) {
+    return RGBA{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1.0};
+}
+// The pill (the Selector Color in a light tint), the lit row's colour (the Selector Color), and the text on a colour.
+// (the menus are always dark-themed here, so the tints of Haiku's dark theme)
+inline RGBA Fill() { return Mix(AccentColor(), RGBA{1, 1, 1, 1}, 0.62); }
+inline RGBA Hot() { return Mix(AccentColor(), RGBA{1, 1, 1, 1}, 0.18); }
+inline RGBA TextOn(RGBA c) {
+    double lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+    return lum > 140.0 / 255.0 ? RGBA{20 / 255.0, 22 / 255.0, 28 / 255.0, 1} : RGBA{1, 1, 1, 1};
+}
+
+}  // namespace PillGfx
+
 class PopupMenu : public PopupSurface {
 public:
     PopupMenu(std::vector<MenuItem> items, PopupMenu* parent, bool grabbing, bool centered)
@@ -2441,27 +2557,11 @@ public:
 
     void Paint(cairo_t* cr) override {
         const double w = BodyW(), h = height;
-        cairo_translate(cr, kTabW, 0);   // the menu itself; the margins on both sides are for the tab
-        RoundedRectPath(cr, 0.5, 0.5, w - 1, h - 1, 6.0);
-        cairo_set_source_rgba(cr, 24 / 255.0, 24 / 255.0, 28 / 255.0, 0.98);
-        cairo_fill_preserve(cr);
-        cairo_set_source_rgba(cr, 48 / 255.0, 50 / 255.0, 58 / 255.0, 1.0);
-        cairo_set_line_width(cr, 1.0);
-        cairo_stroke(cr);
-
         ClampScroll(); // the compositor may have resized us
-        {
-            // The selector goes under the text, and reaches the border column where
-            // menus join, so it gets the full outline as its clip, not the inset one.
-            cairo_save(cr);
-            RoundedRectPath(cr, 0, 0, w, h, 6.0);
-            cairo_clip(cr);   // (DrawHighlight widens it to the margin on the tab's side)
-            DrawHighlight(cr);
-            cairo_restore(cr);
-        }
+        DrawPill(cr);  // the pill, the lit row and the trail, shaded
 
         cairo_save(cr);
-        RoundedRectPath(cr, 1, 1, w - 2, h - 2, 5.5);
+        cairo_rectangle(cr, 0, 0, w, h);
         cairo_clip(cr);
 
         if (Scrollable()) DrawScrollArrows(cr);
@@ -2477,8 +2577,11 @@ public:
                 continue;
             }
             if (it.separator) {
-                cairo_set_source_rgba(cr, 60 / 255.0, 62 / 255.0, 72 / 255.0, 1.0);
-                cairo_rectangle(cr, 8, std::floor(y + rh / 2), w - 16, 1);
+                // a thin pill, tinted a little towards the Selector Color
+                const RGBA line = PillGfx::Mix(PillGfx::Fill(), AccentColor(), 0.3);
+                cairo_set_source_rgba(cr, line.r, line.g, line.b, 1.0);
+                const double ly = std::floor(y + rh / 2) - 0.25, lx = 10, lw = w - 20;
+                RoundedRectPath(cr, lx, ly, lw, 1.5, 0.75);
                 cairo_fill(cr);
                 y += rh;
                 continue;
@@ -2488,9 +2591,10 @@ public:
             // another row, which takes the highlight right away. Waiting for the
             // submenu delay to close the old one left two rows lit at once.
             bool open = fChild && static_cast<int>(i) == fChildIndex && (fHovered < 0 || fHovered == fChildIndex);
-            RGBA textColor = it.header ? RGBA{130 / 255.0, 145 / 255.0, 180 / 255.0, 0.9}
-                : !it.enabled ? RGBA{0.5, 0.5, 0.55, 1.0}
-                : (hovered || open) ? AccentTextColor() : RGBA{220 / 255.0, 220 / 255.0, 225 / 255.0, 1};
+            const RGBA pillFill = PillGfx::Fill(), pillText = PillGfx::TextOn(pillFill);
+            RGBA textColor = it.header ? PillGfx::Mix(pillText, pillFill, 0.4)
+                : !it.enabled ? PillGfx::Mix(pillText, pillFill, 0.5)
+                : (hovered || open) ? PillGfx::TextOn(PillGfx::Hot()) : pillText;
 
             double textH = 0;
             MeasureText("Ag", kFontSize, it.header, nullptr, &textH);
@@ -2584,7 +2688,9 @@ public:
                 DrawText(cr, it.label, left, textY, kFontSize, it.header, textColor, maxW);
             }
 
-            if (it.submenu) {
+            // (an arrow that the trail's bar passes through is not drawn)
+            const bool underTrail = fTrailBar.valid && fTrailBar.onRight && y + rh / 2 >= fTrailBar.top && y + rh / 2 <= fTrailBar.bottom;
+            if (it.submenu && !underTrail) {
                 double ax = w - kPadX - 4, ay = y + rh / 2;
                 cairo_new_path(cr);
                 cairo_set_source_rgba(cr, textColor.r, textColor.g, textColor.b, 0.9);
@@ -2681,13 +2787,12 @@ private:
     static constexpr double kFontSize = 12.0;
     static constexpr double kRowH = 22.0;
     static constexpr double kSepH = 9.0;
-    static constexpr double kPadX = 8.0;
+    static constexpr double kPadX = 12.0;
     static constexpr double kPadY = 4.0;
-    // The surface is wider than the menu on both sides by this much: room for the selected row's
-    // tab ("bulge") to stick out of the menu's outer edge. Transparent otherwise.
-    static constexpr double kTabW = 3.0;
-    double BodyW() const { return width - 2 * kTabW; }
-    static constexpr double kLeftColumn = 30.0;
+    static constexpr double kPillR = (kRowH - 2.0) / 2.0;   // the pill's round ends, and the radius of the trail's bends
+    static constexpr double kOverlap = 20.0;                // a level opens this far over its parent, covering its arrows
+    double BodyW() const { return width; }
+    static constexpr double kLeftColumn = 34.0;
     static constexpr double kValueColumnW = 54.0;
     static constexpr double kBarW = 80.0;
     static constexpr double kArrowH = 16.0;   // scroll arrow strips at the top and bottom
@@ -2761,7 +2866,7 @@ private:
             w = std::clamp(left + maxLabel + kPadX + 22, 150.0, 420.0);
         }
         if (hasThumbs) w = std::max(w, ThumbW() + kPadX * 2);
-        fWidth = static_cast<int>(std::ceil(w) + 2 * kTabW);
+        fWidth = static_cast<int>(std::ceil(w));
         fContentH = h;
         fHeight = static_cast<int>(std::ceil(std::min(h, MaxHeight())));
     }
@@ -2830,15 +2935,16 @@ private:
             cairo_line_to(cr, cx, cy + 2.5 * d);
             cairo_line_to(cr, cx + 5, cy - 2.5 * d);
             cairo_close_path(cr);
-            RGBA glyph = (hot && active) ? AccentTextColor() : RGBA{220 / 255.0, 220 / 255.0, 225 / 255.0, 1};
+            RGBA glyph = (hot && active) ? PillGfx::TextOn(PillGfx::Hot()) : PillGfx::TextOn(PillGfx::Fill());
             cairo_set_source_rgba(cr, glyph.r, glyph.g, glyph.b, active ? 0.9 : 0.25);
             cairo_fill(cr);
         };
         arrow(kArrowH / 2, true, fScroll > 0.5, fScrollDir < 0);
         arrow(h - kArrowH / 2, false, fScroll < MaxScroll() - 0.5, fScrollDir > 0);
-        cairo_set_source_rgba(cr, 60 / 255.0, 62 / 255.0, 72 / 255.0, 1.0);
-        cairo_rectangle(cr, 6, kArrowH - 1, w - 12, 1);
-        cairo_rectangle(cr, 6, h - kArrowH, w - 12, 1);
+        const RGBA line = PillGfx::Mix(PillGfx::Fill(), AccentColor(), 0.3);
+        cairo_set_source_rgba(cr, line.r, line.g, line.b, 1.0);
+        cairo_rectangle(cr, 10, kArrowH - 1, w - 20, 1);
+        cairo_rectangle(cr, 10, h - kArrowH, w - 20, 1);
         cairo_fill(cr);
     }
 
@@ -2872,24 +2978,24 @@ private:
         cairo_close_path(cr);
     }
 
-    // The blue selector: rounded, with a light top edge and a dark bottom edge
-    // (a bevel), and the "snake trail" -- the highlight runs unbroken from the
-    // root menu along the path of open submenus. Menus abut, so the row that
-    // opened a submenu runs flush to the shared edge, the submenu's row meets it
-    // flush, and the submenu adds a bar down that edge to wherever its own
-    // highlighted row sits (it doesn't always land level with the row that
-    // opened it). All the pieces are filled as one union, so the bevel follows
-    // the whole outline, bends included.
-    void DrawHighlight(cairo_t* cr) {
-        struct Piece { double x, y, w, h, tl, tr, br, bl; };
-        // Concave fillet: fills the corner where the elbow bar meets a row (empty
-        // space runs toward (dx, dy) from the corner point).
-        struct Fillet { double x, y; int dx, dy; };
+    // The menu as one pill, with the lit row and the snake trail on it: the pill is the Selector Color in a light tint, the
+    // lit row and the trail are the Selector Color itself, and the trail is shaded like a raised round bar. A submenu opens
+    // over its parent, and the trail runs unbroken from the root menu along the path of open submenus: the row that opened
+    // a submenu runs flush to the shared edge, the submenu's row meets it flush, and the submenu adds a bar down that edge to
+    // wherever its own highlighted row sits. Everything is worked out per pixel, in device pixels.
+    void DrawPill(cairo_t* cr) {
+        using namespace PillGfx;
+        cairo_matrix_t m;
+        cairo_get_matrix(cr, &m);
+        const float S = static_cast<float>(m.xx);
+        const int W = std::max(1, static_cast<int>(std::lround(width * S))), H = std::max(1, static_cast<int>(std::lround(height * S)));
+        const double w = BodyW();
+        const float h = static_cast<float>(height);
+        const float kR = static_cast<float>(kPillR);
+        const float kBarW = kR;
+
         std::vector<Piece> pieces;
         std::vector<Fillet> fillets;
-        const double w = BodyW();
-        const double kR = 4.0;     // corner radius of a lone selector row
-
         const bool trail = gSettings.snakeTrail;   // off: each menu keeps its own, unjoined selector
         const bool parentLink = trail && fParent && fParent->fChild.get() == this && fParent->fChildIndex >= 0 &&
             fParent->fChildIndex < static_cast<int>(fParent->fItems.size()) &&
@@ -2897,60 +3003,41 @@ private:
         const bool parentOnLeft = popupX >= 0;
         const int own = fChild ? fChildIndex : fHovered;   // my row on the trail
 
-        // The parent's row, in my coordinates. Where the trail runs flush to the
-        // shared edge it is only joined to the parent's highlight within this range;
-        // past it that edge is an outer edge, so those corners get rounded too.
-        double pTop = 0, pBottom = 0;
+        // The parent's row, in my coordinates.
+        float pTop = 0, pBottom = 0;
         if (parentLink) {
-            pTop = fParent->RowTopRaw(fParent->fChildIndex) - popupY + 1;
-            pBottom = pTop - 1 + RowHeight(fParent->fItems[fParent->fChildIndex]) - 1;
+            pTop = static_cast<float>(fParent->RowTopRaw(fParent->fChildIndex) - popupY + 1);
+            pBottom = pTop - 1 + static_cast<float>(RowHeight(fParent->fItems[fParent->fChildIndex])) - 1;
         }
-        auto cornerR = [&](bool flush, bool exposed) { return (!flush || exposed) ? kR : 0.0; };
+        auto cornerR = [&](bool flush, bool exposed) { return (!flush || exposed) ? kR : 0.0f; };
 
-        // While the pointer sits on a scroll arrow (the menu scrolls), that strip is
-        // the lit element -- it takes the place of a hovered row so the trail stays
-        // connected to it instead of ending at the parent's row.
+        // While the pointer sits on a scroll arrow (the menu scrolls), that strip is the lit element.
         int arrowDir = 0;
         if (Scrollable()) {
             if (fScrollDir < 0 && fScroll > 0.5) arrowDir = -1;
             else if (fScrollDir > 0 && fScroll < MaxScroll() - 0.5) arrowDir = 1;
         }
 
-        // One lit piece spanning [top, bottom]. `onTrail`: it is my link to the parent.
-        // Clipped to the scrolling view, which is why it is done by hand: the arrow
-        // strips lie outside it and must still be able to light up.
-        // The side the selected row's tab sticks out of: away from the neighbouring menu.
-        const bool bulgeRight = fParent ? parentOnLeft : (fChild ? fChild->popupX < 0 : true);
-        bool hasTab = false;
-        bool hasVTab = false;   // the vertical part hangs into the margin on the parent's side
-        double seamTop = 0, seamBottom = 0, seamX = 0;   // where it runs along my parent's row (no outline there)
-        auto addPiece = [&](double top, double bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow,
-                            bool tab) {
-            double vt = arrow ? 0 : ViewTop(), vb = arrow ? static_cast<double>(height) : ViewBottom();
+        // One lit piece spanning [top, bottom]. `onTrail`: it is my link to the parent. Clipped to the scrolling view, which is
+        // why it is done by hand: the arrow strips lie outside it and must still be able to light up.
+        auto addPiece = [&](float top, float bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow) {
+            float vt = arrow ? 0.0f : static_cast<float>(ViewTop()), vb = arrow ? h : static_cast<float>(ViewBottom());
             bool cutTop = top < vt, cutBottom = bottom > vb;
-            double t = std::max(top, vt), b = std::min(bottom, vb);
+            float t = std::max(top, vt), b = std::min(bottom, vb);
             if (b <= t) return;
-            bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft) || (tab && !bulgeRight);
-            bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft) || (tab && bulgeRight);
-            double x0 = leftFlush ? 0 : 3, x1 = rightFlush ? w : w - 3;
-            bool expTop = onTrail && top < pTop - 0.5, expBottom = onTrail && bottom > pBottom + 0.5;
-            double tl = cutTop ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
-            double tr = cutTop ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
-            double br = cutBottom ? 0 : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
-            double bl = cutBottom ? 0 : cornerR(leftFlush, onTrail && parentOnLeft && expBottom);
-            if (tab) {
-                // the row itself runs out into the margin, rounded at its outer end (two pixels: the
-                // outline adds the third)
-                hasTab = true;
-                const double kT = kTabW - 1;
-                if (bulgeRight) { x1 = w + kT; tr = cutTop ? 0 : kR; br = cutBottom ? 0 : kR; }
-                else { x0 = -kT; tl = cutTop ? 0 : kR; bl = cutBottom ? 0 : kR; }
-            }
+            bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft);
+            bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft);
+            float x0 = leftFlush ? 0.0f : 3.0f, x1 = rightFlush ? static_cast<float>(w) : static_cast<float>(w) - 3.0f;
+            bool expTop = onTrail && top < pTop - 0.5f, expBottom = onTrail && bottom > pBottom + 0.5f;
+            float tl = cutTop ? 0.0f : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
+            float tr = cutTop ? 0.0f : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
+            float br = cutBottom ? 0.0f : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
+            float bl = cutBottom ? 0.0f : cornerR(leftFlush, onTrail && parentOnLeft && expBottom);
             pieces.push_back({x0, t, x1 - x0, b - t, tl, tr, br, bl});
         };
 
         double y = ViewTop() + kPadY - fScroll;
-        double ownTop = 0, ownBottom = 0;
+        float ownTop = 0, ownBottom = 0;
         bool hasOwn = false;
         for (size_t i = 0; i < fItems.size(); ++i) {
             const MenuItem& it = fItems[i];
@@ -2959,140 +3046,126 @@ private:
                 bool hovered = (static_cast<int>(i) == fHovered) && it.enabled && !it.header;
                 bool open = fChild && static_cast<int>(i) == fChildIndex && (fHovered < 0 || fHovered == fChildIndex);
                 bool parentRow = parentLink && static_cast<int>(i) == own && !arrowDir;
-                if (parentRow) { ownTop = y + 1; ownBottom = y + rh - 1; hasOwn = true; }
+                if (parentRow) { ownTop = static_cast<float>(y + 1); ownBottom = static_cast<float>(y + rh - 1); hasOwn = true; }
                 if ((hovered || open || parentRow) && y + rh > ViewTop() && y < ViewBottom()) {
                     bool childOnRight = open && fChild->popupX >= 0;
-                    // the selected row (the open or hovered one) carries the tab, when it is fully in view
-                    bool tab = !arrowDir && static_cast<int>(i) == own && y + 1 >= ViewTop() && y + rh - 1 <= ViewBottom();
-                    addPiece(y + 1, y + rh - 1, open && trail, childOnRight, parentRow, false, tab);
-
+                    addPiece(static_cast<float>(y + 1), static_cast<float>(y + rh - 1), open && trail, childOnRight, parentRow, false);
                 }
             }
             y += rh;
         }
         if (arrowDir) {
-            ownTop = arrowDir < 0 ? 2 : height - kArrowH + 1;
-            ownBottom = arrowDir < 0 ? kArrowH - 1 : height - 2;
+            ownTop = arrowDir < 0 ? 2.0f : h - static_cast<float>(kArrowH) + 1;
+            ownBottom = arrowDir < 0 ? static_cast<float>(kArrowH) - 1 : h - 2.0f;
             hasOwn = true;
-            addPiece(ownTop, ownBottom, false, false, parentLink, true, false);
+            addPiece(ownTop, ownBottom, false, false, parentLink, true);
         }
+        fTrailBar = TrailBar();
         if (parentLink) {
             // Bridge my parent's row to mine.
-            double top = pTop, bottom = pBottom;
+            float top = pTop, bottom = pBottom;
             if (hasOwn && ownBottom > ownTop) { top = std::min(top, ownTop); bottom = std::max(bottom, ownBottom); }
-            top = std::max(top, 0.0);
-            bottom = std::min(bottom, static_cast<double>(height));
+            top = std::max(top, 0.0f);
+            bottom = std::min(bottom, h);
             if (bottom > top) {
-                const double barW = 7, r = 3;
-                const bool vExt = hasOwn && ownBottom > ownTop && (ownTop < pTop - 0.5 || ownBottom > pBottom + 0.5);
-                if (vExt) {
-                    // The vertical part: beside the parent's row it is the bar as before (its ends carry on into
-                    // the rest), and the rest, from there to my row, hangs out into the transparent margin on the
-                    // parent's side, a menu's edge away from where it ends, rounded at its free end.
-                    hasVTab = true;
-                    const double kT = kTabW - 1;   // two pixels: the outline adds the third
-                    const double rowTop = std::max(top, pTop), rowBottom = std::min(bottom, pBottom);
-                    const double mx = parentOnLeft ? -kT : w - barW, mw = kT + barW;
-                    if (rowBottom > rowTop) {
-                        // Beside the parent's row the column is as wide as everywhere else, so the strip is one
-                        // shape; the outline it would leave across the end of that row is wiped further down.
-                        pieces.push_back({mx, rowTop, mw, rowBottom - rowTop, 0, 0, 0, 0});
-                        seamTop = rowTop;
-                        seamBottom = rowBottom;
-                        seamX = parentOnLeft ? -kT - 1 : w + kT;
-                    }
-                    if (top < rowTop - 0.5) {   // the part above the parent's row; its top is the free end
-                        if (parentOnLeft) pieces.push_back({mx, top, mw, rowTop - top, kR, r, 0, 0});
-                        else pieces.push_back({mx, top, mw, rowTop - top, r, kR, 0, 0});
-                    }
-                    if (bottom > rowBottom + 0.5) {   // the part below it; its bottom is the free end
-                        if (parentOnLeft) pieces.push_back({mx, rowBottom, mw, bottom - rowBottom, 0, 0, r, kR});
-                        else pieces.push_back({mx, rowBottom, mw, bottom - rowBottom, 0, 0, kR, r});
-                    }
-                } else {
-                    const double rt = top < pTop - 0.5 ? kR : 0, rb = bottom > pBottom + 0.5 ? kR : 0;
-                    if (parentOnLeft) pieces.push_back({0, top, barW, bottom - top, rt, r, r, rb});
-                    else pieces.push_back({w - barW, top, barW, bottom - top, r, rt, rb, r});
-                }
-                // Round the inside corners where the bar meets my row.
+                // Where the bar runs past the parent's row its free end (the corner on the parent's side) is round like a
+                // pill's end; otherwise the corner beside the lit row is.
+                const bool extTop = top < pTop - 0.5f, extBottom = bottom > pBottom + 0.5f;
+                const float outerT = extTop ? kR : 0.0f, innerT = extTop ? 0.0f : kR;
+                const float outerB = extBottom ? kR : 0.0f, innerB = extBottom ? 0.0f : kR;
+                if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, outerT, innerT, innerB, outerB});
+                else pieces.push_back({static_cast<float>(w) - kBarW, top, kBarW, bottom - top, innerT, outerT, outerB, innerB});
+                fTrailBar.valid = true;
+                fTrailBar.onRight = !parentOnLeft;
+                fTrailBar.top = top;
+                fTrailBar.bottom = bottom;
                 if (hasOwn && ownBottom > ownTop) {
-                    double ex = parentOnLeft ? barW : w - barW;
+                    float ex = parentOnLeft ? kBarW : static_cast<float>(w) - kBarW;
                     int dx = parentOnLeft ? 1 : -1;
-                    if (top < ownTop - 0.5) fillets.push_back({ex, ownTop, dx, -1});
-                    if (bottom > ownBottom + 0.5) fillets.push_back({ex, ownBottom, dx, 1});
+                    if (top < ownTop - 0.5f) fillets.push_back({ex, ownTop, dx, -1});
+                    if (bottom > ownBottom + 0.5f) fillets.push_back({ex, ownBottom, dx, 1});
                 }
             }
         }
-        if (pieces.empty()) return;
-        const double kFillet = 3.0;
 
-        const RGBA base = AccentColor(), light = AccentLight(), dark = AccentDark(), outline = AccentOutline();
-        auto addUnion = [&](double dy, double dx = 0) {
-            for (const Piece& p : pieces) CornerRectPath(cr, p.x + dx, p.y + dy, p.w, p.h, p.tl, p.tr, p.br, p.bl);
-            for (const Fillet& f : fillets) {
-                // Corner point, along one edge, a quarter arc around the circle centre, back along the other.
-                double px = f.x + dx, py = f.y + dy, r = kFillet;
-                double cx = px + f.dx * r, cy = py + f.dy * r;
-                cairo_new_sub_path(cr);
-                cairo_move_to(cr, px, py);
-                cairo_line_to(cr, cx, py);
-                double a1 = -f.dy * M_PI / 2;
-                if (f.dx * f.dy > 0) cairo_arc_negative(cr, cx, cy, r, a1, f.dx > 0 ? -M_PI : 0);
-                else cairo_arc(cr, cx, cy, r, a1, f.dx > 0 ? M_PI : 0);
-                cairo_close_path(cr);
-            }
-        };
-        // Clip to the menu, and to the margin on the tab's side only: the other margin belongs to
-        // the neighbouring menu's edge, which the outline mustn't leave a line on.
-        cairo_reset_clip(cr);
-        RoundedRectPath(cr, 0, 0, w, height, 6.0);
-        if (hasTab) cairo_rectangle(cr, bulgeRight ? w : -kTabW, 0, kTabW, height);
-        if (hasVTab) cairo_rectangle(cr, parentOnLeft ? -kTabW : w, 0, kTabW, height);
-        cairo_clip(cr);
+        // Union coverage of the lit shapes, and the pill's own coverage (its corner next to the parent is square, and so is
+        // the one at the bottom when this level ends within its parent's height).
+        std::vector<float> cover(static_cast<size_t>(W) * H, 0.0f), panel(static_cast<size_t>(W) * H, 0.0f);
+        for (const Piece& p : pieces) {
+            int x0 = std::max(0, static_cast<int>(std::floor(p.x * S)) - 1), x1 = std::min(W - 1, static_cast<int>(std::ceil((p.x + p.w) * S)) + 1);
+            int y0 = std::max(0, static_cast<int>(std::floor(p.y * S)) - 1), y1 = std::min(H - 1, static_cast<int>(std::ceil((p.y + p.h) * S)) + 1);
+            for (int yy = y0; yy <= y1; ++yy)
+                for (int xx = x0; xx <= x1; ++xx) {
+                    float c = RoundRectCoverage(xx + 0.5f, yy + 0.5f, p.x * S, p.y * S, p.w * S, p.h * S, p.tl * S, p.tr * S,
+                        p.br * S, p.bl * S);
+                    float& dst = cover[static_cast<size_t>(yy) * W + xx];
+                    dst = std::max(dst, c);
+                }
+        }
+        for (const Fillet& f : fillets) {
+            const float fr = kR * S;
+            int x0 = std::max(0, static_cast<int>(std::floor(std::min(f.x * S, f.x * S + f.dx * fr))) - 1);
+            int x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max(f.x * S, f.x * S + f.dx * fr))) + 1);
+            int y0 = std::max(0, static_cast<int>(std::floor(std::min(f.y * S, f.y * S + f.dy * fr))) - 1);
+            int y1 = std::min(H - 1, static_cast<int>(std::ceil(std::max(f.y * S, f.y * S + f.dy * fr))) + 1);
+            for (int yy = y0; yy <= y1; ++yy)
+                for (int xx = x0; xx <= x1; ++xx) {
+                    float c = FilletCoverage(xx + 0.5f, yy + 0.5f, f.x * S, f.y * S, f.dx, f.dy, fr);
+                    float& dst = cover[static_cast<size_t>(yy) * W + xx];
+                    dst = std::max(dst, c);
+                }
+        }
+        const bool overParent = fParent && fParent->fChild.get() == this;
+        const bool squareBottom = overParent && popupY + height <= fParent->height;
+        const float panelR = std::min(kR, std::min(static_cast<float>(w), h) / 2.0f) * S;
+        const float tlR = (overParent && parentOnLeft) ? 0.0f : panelR;
+        const float trR = (overParent && !parentOnLeft) ? 0.0f : panelR;
+        const float blR = (squareBottom && parentOnLeft) ? 0.0f : panelR;
+        const float brR = (squareBottom && !parentOnLeft) ? 0.0f : panelR;
+        for (int yy = 0; yy < H; ++yy)
+            for (int xx = 0; xx < W; ++xx)
+                panel[static_cast<size_t>(yy) * W + xx] =
+                    RoundRectCoverage(xx + 0.5f, yy + 0.5f, 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H), tlR, trR, brR, blR);
 
-        // The one pixel dark outline: the union nudged a pixel each way, under the selector itself.
-        {
-            const double nudges[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-            for (const auto& n : nudges) {
-                cairo_save(cr);
-                addUnion(n[1], n[0]);
-                cairo_clip(cr);
-                cairo_set_source_rgba(cr, outline.r, outline.g, outline.b, 1);
-                cairo_paint(cr);
-                cairo_restore(cr);
+        // the lit shapes, clipped to the pill, and the raised shading across them
+        std::vector<float> lit(cover.size()), shade;
+        for (size_t k = 0; k < lit.size(); ++k) lit[k] = cover[k] * panel[k];
+        RaisedShade(lit, W, H, S, shade);
+
+        const RGBA fill = Fill(), hot = Hot();
+        cairo_surface_t* img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+        if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(img); return; }
+        uint8_t* bits = cairo_image_surface_get_data(img);
+        const int stride = cairo_image_surface_get_stride(img);
+        for (int yy = 0; yy < H; ++yy) {
+            uint32_t* row = reinterpret_cast<uint32_t*>(bits + yy * stride);
+            for (int xx = 0; xx < W; ++xx) {
+                size_t k = static_cast<size_t>(yy) * W + xx;
+                float a = panel[k];
+                if (a <= 0.0f) { row[xx] = 0; continue; }
+                float cr_ = static_cast<float>(fill.r * 255), cg = static_cast<float>(fill.g * 255), cb = static_cast<float>(fill.b * 255);
+                float l = lit[k];
+                if (l > 0.0f) {
+                    cr_ += (static_cast<float>(hot.r * 255) - cr_) * l;
+                    cg += (static_cast<float>(hot.g * 255) - cg) * l;
+                    cb += (static_cast<float>(hot.b * 255) - cb) * l;
+                }
+                float rs = shade[k];
+                if (rs > 0.0f) { cr_ += (255.0f - cr_) * rs; cg += (255.0f - cg) * rs; cb += (255.0f - cb) * rs; }
+                else if (rs < 0.0f) { cr_ *= 1.0f + rs; cg *= 1.0f + rs; cb *= 1.0f + rs; }
+                auto ch = [&](float v) { return static_cast<uint32_t>(std::lround(std::clamp(v, 0.0f, 255.0f) * a)); };
+                row[xx] = (static_cast<uint32_t>(std::lround(a * 255.0f)) << 24) | (ch(cr_) << 16) | (ch(cg) << 8) | ch(cb);
             }
         }
-        if (seamBottom > seamTop) {
-            // my parent's row runs on into this column: no line across it
-            cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
-            cairo_rectangle(cr, seamX, seamTop, 1, seamBottom - seamTop);
-            cairo_fill(cr);
-        }
+        cairo_surface_mark_dirty(img);
         cairo_save(cr);
-        if (gSettings.snakeFlat) {
-            // one flat colour
-            addUnion(0);
-            cairo_clip(cr);
-            cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
-            cairo_paint(cr);
-        } else {
-            // Union, then the same union nudged down and up a pixel: what the
-            // nudges miss at the top is the light edge, at the bottom the dark one.
-            addUnion(0);
-            cairo_clip(cr);
-            cairo_set_source_rgba(cr, light.r, light.g, light.b, 1);
-            cairo_paint(cr);
-            addUnion(1);
-            cairo_clip(cr);
-            cairo_set_source_rgba(cr, dark.r, dark.g, dark.b, 1);
-            cairo_paint(cr);
-            addUnion(-1);
-            cairo_clip(cr);
-            cairo_set_source_rgba(cr, base.r, base.g, base.b, 1);
-            cairo_paint(cr);
-        }
+        cairo_identity_matrix(cr);
+        cairo_set_source_surface(cr, img, 0, 0);
+        cairo_paint(cr);
         cairo_restore(cr);
+        cairo_surface_destroy(img);
     }
+
 
     // Row's top edge in surface coordinates (after scrolling).
     double RowTop(int row) const {
@@ -3125,12 +3198,12 @@ private:
         }
         auto child = std::make_unique<PopupMenu>(std::move(sub), this, fGrabbing, false);
         PopupAnchor a;
-        // The anchor spans the menu minus its margins on both sides, so the submenu's edge meets ours
+        // The anchor spans the menu minus the overlap at both ends, so the submenu opens that far over us
         // whichever side it opens on: opening to the right it starts at the anchor's right end, flipped
-        // to the left it ends at the anchor's left end, and each surface has its own margin.
-        a.x = static_cast<int>(2 * kTabW);
+        // to the left it ends at the anchor's left end.
+        a.x = static_cast<int>(kOverlap);
         a.y = static_cast<int>(RowTop(row));
-        a.w = width - static_cast<int>(4 * kTabW);
+        a.w = width - static_cast<int>(2 * kOverlap);
         a.h = static_cast<int>(kRowH);
         a.anchor = XDG_POSITIONER_ANCHOR_TOP_RIGHT;
         a.gravity = XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT;
@@ -3186,6 +3259,10 @@ private:
     double fScroll = 0;
     int fScrollDir = 0;       // auto-scroll while hovering an arrow strip
     guint fScrollTimer = 0;
+    // The part of my edge that the trail's vertical bar covers (so the arrows of the rows on it are not drawn: the snake
+    // passes through them).
+    struct TrailBar { bool valid = false; bool onRight = false; float top = 0, bottom = 0; };
+    TrailBar fTrailBar;
 };
 
 void MenuManager::Open(zwlr_layer_surface_v1* parentLayer, const PopupAnchor& anchor, std::vector<MenuItem> items,
