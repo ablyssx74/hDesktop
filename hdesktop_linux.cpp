@@ -104,7 +104,10 @@
 #include "viewporter-client-protocol.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
-#define APP_LOCAL_VERSION "v1.0.62"
+// The version comes from the VERSION file: Makefile.linux passes it in (-DAPP_LOCAL_VERSION="v1.0.62").
+#ifndef APP_LOCAL_VERSION
+#error "APP_LOCAL_VERSION is not set: build with Makefile.linux, which takes it from the VERSION file"
+#endif
 
 // Linux input event codes (linux/input-event-codes.h), spelled out so the
 // build doesn't depend on kernel headers being installed.

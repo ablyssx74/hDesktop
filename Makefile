@@ -5,7 +5,11 @@ CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/d
 
 # Target binary definitions
 GUI_TARGET = hdesktop
-VERSION = 1.0.62
+# The one place a release changes is the VERSION file (v1.0.63): the program, the package and the resource all take it from there.
+VERSION := $(shell tr -d 'v \r\n' < VERSION)
+V_MAJOR := $(word 1,$(subst ., ,$(VERSION)))
+V_MINOR := $(word 2,$(subst ., ,$(VERSION)))
+V_MIDDLE := $(word 3,$(subst ., ,$(VERSION)))
 PACKAGE_DIR := build/package
 REVISION = 1
 
@@ -24,6 +28,7 @@ else
 endif
 
 DEFINES := $(DEFINES)
+DEFINES += -DAPP_LOCAL_VERSION=\"v$(VERSION)\"
 
 # =========================================================================
 # FIXED SOURCE MAPPING PARAMETERS (Merged the new tray component target)
@@ -54,16 +59,20 @@ $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
 
 
 # Compile visual layout script components
-%.rsrc: %.rdef
-	rc -o $@ $<
+# (the version fields of the resource are filled in from the VERSION file)
+%.rsrc: %.rdef VERSION
+	sed -e 's/@V_MAJOR@/$(V_MAJOR)/' -e 's/@V_MINOR@/$(V_MINOR)/' -e 's/@V_MIDDLE@/$(V_MIDDLE)/' -e 's/@VERSION@/$(VERSION)/' $< > $*.version.rdef
+	rc -o $@ $*.version.rdef
+	rm -f $*.version.rdef
 
-# General object file compilation hooks
+# General object file compilation hooks (the version is compiled in: a new VERSION means a new build)
+$(GUI_OBJS): VERSION
 %.o: %.cpp
 	$(CXX) $(DEFINES) $(CXXFLAGS) -c $< -o $@
 
 # Deep system cleaning target
 clean:
-	rm -f *.o *.rsrc $(GUI_TARGET) 
+	rm -f *.o *.rsrc *.version.rdef $(GUI_TARGET) 
 	rm -f $(NAME) *.hpkg
 	rm -rf build
 

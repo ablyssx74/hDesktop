@@ -80,7 +80,10 @@
 #include <NavMenu.h>
 #include <WindowInfo.h>
 
-#define APP_LOCAL_VERSION "v1.0.58"
+// The version comes from the VERSION file: the Makefile passes it in (-DAPP_LOCAL_VERSION="v1.0.62").
+#ifndef APP_LOCAL_VERSION
+#error "APP_LOCAL_VERSION is not set: build with the Makefile, which takes it from the VERSION file"
+#endif
 
 class HaikuGlDesktopEngine;
 class HaikuAppDrawerWindow;
