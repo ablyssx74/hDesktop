@@ -104,7 +104,7 @@
 #include "viewporter-client-protocol.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
-#define APP_LOCAL_VERSION "v1.0.61"
+#define APP_LOCAL_VERSION "v1.0.62"
 
 // Linux input event codes (linux/input-event-codes.h), spelled out so the
 // build doesn't depend on kernel headers being installed.
@@ -3088,68 +3088,92 @@ private:
             }
         }
 
-        // Union coverage of the lit shapes, and the pill's own coverage (its corner next to the parent is square, and so is
-        // the one at the bottom when this level ends within its parent's height).
-        std::vector<float> cover(static_cast<size_t>(W) * H, 0.0f), panel(static_cast<size_t>(W) * H, 0.0f);
+        // The pill (its corner next to the parent is square, and so is the one at the bottom when this level ends within its
+        // parent's height) is a path; only the lit shapes and the shading round them are worked out per pixel, in a box
+        // round them (a long folder menu is a lot of pixels, and the lit row a small part of them).
+        const bool overParent = fParent && fParent->fChild.get() == this;
+        const bool squareBottom = overParent && popupY + height <= fParent->height;
+        const double tlR = (overParent && parentOnLeft) ? 0.0 : kR;
+        const double trR = (overParent && !parentOnLeft) ? 0.0 : kR;
+        const double blR = (squareBottom && parentOnLeft) ? 0.0 : kR;
+        const double brR = (squareBottom && !parentOnLeft) ? 0.0 : kR;
+        const RGBA fill = Fill(), hot = Hot();
+        cairo_save(cr);
+        CornerRectPath(cr, 0, 0, w, height, tlR, trR, brR, blR);
+        cairo_set_source_rgba(cr, fill.r, fill.g, fill.b, 1.0);
+        cairo_fill(cr);
+        cairo_restore(cr);
+
+        float fx0 = static_cast<float>(w), fy0 = h, fx1 = 0, fy1 = 0;
         for (const Piece& p : pieces) {
-            int x0 = std::max(0, static_cast<int>(std::floor(p.x * S)) - 1), x1 = std::min(W - 1, static_cast<int>(std::ceil((p.x + p.w) * S)) + 1);
-            int y0 = std::max(0, static_cast<int>(std::floor(p.y * S)) - 1), y1 = std::min(H - 1, static_cast<int>(std::ceil((p.y + p.h) * S)) + 1);
+            fx0 = std::min(fx0, p.x); fy0 = std::min(fy0, p.y);
+            fx1 = std::max(fx1, p.x + p.w); fy1 = std::max(fy1, p.y + p.h);
+        }
+        for (const Fillet& f : fillets) {
+            fx0 = std::min(fx0, std::min(f.x, f.x + f.dx * kR)); fy0 = std::min(fy0, std::min(f.y, f.y + f.dy * kR));
+            fx1 = std::max(fx1, std::max(f.x, f.x + f.dx * kR)); fy1 = std::max(fy1, std::max(f.y, f.y + f.dy * kR));
+        }
+        const int margin = 10;   // (what the shading reaches)
+        const int bx0 = std::max(0, static_cast<int>(std::floor(fx0 * S)) - margin);
+        const int by0 = std::max(0, static_cast<int>(std::floor(fy0 * S)) - margin);
+        const int bx1 = std::min(W - 1, static_cast<int>(std::ceil(fx1 * S)) + margin);
+        const int by1 = std::min(H - 1, static_cast<int>(std::ceil(fy1 * S)) + margin);
+        if (bx1 < bx0 || by1 < by0) return;
+        const int BW = bx1 - bx0 + 1, BH = by1 - by0 + 1;
+
+        std::vector<float> lit(static_cast<size_t>(BW) * BH, 0.0f), shade;
+        for (const Piece& p : pieces) {
+            int x0 = std::max(bx0, static_cast<int>(std::floor(p.x * S)) - 1), x1 = std::min(bx1, static_cast<int>(std::ceil((p.x + p.w) * S)) + 1);
+            int y0 = std::max(by0, static_cast<int>(std::floor(p.y * S)) - 1), y1 = std::min(by1, static_cast<int>(std::ceil((p.y + p.h) * S)) + 1);
             for (int yy = y0; yy <= y1; ++yy)
                 for (int xx = x0; xx <= x1; ++xx) {
                     float c = RoundRectCoverage(xx + 0.5f, yy + 0.5f, p.x * S, p.y * S, p.w * S, p.h * S, p.tl * S, p.tr * S,
                         p.br * S, p.bl * S);
-                    float& dst = cover[static_cast<size_t>(yy) * W + xx];
+                    float& dst = lit[static_cast<size_t>(yy - by0) * BW + (xx - bx0)];
                     dst = std::max(dst, c);
                 }
         }
         for (const Fillet& f : fillets) {
             const float fr = kR * S;
-            int x0 = std::max(0, static_cast<int>(std::floor(std::min(f.x * S, f.x * S + f.dx * fr))) - 1);
-            int x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max(f.x * S, f.x * S + f.dx * fr))) + 1);
-            int y0 = std::max(0, static_cast<int>(std::floor(std::min(f.y * S, f.y * S + f.dy * fr))) - 1);
-            int y1 = std::min(H - 1, static_cast<int>(std::ceil(std::max(f.y * S, f.y * S + f.dy * fr))) + 1);
+            int x0 = std::max(bx0, static_cast<int>(std::floor(std::min(f.x * S, f.x * S + f.dx * fr))) - 1);
+            int x1 = std::min(bx1, static_cast<int>(std::ceil(std::max(f.x * S, f.x * S + f.dx * fr))) + 1);
+            int y0 = std::max(by0, static_cast<int>(std::floor(std::min(f.y * S, f.y * S + f.dy * fr))) - 1);
+            int y1 = std::min(by1, static_cast<int>(std::ceil(std::max(f.y * S, f.y * S + f.dy * fr))) + 1);
             for (int yy = y0; yy <= y1; ++yy)
                 for (int xx = x0; xx <= x1; ++xx) {
                     float c = FilletCoverage(xx + 0.5f, yy + 0.5f, f.x * S, f.y * S, f.dx, f.dy, fr);
-                    float& dst = cover[static_cast<size_t>(yy) * W + xx];
+                    float& dst = lit[static_cast<size_t>(yy - by0) * BW + (xx - bx0)];
                     dst = std::max(dst, c);
                 }
         }
-        const bool overParent = fParent && fParent->fChild.get() == this;
-        const bool squareBottom = overParent && popupY + height <= fParent->height;
+        // (the lit shapes stay inside the pill's corners: its coverage is worked out only where a corner is)
         const float panelR = std::min(kR, std::min(static_cast<float>(w), h) / 2.0f) * S;
-        const float tlR = (overParent && parentOnLeft) ? 0.0f : panelR;
-        const float trR = (overParent && !parentOnLeft) ? 0.0f : panelR;
-        const float blR = (squareBottom && parentOnLeft) ? 0.0f : panelR;
-        const float brR = (squareBottom && !parentOnLeft) ? 0.0f : panelR;
-        for (int yy = 0; yy < H; ++yy)
-            for (int xx = 0; xx < W; ++xx)
-                panel[static_cast<size_t>(yy) * W + xx] =
-                    RoundRectCoverage(xx + 0.5f, yy + 0.5f, 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H), tlR, trR, brR, blR);
+        const int cornerSize = static_cast<int>(std::ceil(panelR)) + 1;
+        for (int y = 0; y < BH; ++y) {
+            const int py = by0 + y;
+            const bool cornerRow = py < cornerSize || py >= H - cornerSize;
+            if (!cornerRow) continue;
+            for (int x = 0; x < BW; ++x) {
+                const int px = bx0 + x;
+                if (px >= cornerSize && px < W - cornerSize) continue;
+                lit[static_cast<size_t>(y) * BW + x] *= RoundRectCoverage(px + 0.5f, py + 0.5f, 0.0f, 0.0f, static_cast<float>(W),
+                    static_cast<float>(H), static_cast<float>(tlR * S), static_cast<float>(trR * S), static_cast<float>(brR * S),
+                    static_cast<float>(blR * S));
+            }
+        }
+        RaisedShade(lit, BW, BH, S, shade);
 
-        // the lit shapes, clipped to the pill, and the raised shading across them
-        std::vector<float> lit(cover.size()), shade;
-        for (size_t k = 0; k < lit.size(); ++k) lit[k] = cover[k] * panel[k];
-        RaisedShade(lit, W, H, S, shade);
-
-        const RGBA fill = Fill(), hot = Hot();
-        cairo_surface_t* img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+        cairo_surface_t* img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, BW, BH);
         if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(img); return; }
         uint8_t* bits = cairo_image_surface_get_data(img);
         const int stride = cairo_image_surface_get_stride(img);
-        for (int yy = 0; yy < H; ++yy) {
+        for (int yy = 0; yy < BH; ++yy) {
             uint32_t* row = reinterpret_cast<uint32_t*>(bits + yy * stride);
-            for (int xx = 0; xx < W; ++xx) {
-                size_t k = static_cast<size_t>(yy) * W + xx;
-                float a = panel[k];
+            for (int xx = 0; xx < BW; ++xx) {
+                size_t k = static_cast<size_t>(yy) * BW + xx;
+                float a = lit[k];
                 if (a <= 0.0f) { row[xx] = 0; continue; }
-                float cr_ = static_cast<float>(fill.r * 255), cg = static_cast<float>(fill.g * 255), cb = static_cast<float>(fill.b * 255);
-                float l = lit[k];
-                if (l > 0.0f) {
-                    cr_ += (static_cast<float>(hot.r * 255) - cr_) * l;
-                    cg += (static_cast<float>(hot.g * 255) - cg) * l;
-                    cb += (static_cast<float>(hot.b * 255) - cb) * l;
-                }
+                float cr_ = static_cast<float>(hot.r * 255), cg = static_cast<float>(hot.g * 255), cb = static_cast<float>(hot.b * 255);
                 float rs = shade[k];
                 if (rs > 0.0f) { cr_ += (255.0f - cr_) * rs; cg += (255.0f - cg) * rs; cb += (255.0f - cb) * rs; }
                 else if (rs < 0.0f) { cr_ *= 1.0f + rs; cg *= 1.0f + rs; cb *= 1.0f + rs; }
@@ -3160,7 +3184,7 @@ private:
         cairo_surface_mark_dirty(img);
         cairo_save(cr);
         cairo_identity_matrix(cr);
-        cairo_set_source_surface(cr, img, 0, 0);
+        cairo_set_source_surface(cr, img, bx0, by0);
         cairo_paint(cr);
         cairo_restore(cr);
         cairo_surface_destroy(img);

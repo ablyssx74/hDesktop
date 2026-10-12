@@ -737,24 +737,52 @@ public:
 // light top edge / dark bottom edge fall out of comparing that map with copies
 // of itself shifted a pixel down and up. That keeps the shape identical no
 // matter what the native drawing API can do, and anti-aliased.
-// The Tracker menu in the pill look (see NavMenuWindow); false gives the old rectangular menu with its beveled selector.
-static const bool kNavPillLook = true;
+// The Tracker menu in the pill look (see NavMenuWindow); false gives the old rectangular menu with its beveled selector. It
+// follows the Snake Tracker preference "Snake look for Tracker and Deskbar" (SnakeLook in Tracker's settings file): it is read
+// when a menu opens, and its measures (the next block) follow it.
+static bool kNavPillLook = true;
 
 namespace NavUI {
 
 const float kRowH = 24.0f;      // a row's pill is kRowH - 2 high, with 2 pixels between pills
 const float kSepH = 9.0f;
-const float kPadX = kNavPillLook ? 12.0f : 8.0f;
+float kPadX = 12.0f;
 const float kPadY = 4.0f;
-const float kLeftColumn = kNavPillLook ? 34.0f : 30.0f;
+float kLeftColumn = 34.0f;
 const float kArrowH = 16.0f;
 const float kScreenMargin = 24.0f;
 const float kFontSize = 12.0f;
-const float kBarW = kNavPillLook ? (kRowH - 2.0f) / 2.0f : 7.0f;   // the elbow bar down a submenu's edge (pill look: as wide as the pill's radius)
+float kBarW = (kRowH - 2.0f) / 2.0f;   // the elbow bar down a submenu's edge (pill look: as wide as the pill's radius)
 const float kSelR = 4.0f;       // corner radius of a lone selector row (the old look)
 const float kPillR = (kRowH - 2.0f) / 2.0f;   // the pill look: round ends
-const float kOverlap = kNavPillLook ? 22.0f : 0.0f;   // a level opens this far over its parent, covering the parent's arrows (chevron at the right)
-const float kFilletR = kNavPillLook ? (kRowH - 2.0f) / 2.0f : 3.0f;   // the pill look: the trail's bends have the pill's radius
+float kOverlap = 22.0f;   // a level opens this far over its parent, covering the parent's arrows (chevron at the right)
+float kFilletR = (kRowH - 2.0f) / 2.0f;   // the pill look: the trail's bends have the pill's radius
+
+// Takes the look (the pill look or the old one) and the measures that go with it.
+inline void ApplyNavLook(bool pill) {
+    kNavPillLook = pill;
+    kPadX = pill ? 12.0f : 8.0f;
+    kLeftColumn = pill ? 34.0f : 30.0f;
+    kBarW = pill ? (kRowH - 2.0f) / 2.0f : 7.0f;
+    kOverlap = pill ? 22.0f : 0.0f;
+    kFilletR = pill ? (kRowH - 2.0f) / 2.0f : 3.0f;
+}
+
+// Whether Snake Tracker's look is on, from its preferences (Tracker > Windows); on when it cannot be told.
+inline bool SnakeLookPreference() {
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK || path.Append("Tracker/TrackerSettings") != B_OK) return true;
+    FILE* file = fopen(path.Path(), "r");
+    if (file == nullptr) return true;
+    bool look = true;
+    char line[256];
+    while (fgets(line, sizeof(line), file) != nullptr) {
+        if (strncmp(line, "SnakeLook ", 10) == 0)
+            look = strncmp(line + 10, "off", 3) != 0 && strncmp(line + 10, "0", 1) != 0 && strncmp(line + 10, "false", 5) != 0;
+    }
+    fclose(file);
+    return look;
+}
 const bigtime_t kSubmenuDelay = 180000;
 
 // The accent colour (Linux: Settings > Selector Color) and the shades worked out from it.
@@ -1509,7 +1537,7 @@ private:
 class NavMenuView : public BView {
 public:
     NavMenuView(BRect frame, NavMenuWindow* owner);
-    ~NavMenuView() { delete fBackdrop; }
+    ~NavMenuView() { delete fBackdrop; delete fBase; }
     virtual void Draw(BRect updateRect);
     virtual void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage);
     virtual void MouseUp(BPoint where);
@@ -1520,6 +1548,7 @@ private:
     void RenderBackdrop();
     NavMenuWindow* fOwner;
     BBitmap* fBackdrop = nullptr;
+    BBitmap* fBase = nullptr;   // the screen behind and the pill, without the lit shapes (pill look)
     bool fBackdropDirty = true;
 };
 
@@ -1544,6 +1573,9 @@ public:
         BScreen screen(this);
         BRect sf = screen.Frame();
         fScreen = sf;
+
+        // (the look is chosen once for a menu and its submenus: a level takes what its root had)
+        if (parent == nullptr) NavUI::ApplyNavLook(NavUI::SnakeLookPreference());
 
         if (kNavPillLook && parent == nullptr) {
             // Another pill popup or the dock's hover popups still on screen would be frozen into the capture: close
@@ -1598,7 +1630,7 @@ public:
         // The screen behind this level, taken now (the window is not shown yet) and only where this level will be: a
         // full-screen capture costs a second on slow graphics hardware, a menu's own size a fraction of that.
         fShotRect = fFrame & sf;
-        fShot = CaptureScreenBehind(fFrame);
+        fShot = kNavPillLook ? CaptureScreenBehind(fFrame) : nullptr;
         BMessage tickMessage('nmtk');
         fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 33000);
 
@@ -2060,8 +2092,6 @@ void NavMenuView::RenderBackdrop() {
         // Selector Color on top ----
         const Palette pal = CurrentPalette();
         const rgb_color fill = PillFill(), hot = PillHot();
-        // one solid pill for the whole level (the rows run into each other); the lit row and the trail sit on it
-        std::vector<float> pillCover(static_cast<size_t>(w) * h, 0.0f);
         const float panelR = std::min(kPillR, std::min(w, h) / 2.0f);
         // The corner next to the parent is square (it lies over the parent's panel, where a round one would show the picture
         // of the empty desktop), and so is the one at the bottom when this level ends within its parent's height.
@@ -2071,50 +2101,88 @@ void NavMenuView::RenderBackdrop() {
         const float trR = (overParent && !o->fLink.parentOnLeft) ? 0.0f : panelR;
         const float blR = (squareBottom && o->fLink.parentOnLeft) ? 0.0f : panelR;
         const float brR = (squareBottom && !o->fLink.parentOnLeft) ? 0.0f : panelR;
-        for (int yy = 0; yy < h; ++yy)
-            for (int xx = 0; xx < w; ++xx)
-                pillCover[static_cast<size_t>(yy) * w + xx] =
-                    RoundRectCoverage(xx + 0.5f, yy + 0.5f, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h),
-                        tlR, trR, brR, blR);
+        const int cornerSize = static_cast<int>(std::ceil(panelR)) + 1;
+        auto panelAt = [&](int x, int y) -> float {   // the pill's coverage: all of it away from the corners
+            if ((y >= cornerSize && y < h - cornerSize) || (x >= cornerSize && x < w - cornerSize)) return 1.0f;
+            return RoundRectCoverage(x + 0.5f, y + 0.5f, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), tlR, trR, brR, blR);
+        };
 
-        // the lit shapes, clipped to the panel, and the raised shading across them
-        std::vector<float> litShapes(static_cast<size_t>(w) * h), shadow;
-        for (size_t k = 0; k < litShapes.size(); ++k) litShapes[k] = cover[k] * pillCover[k];
-        RaisedShade(litShapes, w, h, shadow);
-
-        const BBitmap* shot = o->fShot;
-        const uint8* sbits = (shot != nullptr && shot->IsValid()) ? static_cast<const uint8*>(shot->Bits()) : nullptr;
-        const int32 sbpr = sbits != nullptr ? shot->BytesPerRow() : 0;
-        const int sw = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerWidth()) + 1 : 0;
-        const int sh = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerHeight()) + 1 : 0;
-        // (the capture starts where the level's frame meets the screen)
-        const int ox = static_cast<int>(std::floor(o->fFrame.left)) - static_cast<int>(std::floor(o->fShotRect.left));
-        const int oy = static_cast<int>(std::floor(o->fFrame.top)) - static_cast<int>(std::floor(o->fShotRect.top));
-        uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
-        const int32 bpr = fBackdrop->BytesPerRow();
-        for (int y = 0; y < h; ++y) {
-            uint8* row = bits + y * bpr;
-            for (int x = 0; x < w; ++x) {
-                float cr = pal.bg.red, cg = pal.bg.green, cb = pal.bg.blue;
-                int sx = ox + x, sy = oy + y;
-                if (sbits != nullptr && sx >= 0 && sy >= 0 && sx < sw && sy < sh) {
-                    const uint8* sp = sbits + sy * sbpr + sx * 4;
-                    cb = sp[0]; cg = sp[1]; cr = sp[2];
+        // The screen behind and the pill, without the lit shapes, is worked out once for the level (it does not change as
+        // the pointer moves); each redraw copies it and puts the lit shapes over it, only where they are.
+        if (fBase == nullptr || fBase->Bounds().IntegerWidth() + 1 != w || fBase->Bounds().IntegerHeight() + 1 != h) {
+            delete fBase;
+            fBase = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGB32);
+            const BBitmap* shot = o->fShot;
+            const uint8* sbits = (shot != nullptr && shot->IsValid()) ? static_cast<const uint8*>(shot->Bits()) : nullptr;
+            const int32 sbpr = sbits != nullptr ? shot->BytesPerRow() : 0;
+            const int sw = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerWidth()) + 1 : 0;
+            const int sh = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerHeight()) + 1 : 0;
+            // (the capture starts where the level's frame meets the screen)
+            const int ox = static_cast<int>(std::floor(o->fFrame.left)) - static_cast<int>(std::floor(o->fShotRect.left));
+            const int oy = static_cast<int>(std::floor(o->fFrame.top)) - static_cast<int>(std::floor(o->fShotRect.top));
+            uint8* bbits = static_cast<uint8*>(fBase->Bits());
+            const int32 bbpr = fBase->BytesPerRow();
+            for (int y = 0; y < h; ++y) {
+                uint8* row = bbits + y * bbpr;
+                for (int x = 0; x < w; ++x) {
+                    float cr = pal.bg.red, cg = pal.bg.green, cb = pal.bg.blue;
+                    int sx = ox + x, sy = oy + y;
+                    if (sbits != nullptr && sx >= 0 && sy >= 0 && sx < sw && sy < sh) {
+                        const uint8* sp = sbits + sy * sbpr + sx * 4;
+                        cb = sp[0]; cg = sp[1]; cr = sp[2];
+                    }
+                    const float a = panelAt(x, y);
+                    if (a > 0.0f) { cr += (fill.red - cr) * a; cg += (fill.green - cg) * a; cb += (fill.blue - cb) * a; }
+                    uint8* px = row + x * 4;
+                    px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
+                    px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
+                    px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
+                    px[3] = 255;
                 }
-                size_t k = static_cast<size_t>(y) * w + x;
-                const float panelA = pillCover[k];
-                float a = panelA;
-                if (a > 0.0f) { cr += (fill.red - cr) * a; cg += (fill.green - cg) * a; cb += (fill.blue - cb) * a; }
-                a = cover[k] * panelA;   // (the lit row and the trail stay inside the rounded corners)
-                if (a > 0.0f) { cr += (hot.red - cr) * a; cg += (hot.green - cg) * a; cb += (hot.blue - cb) * a; }
-                const float rs = shadow[k];
-                if (rs > 0.0f) { cr += (255.0f - cr) * rs; cg += (255.0f - cg) * rs; cb += (255.0f - cb) * rs; }
-                else if (rs < 0.0f) { cr *= 1.0f + rs; cg *= 1.0f + rs; cb *= 1.0f + rs; }
-                uint8* px = row + x * 4;
-                px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
-                px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
-                px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
-                px[3] = 255;
+            }
+        }
+        std::memcpy(fBackdrop->Bits(), fBase->Bits(), static_cast<size_t>(fBase->BytesPerRow()) * h);
+
+        // the box round the lit shapes, and the margin that the shading reaches
+        float fx0 = static_cast<float>(w), fy0 = static_cast<float>(h), fx1 = 0, fy1 = 0;
+        for (const Piece& p : pieces) {
+            fx0 = std::min(fx0, p.x); fy0 = std::min(fy0, p.y);
+            fx1 = std::max(fx1, p.x + p.w); fy1 = std::max(fy1, p.y + p.h);
+        }
+        for (const Fillet& f : fillets) {
+            fx0 = std::min(fx0, std::min(f.x, f.x + f.dx * kFilletR)); fy0 = std::min(fy0, std::min(f.y, f.y + f.dy * kFilletR));
+            fx1 = std::max(fx1, std::max(f.x, f.x + f.dx * kFilletR)); fy1 = std::max(fy1, std::max(f.y, f.y + f.dy * kFilletR));
+        }
+        const int margin = 10;
+        const int bx0 = std::max(0, static_cast<int>(std::floor(fx0)) - margin), by0 = std::max(0, static_cast<int>(std::floor(fy0)) - margin);
+        const int bx1 = std::min(w - 1, static_cast<int>(std::ceil(fx1)) + margin), by1 = std::min(h - 1, static_cast<int>(std::ceil(fy1)) + margin);
+        if (bx1 >= bx0 && by1 >= by0) {
+            const int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+            std::vector<float> litShapes(static_cast<size_t>(bw) * bh), shadow;
+            for (int y = 0; y < bh; ++y)
+                for (int x = 0; x < bw; ++x) {
+                    const size_t k = static_cast<size_t>(by0 + y) * w + (bx0 + x);
+                    litShapes[static_cast<size_t>(y) * bw + x] = cover[k] * panelAt(bx0 + x, by0 + y);   // (stay inside the corners)
+                }
+            RaisedShade(litShapes, bw, bh, shadow);
+            uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
+            const int32 bpr = fBackdrop->BytesPerRow();
+            for (int y = 0; y < bh; ++y) {
+                uint8* row = bits + (by0 + y) * bpr + bx0 * 4;
+                for (int x = 0; x < bw; ++x) {
+                    const size_t k = static_cast<size_t>(y) * bw + x;
+                    const float a = litShapes[k];
+                    if (a <= 0.0f) continue;
+                    uint8* px = row + x * 4;
+                    float cb = px[0], cg = px[1], cr = px[2];
+                    cr += (hot.red - cr) * a; cg += (hot.green - cg) * a; cb += (hot.blue - cb) * a;
+                    const float rs = shadow[k];
+                    if (rs > 0.0f) { cr += (255.0f - cr) * rs; cg += (255.0f - cg) * rs; cb += (255.0f - cb) * rs; }
+                    else if (rs < 0.0f) { cr *= 1.0f + rs; cg *= 1.0f + rs; cb *= 1.0f + rs; }
+                    px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
+                    px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
+                    px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
+                }
             }
         }
         fBackdropDirty = false;
