@@ -1386,9 +1386,8 @@ static NavMenuState gNavMenu;
 
 // The pill look of the Tracker menu: each level is a window, and a window is a rectangle, so the pills' round ends and
 // the gaps between them would show square corners. Like the dock's pill popups, the screen behind is captured just
-// before the menu opens and each window draws its part of that as its background. One capture of the whole screen is
-// taken for the whole chain (no menu window is on screen then) and shared; the last level to close deletes it.
-static BBitmap* gNavScreenShot = nullptr;
+// before it opens and each window draws that as its background. Each level captures only the part of the screen it will
+// cover (a whole-screen capture takes a second on slow graphics hardware), and deletes it when it closes.
 
 // The selected row's bulge: a small borderless window just outside the menu's outer edge, so the
 // row seems to stick out of the menu. A window can't have see-through corners, so the tab is square.
@@ -1559,9 +1558,6 @@ public:
                 snooze(5000);
             }
             if (waited) snooze(30000);
-            BAutolock lock(gNavMenu.lock);
-            delete gNavScreenShot;
-            gNavScreenShot = CaptureScreenBehind(sf);
         }
 
         // Width: widest label, clamped like the Linux build's menus.
@@ -1599,6 +1595,10 @@ public:
         fView = new NavMenuView(Bounds(), this);
         AddChild(fView);
         fFrame = BRect(left, top, left + fWidth - 1, top + fHeight - 1);
+        // The screen behind this level, taken now (the window is not shown yet) and only where this level will be: a
+        // full-screen capture costs a second on slow graphics hardware, a menu's own size a fraction of that.
+        fShotRect = fFrame & sf;
+        fShot = CaptureScreenBehind(fFrame);
         BMessage tickMessage('nmtk');
         fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 33000);
 
@@ -1624,10 +1624,9 @@ public:
             if (gNavMenu.windows.empty() && gNavMenu.anyOpen) {
                 gNavMenu.anyOpen = false;
                 closed = gNavMenu.onClosed;
-                delete gNavScreenShot;
-                gNavScreenShot = nullptr;
             }
         }
+        delete fShot;
         if (closed) closed();
     }
 
@@ -1899,6 +1898,8 @@ private:
     BMessageRunner* fTicker;
     BMessenger fChild;
     BRect fFrame, fScreen;
+    BRect fShotRect;   // where the screen behind this level was captured (fShot), clipped to the screen
+    BBitmap* fShot = nullptr;
     bigtime_t fSubmenuDue = 0;
     uint32 fPrevButtons = 1;   // nonzero until a release has been seen, so the opening click can't dismiss
 };
@@ -2081,12 +2082,14 @@ void NavMenuView::RenderBackdrop() {
         for (size_t k = 0; k < litShapes.size(); ++k) litShapes[k] = cover[k] * pillCover[k];
         RaisedShade(litShapes, w, h, shadow);
 
-        const BBitmap* shot = gNavScreenShot;
+        const BBitmap* shot = o->fShot;
         const uint8* sbits = (shot != nullptr && shot->IsValid()) ? static_cast<const uint8*>(shot->Bits()) : nullptr;
         const int32 sbpr = sbits != nullptr ? shot->BytesPerRow() : 0;
         const int sw = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerWidth()) + 1 : 0;
         const int sh = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerHeight()) + 1 : 0;
-        const int ox = static_cast<int>(std::floor(o->fFrame.left)), oy = static_cast<int>(std::floor(o->fFrame.top));
+        // (the capture starts where the level's frame meets the screen)
+        const int ox = static_cast<int>(std::floor(o->fFrame.left)) - static_cast<int>(std::floor(o->fShotRect.left));
+        const int oy = static_cast<int>(std::floor(o->fFrame.top)) - static_cast<int>(std::floor(o->fShotRect.top));
         uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
         const int32 bpr = fBackdrop->BytesPerRow();
         for (int y = 0; y < h; ++y) {
