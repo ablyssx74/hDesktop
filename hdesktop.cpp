@@ -144,6 +144,10 @@ rgb_color gNavAccent = {70, 110, 200, 255};
 // Settings > Use System Colors (Selector Color): the dock's menus take Haiku's own menu colours (Appearance preferences)
 // in place of the Selector Color. Settings > Drawer Color: the drawer's panel colour (until it is set, a light tint of
 // the Selector Color), and its own Use System Colors.
+// Settings > Rounded Edges: the popups' corners (the title overlays, the Tracker menu, the menus the dock opens) and the dock's
+// small tiles (the CPU graph, the workspace switcher, the clock's capsule) are rounded, which for a window means a capture of the
+// screen behind it. Off, they are square.
+bool gNavRoundedEdges = true;
 bool gNavUseSystemColors = false;
 bool gDrawerUseSystemColors = false;
 bool gDrawerColorAuto = true;
@@ -264,6 +268,7 @@ enum {
     MSG_DRAWER_COLOR_OPEN = 'drco',
     MSG_DRAWER_COLOR_UPDATED = 'drcu',
     MSG_NAV_SYSTEM_COLORS_TOGGLED = 'nvsc',
+    MSG_ROUNDED_EDGES_TOGGLED = 'rdge',
     MSG_DRAWER_SYSTEM_COLORS_TOGGLED = 'drsc',   // sent to the settings view so its swatch repaints
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_CLOCK_TOGGLED = 'cktg',
@@ -994,6 +999,53 @@ static float TitleColorLuminance(rgb_color c) {
     return (0.299f * c.red + 0.587f * c.green + 0.114f * c.blue);
 }
 
+// A raised pill (or rounded square), lit from the top left, as a bitmap with its own alpha: a smooth round bar worked out from the
+// shape's exact distance to its edge (so it has no bands), with a thin darker rim that gives the edge a clean line.
+static BBitmap* BuildRaisedPillBitmap(int w, int h, int radius, rgb_color color) {
+    BBitmap* bitmap = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGBA32);
+    const float fw = static_cast<float>(w), fh = static_cast<float>(h), rad = static_cast<float>(radius);
+    auto inside = [&](float px, float py) -> float {
+        const float hx = fw / 2.0f, hy = fh / 2.0f;
+        const float qx = std::fabs(px - hx) - hx + rad, qy = std::fabs(py - hy) - hy + rad;
+        const float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
+        return -(std::min(std::max(qx, qy), 0.0f) + outside - rad);
+    };
+    const float crown = std::max(2.0f, std::min(6.0f, fh * 0.22f));
+    auto height = [&](float px, float py) -> float {
+        const float t = std::min(1.0f, std::max(0.0f, inside(px, py)) / crown);
+        return crown * std::sqrt(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
+    };
+    const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
+    const float ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+    uint8* bits = static_cast<uint8*>(bitmap->Bits());
+    const int32 bpr = bitmap->BytesPerRow();
+    for (int y = 0; y < h; ++y) {
+        uint8* row = bits + y * bpr;
+        for (int x = 0; x < w; ++x) {
+            const float px = x + 0.5f, py = y + 0.5f;
+            const float di = inside(px, py);
+            const float cover = NavUI::Clamp01(0.5f + di);
+            float rs = 0.0f;
+            if (cover > 0.0f) {
+                const float gx = (height(px + 1.0f, py) - height(px - 1.0f, py)) * 0.5f;
+                const float gy = (height(px, py + 1.0f) - height(px, py - 1.0f)) * 0.5f;
+                const float nn = std::sqrt(gx * gx + gy * gy + 1.0f);
+                rs = ((-gx * lx - gy * ly + lz) / (nn * ln) - lz / ln) * 0.6f;
+            }
+            float r = color.red, g = color.green, b = color.blue;
+            if (rs > 0.0f) { r += (255.0f - r) * rs; g += (255.0f - g) * rs; b += (255.0f - b) * rs; }
+            else if (rs < 0.0f) { r *= 1.0f + rs; g *= 1.0f + rs; b *= 1.0f + rs; }
+            const float rim = 1.0f - 0.2f * NavUI::Clamp01(1.5f - di);
+            r *= rim; g *= rim; b *= rim;
+            row[x * 4 + 0] = static_cast<uint8>(std::lround(std::min(255.0f, b)));
+            row[x * 4 + 1] = static_cast<uint8>(std::lround(std::min(255.0f, g)));
+            row[x * 4 + 2] = static_cast<uint8>(std::lround(std::min(255.0f, r)));
+            row[x * 4 + 3] = static_cast<uint8>(std::lround(cover * 255.0f));
+        }
+    }
+    return bitmap;
+}
+
 // =========================================================================
 // Popup menus in the pill look of the title popup: each choice is a pill, in the Selector Color's light tint (the
 // hovered one in the Selector Color itself), over a capture of the screen behind it so the corners look transparent.
@@ -1042,13 +1094,18 @@ class PillPopupView : public BView {
     int32 fHovered;
     BBitmap* fBackdrop;
     PillDoneFn fOnDone;
+    std::map<uint64_t, BBitmap*> fLit;   // the lit row's raised pill, for each size
 public:
+    static constexpr float kPanelR = 10.0f;   // the panel's round corners (with Rounded Edges)
     PillPopupView(BRect frame, const std::vector<PillRow>& rows, const std::vector<BRect>& rects, PillDoneFn onDone)
         : BView(frame, "PillPopupView", B_FOLLOW_ALL, B_WILL_DRAW),
           fRows(rows), fRects(rects), fHovered(-1), fBackdrop(nullptr), fOnDone(onDone) {
         SetViewColor(B_TRANSPARENT_COLOR);
     }
-    virtual ~PillPopupView() { delete fBackdrop; }
+    virtual ~PillPopupView() {
+        delete fBackdrop;
+        for (std::map<uint64_t, BBitmap*>::iterator it = fLit.begin(); it != fLit.end(); ++it) delete it->second;
+    }
 
     void SetBackdrop(BBitmap* bitmap) { delete fBackdrop; fBackdrop = bitmap; }
 
@@ -1073,14 +1130,22 @@ public:
         if (row != fHovered) { fHovered = row; Invalidate(); }
     }
 
+    // One panel in the pill's color (like the Deskbar's menus), the lit row a raised pill in the Selector Color, grooves for the
+    // separators. With Rounded Edges the panel's corners are round, over a capture of the screen behind; off, the window is the panel.
     virtual void Draw(BRect) {
         BRect bounds = Bounds();
-        const NavUI::Palette pal = NavUI::CurrentPalette();
+        const rgb_color fill = NavUI::PillFill(), hot = NavUI::PillHot();
+        const bool rounded = gNavRoundedEdges && fBackdrop != nullptr && fBackdrop->IsValid();
         SetDrawingMode(B_OP_COPY);
-        if (fBackdrop != nullptr && fBackdrop->IsValid()) {
+        if (rounded) {
             DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+            SetDrawingMode(B_OP_ALPHA);
+            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            SetHighColor(fill);
+            FillRoundRect(bounds, kPanelR, kPanelR);
+            SetDrawingMode(B_OP_COPY);
         } else {
-            SetHighColor(pal.bg);
+            SetHighColor(fill);
             FillRect(bounds);
         }
 
@@ -1090,42 +1155,45 @@ public:
         GetFont(&font);
         font_height fh;
         font.GetHeight(&fh);
-
-        const bool darkTheme = TitleColorLuminance(pal.bg) < 128.0f;
-        const rgb_color white = rgb_color{255, 255, 255, 255};
-        (void)darkTheme; (void)white;
-        const rgb_color pillColor = NavUI::PillFill();
-        const rgb_color hotColor = NavUI::PillHot();
-        const rgb_color dark = rgb_color{20, 22, 28, 255};
+        const rgb_color dark = rgb_color{20, 22, 28, 255}, white = rgb_color{255, 255, 255, 255};
 
         for (size_t i = 0; i < fRows.size(); ++i) {
-            if (fRows[i].separator) continue;      // just a gap between the pills
             BRect row = fRects[i];
-            const bool hot = (static_cast<int32>(i) == fHovered);
-            rgb_color fill = hot ? hotColor : pillColor;
-            if (!fRows[i].enabled) fill = NavUI::MixColor(fill, pal.bg, 0.55f);   // a muted pill: not available
-
-            SetDrawingMode(B_OP_ALPHA);
-            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-            SetHighColor(fill);
-            FillRoundRect(row, row.Height() / 2.0f, row.Height() / 2.0f);
-            SetDrawingMode(B_OP_COPY);
-
+            if (fRows[i].separator) {
+                const float y = floorf((row.top + row.bottom) / 2.0f);
+                SetHighColor(NavUI::MixColor(fill, rgb_color{0, 0, 0, 255}, 0.22f));
+                StrokeLine(BPoint(row.left + 6.0f, y), BPoint(row.right - 6.0f, y));
+                SetHighColor(NavUI::MixColor(fill, rgb_color{255, 255, 255, 255}, 0.55f));
+                StrokeLine(BPoint(row.left + 6.0f, y + 1.0f), BPoint(row.right - 6.0f, y + 1.0f));
+                continue;
+            }
+            const bool lit = (static_cast<int32>(i) == fHovered);
             rgb_color text = TitleColorLuminance(fill) > 140.0f ? dark : white;
-            if (!fRows[i].enabled) text = NavUI::MixColor(text, pillColor, 0.45f);
+            if (lit) {
+                const int w = static_cast<int>(row.Width()) + 1, h = static_cast<int>(row.Height()) + 1;
+                const int radius = std::min(w, h) / 2;
+                const uint64_t key = (static_cast<uint64_t>(w & 0xFFF) << 44) | (static_cast<uint64_t>(h & 0xFFF) << 32)
+                    | (static_cast<uint64_t>(hot.red) << 16) | (static_cast<uint64_t>(hot.green) << 8) | hot.blue;
+                BBitmap*& bitmap = fLit[key];
+                if (bitmap == nullptr) bitmap = BuildRaisedPillBitmap(w, h, radius, hot);
+                SetDrawingMode(B_OP_ALPHA);
+                SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+                DrawBitmap(bitmap, row.LeftTop());
+                SetDrawingMode(B_OP_COPY);
+                text = TitleColorLuminance(hot) > 140.0f ? dark : white;
+            }
+            if (!fRows[i].enabled) text = NavUI::MixColor(text, fill, 0.5f);
             SetHighColor(text);
 
             BString label = fRows[i].label;
-            font.TruncateString(&label, B_TRUNCATE_END, row.Width() - row.Height());
-            float textLeft = (row.Width() - font.StringWidth(label.String())) / 2.0f;
-            if (textLeft < 4.0f) textLeft = 4.0f;
+            font.TruncateString(&label, B_TRUNCATE_END, row.Width() - 28.0f);
             DrawString(label.String(),
-                BPoint(textLeft, row.top + fh.ascent + ((row.Height() + 1.0f - (fh.ascent + fh.descent)) / 2.0f)));
+                BPoint(floorf(row.left + 14.0f), floorf(row.top + fh.ascent + ((row.Height() + 1.0f - (fh.ascent + fh.descent)) / 2.0f))));
 
-            if (fRows[i].marked) {                 // the current choice of a dropdown: a dot in the left end
-                float d = 5.0f;
-                float cx = row.left + row.Height() / 2.0f;
-                float cy = row.top + row.Height() / 2.0f;
+            if (fRows[i].marked) {                 // the current choice of a dropdown: a dot in the left margin
+                const float d = 5.0f;
+                const float cx = row.left + 7.0f;
+                const float cy = row.top + row.Height() / 2.0f;
                 FillEllipse(BRect(cx - d / 2.0f, cy - d / 2.0f, cx + d / 2.0f, cy + d / 2.0f));
             }
         }
@@ -1168,23 +1236,25 @@ public:
         font.GetHeight(&fh);
         float rowHeight = fh.ascent + fh.descent + fh.leading + 8.0f;
 
+        // one panel: the rows inside it with a little margin, no gaps between them
+        const float pad = 5.0f;
         float widest = 0.0f;
         for (size_t i = 0; i < rows.size(); ++i)
             if (!rows[i].separator) widest = std::max(widest, font.StringWidth(rows[i].label.String()));
-        float w = std::max(std::max(100.0f, minWidth), widest + rowHeight + 4.0f);
+        float w = std::max(std::max(100.0f, minWidth), widest + 28.0f + 2.0f * pad);
 
         std::vector<BRect> rects;
-        float y = 0.0f;
+        float y = pad;
         for (size_t i = 0; i < rows.size(); ++i) {
             if (rows[i].separator) {
-                rects.push_back(BRect(0, y, w, y + 2.0f));
-                y += 2.0f + kTitlePillGap;
+                rects.push_back(BRect(pad, y, w - pad, y + 8.0f));
+                y += 9.0f;
             } else {
-                rects.push_back(BRect(0, y, w, y + rowHeight - 1.0f));
-                y += rowHeight + kTitlePillGap;
+                rects.push_back(BRect(pad, y, w - pad, y + rowHeight - 1.0f));
+                y += rowHeight;
             }
         }
-        float h = std::max(rowHeight, y - kTitlePillGap);
+        float h = std::max(rowHeight, y + pad);
 
         // where is the top left corner, kept on the screen
         BScreen screen(B_MAIN_SCREEN_ID);
@@ -1196,7 +1266,7 @@ public:
 
         fView = new PillPopupView(Bounds(), rows, rects, onDone);
         AddChild(fView);
-        fView->SetBackdrop(CaptureScreenBehind(Frame()));   // the screen behind, taken now: not shown yet
+        if (gNavRoundedEdges) fView->SetBackdrop(CaptureScreenBehind(Frame()));   // the screen behind, taken now: not shown yet
         {
             BAutolock lock(gPillRegistryLock);
             gActivePillMessenger = BMessenger(this);
@@ -1670,7 +1740,7 @@ public:
         // The screen behind this level, taken now (the window is not shown yet) and only where this level will be: a
         // full-screen capture costs a second on slow graphics hardware, a menu's own size a fraction of that.
         fShotRect = fFrame & sf;
-        fShot = kNavPillLook ? CaptureScreenBehind(fFrame) : nullptr;
+        fShot = (kNavPillLook && gNavRoundedEdges) ? CaptureScreenBehind(fFrame) : nullptr;
         BMessage tickMessage('nmtk');
         fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 33000);
 
@@ -2132,7 +2202,7 @@ void NavMenuView::RenderBackdrop() {
         // Selector Color on top ----
         const Palette pal = CurrentPalette();
         const rgb_color fill = PillFill(), hot = PillHot();
-        const float panelR = std::min(kPillR, std::min(w, h) / 2.0f);
+        const float panelR = gNavRoundedEdges ? std::min(kPillR, std::min(w, h) / 2.0f) : 0.0f;   // (square: no round corners)
         // The corner next to the parent is square (it lies over the parent's panel, where a round one would show the picture
         // of the empty desktop), and so is the one at the bottom when this level ends within its parent's height.
         const bool overParent = o->fLink.valid && kOverlap > 0.0f;
@@ -3351,8 +3421,8 @@ public:
 // backing tray grow only as far as the controls actually showing.
 //   off: just the toggle row   on: + size slider   on + Advanced: + FPS slider
 static float ConfigContentBottom() {
-    if (!fShowWindowThumbnails) return 662.0f;
-    return fShowAdvancedOptions ? 812.0f : 760.0f;
+    if (!fShowWindowThumbnails) return 672.0f;
+    return fShowAdvancedOptions ? 822.0f : 770.0f;
 }
 static float ConfigWindowHeight() { return ConfigContentBottom() + 82.0f; }
 
@@ -3532,6 +3602,7 @@ private:
     BCheckBox* fTextOverlaysSDLCheckbox; // SDL mode -- mutually exclusive with the above
     BCheckBox* fSnakeTrailCheckbox;
     BCheckBox* fSnakeFlatCheckbox;
+    BCheckBox* fRoundedEdgesCheckbox;
     BButton*   fSelectorColorButton;
     BButton*   fDrawerColorButton;
     BCheckBox* fNavSystemColorsCheckbox;
@@ -3644,29 +3715,35 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         AddChild(fSnakeTrailCheckbox);
         // "Flat": the selector without its light top / dark bottom edge. Beside the trail checkbox
         // so nothing below has to be reflowed.
-        BRect snakeFlatRect(222.0f, 202.0f, 242.0f, 218.0f);
+        BRect snakeFlatRect(290.0f, 202.0f, 310.0f, 218.0f);
         fSnakeFlatCheckbox = new BCheckBox(snakeFlatRect, "snake_flat_cb", nullptr,
             new BMessage(MSG_SNAKEFLAT_TOGGLED));
         fSnakeFlatCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fSnakeFlatCheckbox->SetValue(gNavSnakeFlat ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSnakeFlatCheckbox);
+        // "Rounded Edges": round corners on the popups and the dock's small tiles (off: square), in the row's free right half
+        fRoundedEdgesCheckbox = new BCheckBox(BRect(35.0f, 222.0f, 55.0f, 238.0f), "rounded_edges_cb", nullptr,
+            new BMessage(MSG_ROUNDED_EDGES_TOGGLED));
+        fRoundedEdgesCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fRoundedEdgesCheckbox->SetValue(gNavRoundedEdges ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fRoundedEdgesCheckbox);
         // The two colours, a row each: a swatch that shows the colour in use (it follows the colour as it is chosen), the button
         // that opens the colour control, and Use System Colors (Haiku's own menu colours instead).
-        fDrawerColorButton = new BButton(BRect(76.0f, 244.0f, 216.0f, 268.0f), "drawer_color_btn",
+        fDrawerColorButton = new BButton(BRect(76.0f, 264.0f, 216.0f, 288.0f), "drawer_color_btn",
             "Drawer Color" B_UTF8_ELLIPSIS, new BMessage(MSG_DRAWER_COLOR_OPEN));
         fDrawerColorButton->SetEnabled(!gDrawerUseSystemColors);
         AddChild(fDrawerColorButton);
-        fDrawerSystemColorsCheckbox = new BCheckBox(BRect(230.0f, 248.0f, 250.0f, 264.0f), "drawer_system_cb", nullptr,
+        fDrawerSystemColorsCheckbox = new BCheckBox(BRect(230.0f, 268.0f, 250.0f, 284.0f), "drawer_system_cb", nullptr,
             new BMessage(MSG_DRAWER_SYSTEM_COLORS_TOGGLED));
         fDrawerSystemColorsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fDrawerSystemColorsCheckbox->SetValue(gDrawerUseSystemColors ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fDrawerSystemColorsCheckbox);
 
-        fSelectorColorButton = new BButton(BRect(76.0f, 280.0f, 216.0f, 304.0f), "selector_color_btn",
+        fSelectorColorButton = new BButton(BRect(76.0f, 300.0f, 216.0f, 324.0f), "selector_color_btn",
             "Selector Color" B_UTF8_ELLIPSIS, new BMessage(MSG_SELECTOR_COLOR_OPEN));
         fSelectorColorButton->SetEnabled(!gNavUseSystemColors);
         AddChild(fSelectorColorButton);
-        fNavSystemColorsCheckbox = new BCheckBox(BRect(230.0f, 284.0f, 250.0f, 300.0f), "nav_system_cb", nullptr,
+        fNavSystemColorsCheckbox = new BCheckBox(BRect(230.0f, 304.0f, 250.0f, 320.0f), "nav_system_cb", nullptr,
             new BMessage(MSG_NAV_SYSTEM_COLORS_TOGGLED));
         fNavSystemColorsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fNavSystemColorsCheckbox->SetValue(gNavUseSystemColors ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -3675,17 +3752,20 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // The [?] marks (their explanations show as tool tips)
         BFont plain12(be_plain_font);
         plain12.SetSize(12.0f);
-        AddChild(new HelpMark(BPoint(249.0f + plain12.StringWidth("Flat") + 6.0f, 202.0f),
+        AddChild(new HelpMark(BPoint(317.0f + plain12.StringWidth("Flat") + 6.0f, 202.0f),
             "The selector is drawn flat: one color, without its light top edge and dark bottom edge."));
-        AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 248.0f),
+        AddChild(new HelpMark(BPoint(62.0f + plain12.StringWidth("Rounded Edges") + 6.0f, 222.0f),
+            "Round corners on the popups the dock opens (the Tracker menu, the title list, the tray and other menus) and on its small tiles\n"
+            "(the CPU graph, the workspace switcher, the clock). Off, they are square."));
+        AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 268.0f),
             "The drawer takes the colors of Haiku's Appearance preferences\n(the menu background and the menu selection) in place of "
             "Drawer Color."));
-        AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 284.0f),
+        AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 304.0f),
             "The dock's menus take the colors of Haiku's Appearance preferences\n(the menu background and the menu selection) in "
             "place of Selector Color."));
 
         // Row 6: Window Preview Thumbnails
-        BRect thumbnailsCheckboxRect(35.0f, 627.0f, 55.0f, 643.0f);
+        BRect thumbnailsCheckboxRect(35.0f, 637.0f, 55.0f, 653.0f);
         fThumbnailsCheckbox = new BCheckBox(thumbnailsCheckboxRect, "thumbnails_cb", nullptr,
             new BMessage(MSG_THUMBNAILS_TOGGLED));
         fThumbnailsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -3697,7 +3777,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // feature itself (Row 6 above) is enabled. Reserves its row either
         // way (like every other conditional row here) so nothing below has
         // to reflow when it's toggled.
-        BRect advancedCheckboxRect(35.0f, 735.0f, 55.0f, 751.0f);
+        BRect advancedCheckboxRect(35.0f, 745.0f, 55.0f, 761.0f);
         fAdvancedCheckbox = new BCheckBox(advancedCheckboxRect, "advanced_cb", nullptr,
             new BMessage(MSG_ADVANCED_TOGGLED));
         fAdvancedCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -3710,7 +3790,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7b: Thumbnail Preview FPS Slider -- only meaningful, and only
         // shown, while both Row 6 and Row 7 above are checked. Reserves its
         // row regardless, same as every other conditional row here.
-        BRect thumbnailFpsSliderRect(35.0f, 755.0f, frame.Width() - 35.0f, 799.0f);
+        BRect thumbnailFpsSliderRect(35.0f, 765.0f, frame.Width() - 35.0f, 809.0f);
         BString thumbnailFpsLabel;
         thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
         fThumbnailFpsSlider = new CompactSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
@@ -3739,7 +3819,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7c: Thumbnail Size Slider -- shown whenever the thumbnails
         // themselves are enabled (no Advanced needed). Same reserved-row and
         // IsHidden()-guarded Show()/Hide() convention as the FPS slider above.
-        BRect thumbnailSizeSliderRect(35.0f, 663.0f, frame.Width() - 35.0f, 707.0f);
+        BRect thumbnailSizeSliderRect(35.0f, 673.0f, frame.Width() - 35.0f, 717.0f);
         BString thumbnailSizeLabel;
         thumbnailSizeLabel << "Thumbnail Size: " << fThumbnailSize << " px";
         fThumbnailSizeSlider = new CompactSlider(thumbnailSizeSliderRect, "thumbnail_size_slider", thumbnailSizeLabel.String(),
@@ -3764,7 +3844,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         dockLocationPopup->AddItem(dockBottomItem);
 
         // Dock Location Dropdown (Label drawn manually in Draw())
-        BRect dockLocationMenuRect(145.0f, 310.0f, frame.Width() - 35.0f, 335.0f);
+        BRect dockLocationMenuRect(145.0f, 330.0f, frame.Width() - 35.0f, 355.0f);
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
@@ -3799,7 +3879,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 342.0f, frame.Width() - 35.0f, 367.0f);
+        BRect effectsMenuRect(145.0f, 362.0f, frame.Width() - 35.0f, 387.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -3834,7 +3914,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 375.0f, frame.Width() - 35.0f, 400.0f);
+        BRect closeEffectsMenuRect(145.0f, 395.0f, frame.Width() - 35.0f, 420.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
@@ -3842,7 +3922,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         AddChild(new PillMenuFieldOverlay(fCloseEffectsMenuField));
 
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 408.0f, frame.Width() - 35.0f, 452.0f);
+        BRect speedSliderRect(35.0f, 428.0f, frame.Width() - 35.0f, 472.0f);
         fEffectSpeedSlider = new CompactSlider(speedSliderRect, "speed_slider", "Effect Speed",
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -3852,7 +3932,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 458.0f, frame.Width() - 35.0f, 502.0f);
+        BRect sliderRect(35.0f, 478.0f, frame.Width() - 35.0f, 522.0f);
         fAlphaSlider = new CompactSlider(sliderRect, "alpha_slider", "Dock Transparency",
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -3862,7 +3942,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 508.0f, frame.Width() - 35.0f, 552.0f);
+        BRect sizeSliderRect(35.0f, 528.0f, frame.Width() - 35.0f, 572.0f);
         fIconSizeSlider = new CompactSlider(sizeSliderRect, "size_slider", "Icon Size",
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -3873,7 +3953,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
         // Icon Zoom Size Slider Row -- peak hover magnification, in percent
         // (100 = no zoom, 180 = the original fixed zoom).
-        BRect zoomSliderRect(35.0f, 558.0f, frame.Width() - 35.0f, 602.0f);
+        BRect zoomSliderRect(35.0f, 578.0f, frame.Width() - 35.0f, 622.0f);
         fIconZoomSlider = new CompactSlider(zoomSliderRect, "zoom_slider", "Icon Zoom Size",
             new BMessage(MSG_ICON_ZOOM_CHANGED), 100, 250);
         fIconZoomSlider->SetHighColor(rgb_color{220, 225, 235, 255});
@@ -3973,10 +4053,11 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
         DrawString("Snake Trail (Tracker menu)", BPoint(62.0f, 214.0f));
-        DrawString("Flat", BPoint(249.0f, 214.0f));
+        DrawString("Flat", BPoint(317.0f, 214.0f));
+        DrawString("Rounded Edges", BPoint(62.0f, 234.0f));
         {   // the two colours in use, beside their buttons (they follow a colour as it is chosen)
             const rgb_color rim = rgb_color{110, 115, 130, 255};
-            BRect drawerSwatch(30.0f, 240.0f, 62.0f, 268.0f), selectorSwatch(30.0f, 276.0f, 62.0f, 304.0f);
+            BRect drawerSwatch(30.0f, 260.0f, 62.0f, 288.0f), selectorSwatch(30.0f, 296.0f, 62.0f, 324.0f);
             SetDrawingMode(B_OP_COPY);
             SetHighColor(DrawerFill());
             FillRoundRect(drawerSwatch, 5.0f, 5.0f);
@@ -3987,10 +4068,10 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             SetHighColor(rim);
             StrokeRoundRect(selectorSwatch, 5.0f, 5.0f);
             SetHighColor(rgb_color{220, 225, 235, 255});
-            DrawString("Use System Colors", BPoint(256.0f, 260.0f));
-            DrawString("Use System Colors", BPoint(256.0f, 296.0f));
+            DrawString("Use System Colors", BPoint(256.0f, 280.0f));
+            DrawString("Use System Colors", BPoint(256.0f, 316.0f));
         }
-        DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 639.0f));
+        DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 649.0f));
 
         // Smaller, italicized note under the Thumbnails checkbox -- the row
         // below it (Row 7, Advanced Thumbnail Settings) was shifted down
@@ -4001,7 +4082,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         SetFont(&expFont);
         SetHighColor(rgb_color{140, 150, 170, 255});
         DrawString("(Experimental) app_server compositing not required but some features are limited.",
-            BPoint(62.0f, 653.0f));
+            BPoint(62.0f, 663.0f));
 
         // Reset back to plain before the rest of this method's labels --
         // otherwise every DrawString() below would inherit the 9pt italic.
@@ -4012,16 +4093,16 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Kept in sync with the checkbox's own Show()/Hide() state -- only
         // meaningful while Window Preview Thumbnails above is enabled.
         if (fShowWindowThumbnails) {
-            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 747.0f));
+            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 757.0f));
         }
-        DrawString("Dock Location:", BPoint(35.0f, 327.0f));
+        DrawString("Dock Location:", BPoint(35.0f, 347.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 359.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 392.0f));
+        DrawString("Open App Effects:", BPoint(35.0f, 379.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 412.0f));
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -4122,6 +4203,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fWorkspaceSwitcherCheckbox->SetTarget(this);
         fSnakeTrailCheckbox->SetTarget(this);
         fSnakeFlatCheckbox->SetTarget(this);
+        fRoundedEdgesCheckbox->SetTarget(this);
         fSelectorColorButton->SetTarget(this);
         fDrawerColorButton->SetTarget(this);
         fNavSystemColorsCheckbox->SetTarget(this);
@@ -4261,6 +4343,12 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 break;
             }
 
+            case MSG_ROUNDED_EDGES_TOGGLED: {
+                gNavRoundedEdges = (fRoundedEdgesCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                break;
+            }
+
             case MSG_SNAKETRAIL_TOGGLED: {
                 gNavSnakeTrail = (fSnakeTrailCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
@@ -4288,7 +4376,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                         gDrawerColorWindow->Unlock();
                     }
                 } else {
-                    BPoint where = ConvertToScreen(BPoint(Bounds().Width() + 12.0f, 240.0f));
+                    BPoint where = ConvertToScreen(BPoint(Bounds().Width() + 12.0f, 260.0f));
                     gDrawerColorWindow = new SelectorColorWindow(where, BMessenger(this), true);
                     gDrawerColorWindow->Show();
                 }
@@ -4752,50 +4840,7 @@ public:
             | (static_cast<uint64_t>(color.green) << 8) | color.blue;
         std::map<uint64_t, BBitmap*>::iterator it = fPillCache.find(key);
         if (it != fPillCache.end()) return it->second;
-        BBitmap* bitmap = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGBA32);
-        const float fw = static_cast<float>(w), fh = static_cast<float>(h), rad = static_cast<float>(radius);
-        // the distance in from the edge of the rounded rectangle at a point (0 at the edge, positive inside)
-        auto inside = [&](float px, float py) -> float {
-            const float hx = fw / 2.0f, hy = fh / 2.0f;
-            const float qx = std::fabs(px - hx) - hx + rad, qy = std::fabs(py - hy) - hy + rad;
-            const float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
-            return -(std::min(std::max(qx, qy), 0.0f) + outside - rad);
-        };
-        // the height of a round bar of this section, a quarter circle across its rim
-        const float crown = std::max(2.0f, std::min(6.0f, fh * 0.22f));
-        auto height = [&](float px, float py) -> float {
-            const float t = std::min(1.0f, std::max(0.0f, inside(px, py)) / crown);
-            return crown * std::sqrt(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
-        };
-        const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
-        const float ln = std::sqrt(lx * lx + ly * ly + lz * lz);
-        uint8* bits = static_cast<uint8*>(bitmap->Bits());
-        const int32 bpr = bitmap->BytesPerRow();
-        for (int y = 0; y < h; ++y) {
-            uint8* row = bits + y * bpr;
-            for (int x = 0; x < w; ++x) {
-                const float px = x + 0.5f, py = y + 0.5f;
-                const float di = inside(px, py);
-                const float cover = NavUI::Clamp01(0.5f + di);
-                float rs = 0.0f;
-                if (cover > 0.0f) {
-                    const float gx = (height(px + 1.0f, py) - height(px - 1.0f, py)) * 0.5f;
-                    const float gy = (height(px, py + 1.0f) - height(px, py - 1.0f)) * 0.5f;
-                    const float nn = std::sqrt(gx * gx + gy * gy + 1.0f);
-                    rs = ((-gx * lx - gy * ly + lz) / (nn * ln) - lz / ln) * 0.6f;
-                }
-                float r = color.red, g = color.green, b = color.blue;
-                if (rs > 0.0f) { r += (255.0f - r) * rs; g += (255.0f - g) * rs; b += (255.0f - b) * rs; }
-                else if (rs < 0.0f) { r *= 1.0f + rs; g *= 1.0f + rs; b *= 1.0f + rs; }
-                // a thin darker rim gives the edge a clean line
-                const float rim = 1.0f - 0.2f * NavUI::Clamp01(1.5f - di);
-                r *= rim; g *= rim; b *= rim;
-                row[x * 4 + 0] = static_cast<uint8>(std::lround(std::min(255.0f, b)));
-                row[x * 4 + 1] = static_cast<uint8>(std::lround(std::min(255.0f, g)));
-                row[x * 4 + 2] = static_cast<uint8>(std::lround(std::min(255.0f, r)));
-                row[x * 4 + 3] = static_cast<uint8>(std::lround(cover * 255.0f));
-            }
-        }
+        BBitmap* bitmap = BuildRaisedPillBitmap(w, h, radius, color);
         fPillCache[key] = bitmap;
         return bitmap;
     }
@@ -6576,7 +6621,9 @@ public:
             SetDrawingMode(B_OP_ALPHA);
             SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
             SetHighColor(fill);
-            FillRoundRect(rowRect, rowRect.Height() / 2.0f, rowRect.Height() / 2.0f);
+            // (square edges: the rows are plain rectangles, so the window has no corners of the backdrop's color left over)
+            const float rowR = gNavRoundedEdges ? rowRect.Height() / 2.0f : 0.0f;
+            FillRoundRect(rowRect, rowR, rowR);
             SetDrawingMode(B_OP_COPY);
 
             SetHighColor(TitleColorLuminance(fill) > 140.0f ? dark : white);
@@ -6775,6 +6822,11 @@ public:
     // closed, or the thumbnail popup appeared) and short.
     void UpdateBackdrop() {
         if (fView == nullptr) return;
+        if (!gNavRoundedEdges) {          // square corners: no picture of the screen is needed
+            fBackdropTried = false;
+            fView->SetBackdrop(nullptr);
+            return;
+        }
         BRect frame = Frame();
         if (fBackdropTried && frame == fBackdropFrame) return; // already captured (or tried) for this frame
         bool wasShown = !IsHidden();
@@ -12075,7 +12127,7 @@ void SyncDockWithRunningDeskbarApps() {
 
             // RESTORED DARK BLACK BACKGROUND: Opacity locked back to a rich 95% dark charcoal capsule,
             // ensuring the purple bars pop with maximum contrast even over 100% clear backplates!
-            DrawGLRoundedRect(cpuGraphBounds, 4.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
+            DrawGLRoundedRect(cpuGraphBounds, gNavRoundedEdges ? 4.0f : 0.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
 
             UpdateGlobalCpuLoadTracker();
 
@@ -12153,8 +12205,9 @@ void SyncDockWithRunningDeskbarApps() {
                     tooltipBounds = { tooltipLeft, tooltipBottom - tooltipH, tooltipLeft + tooltipW, tooltipBottom };
                 }
                 // a pill in the same colours as before (the title popup's shape)
-                DrawGLRoundedRect(tooltipBounds, tooltipH / 2.0f, 0.15f, 0.15f, 0.15f, 0.75f, true);
-                DrawGLRoundedRect(tooltipBounds, tooltipH / 2.0f, 0.10f, 0.10f, 0.10f, 0.5f, false);
+                const float tooltipR = gNavRoundedEdges ? tooltipH / 2.0f : 0.0f;
+                DrawGLRoundedRect(tooltipBounds, tooltipR, 0.15f, 0.15f, 0.15f, 0.75f, true);
+                DrawGLRoundedRect(tooltipBounds, tooltipR, 0.10f, 0.10f, 0.10f, 0.5f, false);
 
                 if (fCpuTooltipTex.id != 0) {
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fCpuTooltipTex.id);
@@ -12196,7 +12249,7 @@ void SyncDockWithRunningDeskbarApps() {
             float workspaceTop = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (dynamicWorkspaceHeight / 2.0f));
             HaikuRect workspaceBounds = { currentX, workspaceTop, currentX + dynamicWorkspaceWidth, workspaceTop + dynamicWorkspaceHeight };
 
-            DrawGLRoundedRect(workspaceBounds, 4.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
+            DrawGLRoundedRect(workspaceBounds, gNavRoundedEdges ? 4.0f : 0.0f, 0.03f, 0.03f, 0.05f, 0.95f, true);
 
             int gridCols = 0, gridRows = 0, wsCount = 0;
             GetWorkspaceGridLayout(gridCols, gridRows, wsCount);
@@ -12650,7 +12703,10 @@ private:
 
 	        // 2. Draw a native, perfect anti-aliased dark background capsule with rounded corners
 	        drawTarget->SetHighColor(15, 15, 15, 190); // 190 alpha sleek translucent dark bubble
-	        drawTarget->FillRoundRect(drawTarget->Bounds(), bitmapH / 2.0f, bitmapH / 2.0f); // pill: radius = half the height
+	        if (gNavRoundedEdges)
+	            drawTarget->FillRoundRect(drawTarget->Bounds(), bitmapH / 2.0f, bitmapH / 2.0f); // pill: radius = half the height
+	        else
+	            drawTarget->FillRect(drawTarget->Bounds());
 
 	        // 3. Render the solid white bold system text safely on top of the capsule
 	        drawTarget->SetHighColor(255, 255, 255, 255);
@@ -12975,6 +13031,7 @@ void SaveConfiguration() {
             settingsMsg.AddBool("nav_snake_flat", gNavSnakeFlat);
             settingsMsg.AddInt32("nav_accent", (static_cast<int32>(gNavAccent.red) << 16) |
                 (static_cast<int32>(gNavAccent.green) << 8) | static_cast<int32>(gNavAccent.blue));
+            settingsMsg.AddBool("nav_rounded_edges", gNavRoundedEdges);
             settingsMsg.AddBool("nav_use_system_colors", gNavUseSystemColors);
             settingsMsg.AddBool("drawer_use_system_colors", gDrawerUseSystemColors);
             settingsMsg.AddBool("drawer_color_auto", gDrawerColorAuto);
@@ -13051,6 +13108,7 @@ void LoadConfiguration() {
                     gNavAccent = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
                         static_cast<uint8>((valInt32 >> 8) & 0xFF), static_cast<uint8>(valInt32 & 0xFF), 255};
                 }
+                if (settingsMsg.FindBool("nav_rounded_edges", &valBool) == B_OK) gNavRoundedEdges = valBool;
                 if (settingsMsg.FindBool("nav_use_system_colors", &valBool) == B_OK) gNavUseSystemColors = valBool;
                 if (settingsMsg.FindBool("drawer_use_system_colors", &valBool) == B_OK) gDrawerUseSystemColors = valBool;
                 if (settingsMsg.FindBool("drawer_color_auto", &valBool) == B_OK) gDrawerColorAuto = valBool;
