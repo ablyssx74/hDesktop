@@ -15,7 +15,7 @@ The app drawer is in the Snake Tracker look, on Haiku and on Linux.
 
 ## Upgrading
 - Haiku: install the package for the whole system, or rebuild with `make release`. No new settings.
-- Linux: `cd linux && makepkg -si`, or `sudo make -f Makefile.linux install`. The new settings are saved in `hdesktop.conf` as `menu_color` and `drawer_transparency`; nothing changes until they are set.
+- Linux: `cd linux && makepkg -si`, or `sudo make -f Makefile.linux install`. The new settings are saved in `~/.config/hdesktop/settings.ini` as `menu_color` and `drawer_transparency`; nothing changes until they are set.
 
 ## Tested on
 - Haiku R1/beta6 in a VM and on real hardware (64-bit). Linux (KDE Plasma, Wayland): the drawer, the color and the slider. The 32-bit package was built but not run.
