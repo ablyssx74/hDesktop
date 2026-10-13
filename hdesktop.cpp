@@ -141,6 +141,23 @@ bool gNavSnakeTrail = true;
 // (Settings > Flat). Shared with Tracker's menus through the "nav_snake_flat" setting.
 bool gNavSnakeFlat = true;
 rgb_color gNavAccent = {70, 110, 200, 255};
+// Settings > Use System Colors (Selector Color): the dock's menus take Haiku's own menu colours (Appearance preferences)
+// in place of the Selector Color. Settings > Drawer Color: the drawer's panel colour (until it is set, a light tint of
+// the Selector Color), and its own Use System Colors.
+bool gNavUseSystemColors = false;
+bool gDrawerUseSystemColors = false;
+bool gDrawerColorAuto = true;
+rgb_color gDrawerColor = {185, 200, 234, 255};
+
+// The selector's colour in use: the chosen one, or Haiku's menu selection colour.
+inline rgb_color NavAccentColor() {
+    if (gNavUseSystemColors) {
+        rgb_color c = ui_color(B_MENU_SELECTION_BACKGROUND_COLOR);
+        c.alpha = 255;
+        return c;
+    }
+    return gNavAccent;
+}
 
 // Live window preview thumbnails (taskbar hover). Sizing for the popup
 // window's content area -- see ThumbnailPreviewWindow, which is a small
@@ -243,7 +260,11 @@ enum {
     MSG_SELECTOR_COLOR_OPEN = 'slco',
     MSG_SELECTOR_COLOR_CHANGED = 'slcc',
     MSG_SELECTOR_COLOR_DEFAULT = 'slcd',
-    MSG_SELECTOR_COLOR_UPDATED = 'slcu',   // sent to the settings view so its swatch repaints
+    MSG_SELECTOR_COLOR_UPDATED = 'slcu',
+    MSG_DRAWER_COLOR_OPEN = 'drco',
+    MSG_DRAWER_COLOR_UPDATED = 'drcu',
+    MSG_NAV_SYSTEM_COLORS_TOGGLED = 'nvsc',
+    MSG_DRAWER_SYSTEM_COLORS_TOGGLED = 'drsc',   // sent to the settings view so its swatch repaints
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_CLOCK_TOGGLED = 'cktg',
     MSG_VOLUME_TOGGLED = 'vltg',
@@ -790,7 +811,7 @@ const bigtime_t kSubmenuDelay = 180000;
 
 // The accent colour (Linux: Settings > Selector Color) and the shades worked out from it.
 struct Rgb { float r, g, b; };
-inline Rgb Accent() { return Rgb{static_cast<float>(gNavAccent.red), static_cast<float>(gNavAccent.green), static_cast<float>(gNavAccent.blue)}; }
+inline Rgb Accent() { const rgb_color a = NavAccentColor(); return Rgb{static_cast<float>(a.red), static_cast<float>(a.green), static_cast<float>(a.blue)}; }
 inline Rgb Light(Rgb c) { return Rgb{c.r + (255 - c.r) * 0.35f, c.g + (255 - c.g) * 0.35f, c.b + (255 - c.b) * 0.35f}; }
 inline Rgb Dark(Rgb c) { return Rgb{c.r * 0.62f, c.g * 0.62f, c.b * 0.62f}; }
 // The one pixel dark outline round the selector, and the tab ("bulge") of it that sticks out of the menu.
@@ -853,10 +874,12 @@ inline float FilletCoverage(float px, float py, float cx, float cy, int dx, int 
 inline float Luminance(rgb_color c) { return 0.299f * c.red + 0.587f * c.green + 0.114f * c.blue; }
 inline bool DarkTheme() { return Luminance(ui_color(B_MENU_BACKGROUND_COLOR)) < 128.0f; }
 inline rgb_color PillFill() {
-    return MixColor(gNavAccent, rgb_color{255, 255, 255, 255}, DarkTheme() ? 0.62f : 0.42f);
+    if (gNavUseSystemColors) return ui_color(B_MENU_BACKGROUND_COLOR);
+    return MixColor(NavAccentColor(), rgb_color{255, 255, 255, 255}, DarkTheme() ? 0.62f : 0.42f);
 }
 inline rgb_color PillHot() {
-    return MixColor(gNavAccent, rgb_color{255, 255, 255, 255}, DarkTheme() ? 0.18f : 0.0f);
+    if (gNavUseSystemColors) return ui_color(B_MENU_SELECTION_BACKGROUND_COLOR);
+    return MixColor(NavAccentColor(), rgb_color{255, 255, 255, 255}, DarkTheme() ? 0.18f : 0.0f);
 }
 inline rgb_color PillText(rgb_color fill) {
     return Luminance(fill) > 140.0f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
@@ -938,6 +961,19 @@ struct Piece { float x, y, w, h, tl, tr, br, bl; };
 struct Fillet { float x, y; int dx, dy; };
 
 }  // namespace NavUI
+
+// The drawer's colours: the panel (Haiku's menu background with Use System Colors, otherwise the colour chosen for it, and
+// until it is chosen a light tint of the Selector Color), and the lit pills and tabs (Haiku's menu selection colour, or the
+// Selector Color's tint).
+inline rgb_color DrawerFill() {
+    if (gDrawerUseSystemColors) return ui_color(B_MENU_BACKGROUND_COLOR);
+    if (!gDrawerColorAuto) return gDrawerColor;
+    return NavUI::PillFill();
+}
+inline rgb_color DrawerHot() {
+    if (gDrawerUseSystemColors) return ui_color(B_MENU_SELECTION_BACKGROUND_COLOR);
+    return NavUI::PillHot();
+}
 
 // The title popup is a row of pills (the same look as Tracker's selected labels). A BWindow is always a rectangle,
 // so the corners next to a pill's round ends would show as squares; instead the screen behind the popup is captured
@@ -1057,8 +1093,9 @@ public:
 
         const bool darkTheme = TitleColorLuminance(pal.bg) < 128.0f;
         const rgb_color white = rgb_color{255, 255, 255, 255};
-        const rgb_color pillColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.62f : 0.42f);
-        const rgb_color hotColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.18f : 0.0f);
+        (void)darkTheme; (void)white;
+        const rgb_color pillColor = NavUI::PillFill();
+        const rgb_color hotColor = NavUI::PillHot();
         const rgb_color dark = rgb_color{20, 22, 28, 255};
 
         for (size_t i = 0; i < fRows.size(); ++i) {
@@ -1690,8 +1727,8 @@ public:
         float x = right ? fFrame.right + 1 : fFrame.left - NavUI::kBulgeW;
         float top = fFrame.top + rowTop;   // the selector's outline rows included: it is outlined all round
         fBulge->Place(BRect(x, top, x + NavUI::kBulgeW - 1, top + NavUI::kRowH - 1), right,
-            rgb_color{static_cast<uint8>(gNavAccent.red), static_cast<uint8>(gNavAccent.green),
-                static_cast<uint8>(gNavAccent.blue), 255});
+            rgb_color{static_cast<uint8>(NavAccentColor().red), static_cast<uint8>(NavAccentColor().green),
+                static_cast<uint8>(NavAccentColor().blue), 255});
     }
 
     // The vertical part of the trail, between the parent's row and this menu's row, hangs into the parent menu
@@ -1708,8 +1745,8 @@ public:
         // the free end is rounded only where it hangs over the parent's body, not over the desktop
         bool overParent = edgeTop ? sy0 >= fLink.parentTop : sy1 <= fLink.parentBottom;
         fVBulge->Place(BRect(x, sy0, x + NavUI::kVBulgeW - 1, sy1), !parentOnLeft,
-            rgb_color{static_cast<uint8>(gNavAccent.red), static_cast<uint8>(gNavAccent.green),
-                static_cast<uint8>(gNavAccent.blue), 255},
+            rgb_color{static_cast<uint8>(NavAccentColor().red), static_cast<uint8>(NavAccentColor().green),
+                static_cast<uint8>(NavAccentColor().blue), 255},
             edgeTop, edgeBottom, static_cast<int>(rowTop - top), static_cast<int>(rowBottom - top) - 1, overParent);
     }
 
@@ -3319,22 +3356,25 @@ static float ConfigContentBottom() {
 }
 static float ConfigWindowHeight() { return ConfigContentBottom() + 82.0f; }
 
-// Settings > Selector Color: Haiku's own colour control, applied live to the Tracker menu's selector.
+// Settings > Selector Color and > Drawer Color: Haiku's own colour control, applied live (to the Tracker menu's selector,
+// or to the drawer's panel). The settings view's swatch beside the button follows it as it changes.
 class SelectorColorWindow;
 SelectorColorWindow* gSelectorColorWindow = nullptr;
+SelectorColorWindow* gDrawerColorWindow = nullptr;
 
 class SelectorColorWindow : public BWindow {
 public:
-    SelectorColorWindow(BPoint where, const BMessenger& settingsView)
-        : BWindow(BRect(where.x, where.y, where.x + 100, where.y + 100), "Selector Color", B_TITLED_WINDOW,
-              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
+    SelectorColorWindow(BPoint where, const BMessenger& settingsView, bool drawer = false)
+        : BWindow(BRect(where.x, where.y, where.x + 100, where.y + 100), drawer ? "Drawer Color" : "Selector Color",
+              B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
+          fDrawer(drawer),
           fSettingsView(settingsView) {
         BView* root = new BView(Bounds(), "selector_color_root", B_FOLLOW_ALL, B_WILL_DRAW);
         root->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
         AddChild(root);
         fControl = new BColorControl(BPoint(10, 10), B_CELLS_32x8, 8, "selector_color_control",
             new BMessage(MSG_SELECTOR_COLOR_CHANGED), true);
-        fControl->SetValue(gNavAccent);
+        fControl->SetValue(fDrawer ? DrawerFill() : gNavAccent);
         root->AddChild(fControl);
         fControl->ResizeToPreferred();
         BRect cb = fControl->Frame();
@@ -3346,18 +3386,34 @@ public:
         root->AddChild(close);
         ResizeTo(cb.right + 10, cb.bottom + 46);
     }
-    ~SelectorColorWindow() { gSelectorColorWindow = nullptr; }
+    ~SelectorColorWindow() {
+        if (fDrawer) gDrawerColorWindow = nullptr;
+        else gSelectorColorWindow = nullptr;
+    }
 
     virtual void MessageReceived(BMessage* message) {
         switch (message->what) {
             case MSG_SELECTOR_COLOR_CHANGED:
-                gNavAccent = fControl->ValueAsColor();
-                gNavAccent.alpha = 255;
+                if (fDrawer) {
+                    gDrawerColor = fControl->ValueAsColor();
+                    gDrawerColor.alpha = 255;
+                    gDrawerColorAuto = false;
+                } else {
+                    gNavAccent = fControl->ValueAsColor();
+                    gNavAccent.alpha = 255;
+                }
                 Applied();
                 break;
             case MSG_SELECTOR_COLOR_DEFAULT:
-                gNavAccent = rgb_color{70, 110, 200, 255};
-                fControl->SetValue(gNavAccent);
+                if (fDrawer) {
+                    // back to following the Selector Color
+                    gDrawerColorAuto = true;
+                    fControl->SetValue(DrawerFill());
+                } else {
+                    gNavAccent = rgb_color{70, 110, 200, 255};
+                    fControl->SetValue(gNavAccent);
+                    if (gDrawerColorAuto) {}   // (the drawer's own tint follows it)
+                }
                 Applied();
                 break;
             default:
@@ -3369,11 +3425,102 @@ public:
 private:
     void Applied() {
         SaveConfiguration();
-        fSettingsView.SendMessage(MSG_SELECTOR_COLOR_UPDATED);
+        fSettingsView.SendMessage(fDrawer ? MSG_DRAWER_COLOR_UPDATED : MSG_SELECTOR_COLOR_UPDATED);
     }
+    bool fDrawer;
     BColorControl* fControl;
     BButton* fDefault;
     BMessenger fSettingsView;
+};
+
+// A compact slider for the settings window: its label centred over a slim track, with the limit labels at the two ends of the
+// track on the same line (the stock slider puts them below, which takes twice the height). It is a BSlider, so the value,
+// the keys, the mouse and the message are the stock ones; only the shape of the bar and thumb, and the drawing, are its own.
+class CompactSlider : public BSlider {
+public:
+    CompactSlider(BRect frame, const char* name, const char* label, BMessage* message, int32 minValue, int32 maxValue)
+        : BSlider(frame, name, label, message, minValue, maxValue) {
+        SetViewColor(rgb_color{30, 31, 37, 255});
+    }
+
+    virtual BRect BarFrame() const {
+        const BRect b = Bounds();
+        float left = 10.0f, right = b.Width() - 10.0f;
+        if (MinLimitLabel() != nullptr) left += StringWidth(MinLimitLabel()) + 10.0f;
+        if (MaxLimitLabel() != nullptr) right -= StringWidth(MaxLimitLabel()) + 10.0f;
+        return BRect(left, 27.0f, right, 33.0f);
+    }
+
+    virtual BRect ThumbFrame() const {
+        const BRect bar = BarFrame();
+        const float x = floorf(Position() * ((bar.right - 1.0f) - (bar.left + 1.0f)) + bar.left + 1.0f);
+        return BRect(x - 7.0f, bar.top - 5.0f, x + 7.0f, bar.bottom + 5.0f);
+    }
+
+    virtual void Draw(BRect) {
+        const BRect b = Bounds();
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(rgb_color{30, 31, 37, 255});
+        FillRect(b);
+        SetFont(be_plain_font);
+        SetFontSize(12.0f);
+        font_height fh;
+        GetFontHeight(&fh);
+
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        if (Label() != nullptr)
+            DrawString(Label(), BPoint(floorf((b.Width() - StringWidth(Label())) / 2.0f), 14.0f));
+        const float midY = 30.0f + (fh.ascent - fh.descent) / 2.0f;
+        SetHighColor(rgb_color{200, 205, 215, 255});
+        if (MinLimitLabel() != nullptr) DrawString(MinLimitLabel(), BPoint(4.0f, midY));
+        if (MaxLimitLabel() != nullptr) DrawString(MaxLimitLabel(), BPoint(b.Width() - 4.0f - StringWidth(MaxLimitLabel()), midY));
+
+        // the track: a groove
+        const BRect bar = BarFrame();
+        SetHighColor(rgb_color{8, 8, 11, 255});
+        FillRoundRect(bar, 3.0f, 3.0f);
+        SetHighColor(rgb_color{62, 64, 74, 255});
+        StrokeLine(BPoint(bar.left + 3.0f, bar.bottom + 1.0f), BPoint(bar.right - 3.0f, bar.bottom + 1.0f));
+
+        // the thumb: a small raised block
+        const BRect t = ThumbFrame();
+        SetHighColor(rgb_color{18, 18, 22, 255});
+        FillRoundRect(t, 3.0f, 3.0f);
+        BRect face = t.InsetByCopy(1.0f, 1.0f);
+        for (float y = face.top; y <= face.bottom; y += 1.0f) {
+            const float f = (y - face.top) / std::max(1.0f, face.Height());
+            const uint8 v = static_cast<uint8>(120 - 52 * f);
+            SetHighColor(rgb_color{v, static_cast<uint8>(v + 2), static_cast<uint8>(v + 12), 255});
+            StrokeLine(BPoint(face.left + 1.0f, y), BPoint(face.right - 1.0f, y));
+        }
+        SetHighColor(rgb_color{150, 154, 168, 255});
+        StrokeLine(BPoint(face.left + 1.0f, face.top), BPoint(face.right - 1.0f, face.top));
+    }
+};
+
+// The "[?]" after a setting: its explanation shows as a tool tip when the pointer rests on it.
+class HelpMark : public BView {
+public:
+    HelpMark(BPoint where, const char* tip)
+        : BView(BRect(where.x, where.y, where.x + 20.0f, where.y + 16.0f), "help_mark", B_FOLLOW_NONE, B_WILL_DRAW),
+          fHover(false) {
+        SetViewColor(rgb_color{24, 24, 28, 255});
+        SetToolTip(tip);
+    }
+    virtual void Draw(BRect) {
+        SetFont(be_plain_font);
+        SetFontSize(12.0f);
+        font_height fh;
+        GetFontHeight(&fh);
+        SetHighColor(fHover ? rgb_color{170, 190, 240, 255} : rgb_color{130, 140, 165, 255});
+        DrawString("[?]", BPoint(0.0f, (Bounds().Height() + fh.ascent - fh.descent) / 2.0f));
+    }
+    virtual void MouseMoved(BPoint, uint32 transit, const BMessage*) {
+        const bool hover = transit != B_EXITED_VIEW;
+        if (hover != fHover) { fHover = hover; Invalidate(); }
+    }
+private:
+    bool fHover;
 };
 
 class ConfigView : public BView {
@@ -3386,6 +3533,9 @@ private:
     BCheckBox* fSnakeTrailCheckbox;
     BCheckBox* fSnakeFlatCheckbox;
     BButton*   fSelectorColorButton;
+    BButton*   fDrawerColorButton;
+    BCheckBox* fNavSystemColorsCheckbox;
+    BCheckBox* fDrawerSystemColorsCheckbox;
     BCheckBox* fThumbnailsCheckbox;
     BCheckBox* fAdvancedCheckbox;
     BSlider*   fThumbnailFpsSlider;
@@ -3500,9 +3650,39 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSnakeFlatCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fSnakeFlatCheckbox->SetValue(gNavSnakeFlat ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fSnakeFlatCheckbox);
-        fSelectorColorButton = new BButton(BRect(318.0f, 199.0f, 470.0f, 221.0f), "selector_color_btn",
+        // The two colours, a row each: a swatch that shows the colour in use (it follows the colour as it is chosen), the button
+        // that opens the colour control, and Use System Colors (Haiku's own menu colours instead).
+        fDrawerColorButton = new BButton(BRect(76.0f, 244.0f, 216.0f, 268.0f), "drawer_color_btn",
+            "Drawer Color" B_UTF8_ELLIPSIS, new BMessage(MSG_DRAWER_COLOR_OPEN));
+        fDrawerColorButton->SetEnabled(!gDrawerUseSystemColors);
+        AddChild(fDrawerColorButton);
+        fDrawerSystemColorsCheckbox = new BCheckBox(BRect(230.0f, 248.0f, 250.0f, 264.0f), "drawer_system_cb", nullptr,
+            new BMessage(MSG_DRAWER_SYSTEM_COLORS_TOGGLED));
+        fDrawerSystemColorsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fDrawerSystemColorsCheckbox->SetValue(gDrawerUseSystemColors ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fDrawerSystemColorsCheckbox);
+
+        fSelectorColorButton = new BButton(BRect(76.0f, 280.0f, 216.0f, 304.0f), "selector_color_btn",
             "Selector Color" B_UTF8_ELLIPSIS, new BMessage(MSG_SELECTOR_COLOR_OPEN));
+        fSelectorColorButton->SetEnabled(!gNavUseSystemColors);
         AddChild(fSelectorColorButton);
+        fNavSystemColorsCheckbox = new BCheckBox(BRect(230.0f, 284.0f, 250.0f, 300.0f), "nav_system_cb", nullptr,
+            new BMessage(MSG_NAV_SYSTEM_COLORS_TOGGLED));
+        fNavSystemColorsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fNavSystemColorsCheckbox->SetValue(gNavUseSystemColors ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fNavSystemColorsCheckbox);
+
+        // The [?] marks (their explanations show as tool tips)
+        BFont plain12(be_plain_font);
+        plain12.SetSize(12.0f);
+        AddChild(new HelpMark(BPoint(249.0f + plain12.StringWidth("Flat") + 6.0f, 202.0f),
+            "The selector is drawn flat: one color, without its light top edge and dark bottom edge."));
+        AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 248.0f),
+            "The drawer takes the colors of Haiku's Appearance preferences\n(the menu background and the menu selection) in place of "
+            "Drawer Color."));
+        AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 284.0f),
+            "The dock's menus take the colors of Haiku's Appearance preferences\n(the menu background and the menu selection) in "
+            "place of Selector Color."));
 
         // Row 6: Window Preview Thumbnails
         BRect thumbnailsCheckboxRect(35.0f, 627.0f, 55.0f, 643.0f);
@@ -3530,10 +3710,10 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7b: Thumbnail Preview FPS Slider -- only meaningful, and only
         // shown, while both Row 6 and Row 7 above are checked. Reserves its
         // row regardless, same as every other conditional row here.
-        BRect thumbnailFpsSliderRect(35.0f, 755.0f, frame.Width() - 35.0f, 805.0f);
+        BRect thumbnailFpsSliderRect(35.0f, 755.0f, frame.Width() - 35.0f, 799.0f);
         BString thumbnailFpsLabel;
         thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
-        fThumbnailFpsSlider = new BSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
+        fThumbnailFpsSlider = new CompactSlider(thumbnailFpsSliderRect, "thumbnail_fps_slider", thumbnailFpsLabel.String(),
             new BMessage(MSG_THUMBNAIL_FPS_SLIDER_CHANGED), 1, 30);
         fThumbnailFpsSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         // 30fps top end (was 20) -- the direct-framebuffer tile reads (see
@@ -3559,10 +3739,10 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Row 7c: Thumbnail Size Slider -- shown whenever the thumbnails
         // themselves are enabled (no Advanced needed). Same reserved-row and
         // IsHidden()-guarded Show()/Hide() convention as the FPS slider above.
-        BRect thumbnailSizeSliderRect(35.0f, 663.0f, frame.Width() - 35.0f, 713.0f);
+        BRect thumbnailSizeSliderRect(35.0f, 663.0f, frame.Width() - 35.0f, 707.0f);
         BString thumbnailSizeLabel;
         thumbnailSizeLabel << "Thumbnail Size: " << fThumbnailSize << " px";
-        fThumbnailSizeSlider = new BSlider(thumbnailSizeSliderRect, "thumbnail_size_slider", thumbnailSizeLabel.String(),
+        fThumbnailSizeSlider = new CompactSlider(thumbnailSizeSliderRect, "thumbnail_size_slider", thumbnailSizeLabel.String(),
             new BMessage(MSG_THUMBNAIL_SIZE_SLIDER_CHANGED), 120, 360);
         fThumbnailSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fThumbnailSizeSlider->SetLimitLabels("Small", "Large");
@@ -3584,7 +3764,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         dockLocationPopup->AddItem(dockBottomItem);
 
         // Dock Location Dropdown (Label drawn manually in Draw())
-        BRect dockLocationMenuRect(145.0f, 222.0f, frame.Width() - 35.0f, 247.0f);
+        BRect dockLocationMenuRect(145.0f, 310.0f, frame.Width() - 35.0f, 335.0f);
         fDockLocationMenuField = new BMenuField(dockLocationMenuRect, "dock_location_menu_field", nullptr, dockLocationPopup);
         fDockLocationMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fDockLocationMenuField);
@@ -3619,7 +3799,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         effectsPopup->AddItem(explodeItem);
 
 		// Open App Effects Dropdown (Label drawn manually in Draw())
-        BRect effectsMenuRect(145.0f, 264.0f, frame.Width() - 35.0f, 289.0f);
+        BRect effectsMenuRect(145.0f, 342.0f, frame.Width() - 35.0f, 367.0f);
         fEffectsMenuField = new BMenuField(effectsMenuRect, "effects_menu_field", nullptr, effectsPopup);
         fEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fEffectsMenuField);
@@ -3654,7 +3834,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         closeEffectsPopup->AddItem(closeExplodeItem);
 
 		// Close App Effects Dropdown (Label drawn manually in Draw())
-        BRect closeEffectsMenuRect(145.0f, 297.0f, frame.Width() - 35.0f, 322.0f);
+        BRect closeEffectsMenuRect(145.0f, 375.0f, frame.Width() - 35.0f, 400.0f);
         fCloseEffectsMenuField = new BMenuField(closeEffectsMenuRect, "close_effects_menu_field", nullptr, closeEffectsPopup);
         fCloseEffectsMenuField->SetViewColor(B_TRANSPARENT_COLOR);
         AddChild(fCloseEffectsMenuField);
@@ -3662,8 +3842,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         AddChild(new PillMenuFieldOverlay(fCloseEffectsMenuField));
 
 		// Effect Speed Slider Row
-        BRect speedSliderRect(35.0f, 347.0f, frame.Width() - 35.0f, 397.0f);
-        fEffectSpeedSlider = new BSlider(speedSliderRect, "speed_slider", "Effect Speed",
+        BRect speedSliderRect(35.0f, 408.0f, frame.Width() - 35.0f, 452.0f);
+        fEffectSpeedSlider = new CompactSlider(speedSliderRect, "speed_slider", "Effect Speed",
             new BMessage(MSG_EFFECT_SPEED_SLIDER_CHANGED), 200, 1500);
         fEffectSpeedSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fEffectSpeedSlider->SetLimitLabels("Fast", "Slow");
@@ -3672,8 +3852,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fEffectSpeedSlider->Show();
 
         // Transparency Slider Row (Shifted down)
-        BRect sliderRect(35.0f, 417.0f, frame.Width() - 35.0f, 467.0f);
-        fAlphaSlider = new BSlider(sliderRect, "alpha_slider", "Dock Transparency",
+        BRect sliderRect(35.0f, 458.0f, frame.Width() - 35.0f, 502.0f);
+        fAlphaSlider = new CompactSlider(sliderRect, "alpha_slider", "Dock Transparency",
             new BMessage(MSG_ALPHA_SLIDER_CHANGED), 0, 100);
         fAlphaSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fAlphaSlider->SetLimitLabels("Transparent", "Opaque");
@@ -3682,8 +3862,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAlphaSlider->Show();
 
         // Icon Size Slider Row (Shifted down)
-        BRect sizeSliderRect(35.0f, 487.0f, frame.Width() - 35.0f, 537.0f);
-        fIconSizeSlider = new BSlider(sizeSliderRect, "size_slider", "Icon Size",
+        BRect sizeSliderRect(35.0f, 508.0f, frame.Width() - 35.0f, 552.0f);
+        fIconSizeSlider = new CompactSlider(sizeSliderRect, "size_slider", "Icon Size",
             new BMessage(MSG_ICON_SIZE_CHANGED), 32, 72);
         fIconSizeSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fIconSizeSlider->SetLimitLabels("Small", "Large");
@@ -3693,8 +3873,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
         // Icon Zoom Size Slider Row -- peak hover magnification, in percent
         // (100 = no zoom, 180 = the original fixed zoom).
-        BRect zoomSliderRect(35.0f, 557.0f, frame.Width() - 35.0f, 607.0f);
-        fIconZoomSlider = new BSlider(zoomSliderRect, "zoom_slider", "Icon Zoom Size",
+        BRect zoomSliderRect(35.0f, 558.0f, frame.Width() - 35.0f, 602.0f);
+        fIconZoomSlider = new CompactSlider(zoomSliderRect, "zoom_slider", "Icon Zoom Size",
             new BMessage(MSG_ICON_ZOOM_CHANGED), 100, 250);
         fIconZoomSlider->SetHighColor(rgb_color{220, 225, 235, 255});
         fIconZoomSlider->SetLimitLabels("None", "Large");
@@ -3794,13 +3974,21 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
         DrawString("Snake Trail (Tracker menu)", BPoint(62.0f, 214.0f));
         DrawString("Flat", BPoint(249.0f, 214.0f));
-        {   // the selector's current colour, beside its button
-            BRect swatch(290.0f, 201.0f, 310.0f, 219.0f);
-            SetHighColor(gNavAccent);
-            FillRoundRect(swatch, 3.0f, 3.0f);
-            SetHighColor(rgb_color{110, 115, 130, 255});
-            StrokeRoundRect(swatch, 3.0f, 3.0f);
+        {   // the two colours in use, beside their buttons (they follow a colour as it is chosen)
+            const rgb_color rim = rgb_color{110, 115, 130, 255};
+            BRect drawerSwatch(30.0f, 240.0f, 62.0f, 268.0f), selectorSwatch(30.0f, 276.0f, 62.0f, 304.0f);
+            SetDrawingMode(B_OP_COPY);
+            SetHighColor(DrawerFill());
+            FillRoundRect(drawerSwatch, 5.0f, 5.0f);
+            SetHighColor(rim);
+            StrokeRoundRect(drawerSwatch, 5.0f, 5.0f);
+            SetHighColor(NavAccentColor());
+            FillRoundRect(selectorSwatch, 5.0f, 5.0f);
+            SetHighColor(rim);
+            StrokeRoundRect(selectorSwatch, 5.0f, 5.0f);
             SetHighColor(rgb_color{220, 225, 235, 255});
+            DrawString("Use System Colors", BPoint(256.0f, 260.0f));
+            DrawString("Use System Colors", BPoint(256.0f, 296.0f));
         }
         DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 639.0f));
 
@@ -3826,14 +4014,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         if (fShowWindowThumbnails) {
             DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 747.0f));
         }
-        DrawString("Dock Location:", BPoint(35.0f, 239.0f));
+        DrawString("Dock Location:", BPoint(35.0f, 327.0f));
 
         // Draw Open and Close Effect labels manually with guaranteed light text color
         SetFont(be_plain_font);
         SetFontSize(12.0f);
         SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 281.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 314.0f));
+        DrawString("Open App Effects:", BPoint(35.0f, 359.0f));
+        DrawString("Close App Effects:", BPoint(35.0f, 392.0f));
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -3935,6 +4123,9 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSnakeTrailCheckbox->SetTarget(this);
         fSnakeFlatCheckbox->SetTarget(this);
         fSelectorColorButton->SetTarget(this);
+        fDrawerColorButton->SetTarget(this);
+        fNavSystemColorsCheckbox->SetTarget(this);
+        fDrawerSystemColorsCheckbox->SetTarget(this);
         fClockCheckbox->SetTarget(this);
         fVolumeCheckbox->SetTarget(this);
         fCpuGraphCheckbox->SetTarget(this);
@@ -4090,8 +4281,39 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 break;
             }
 
-            case MSG_SELECTOR_COLOR_UPDATED: {
-                Invalidate();   // repaint the swatch
+            case MSG_DRAWER_COLOR_OPEN: {
+                if (gDrawerColorWindow != nullptr) {
+                    if (gDrawerColorWindow->Lock()) {
+                        gDrawerColorWindow->Activate();
+                        gDrawerColorWindow->Unlock();
+                    }
+                } else {
+                    BPoint where = ConvertToScreen(BPoint(Bounds().Width() + 12.0f, 240.0f));
+                    gDrawerColorWindow = new SelectorColorWindow(where, BMessenger(this), true);
+                    gDrawerColorWindow->Show();
+                }
+                break;
+            }
+
+            case MSG_SELECTOR_COLOR_UPDATED:
+            case MSG_DRAWER_COLOR_UPDATED: {
+                Invalidate();   // repaint the swatches (the drawer's follows the Selector Color until it is chosen)
+                break;
+            }
+
+            case MSG_NAV_SYSTEM_COLORS_TOGGLED: {
+                gNavUseSystemColors = (fNavSystemColorsCheckbox->Value() == B_CONTROL_ON);
+                fSelectorColorButton->SetEnabled(!gNavUseSystemColors);
+                SaveConfiguration();
+                Invalidate();
+                break;
+            }
+
+            case MSG_DRAWER_SYSTEM_COLORS_TOGGLED: {
+                gDrawerUseSystemColors = (fDrawerSystemColorsCheckbox->Value() == B_CONTROL_ON);
+                fDrawerColorButton->SetEnabled(!gDrawerUseSystemColors);
+                SaveConfiguration();
+                Invalidate();
                 break;
             }
 
@@ -4512,7 +4734,7 @@ public:
 
     DrawerView(BRect frame) : BView(frame, "DrawerView", B_FOLLOW_ALL, B_WILL_DRAW), fSnake(NavUI::SnakeLookPreference()) {
         if (fSnake)
-            SetViewColor(NavUI::PillFill());
+            SetViewColor(DrawerFill());
         else
             // Set a sleek matte background color that coordinates with your dark desktop setup
             SetViewColor(rgb_color{24, 24, 28, 255});
@@ -4604,7 +4826,7 @@ public:
 
     // A groove across the panel: a darker line over a lighter one.
     void DrawGroove(float x0, float x1, float y) {
-        const rgb_color fill = NavUI::PillFill();
+        const rgb_color fill = DrawerFill();
         SetDrawingMode(B_OP_COPY);
         SetHighColor(NavUI::MixColor(fill, rgb_color{0, 0, 0, 255}, 0.22f));
         StrokeLine(BPoint(x0, y), BPoint(x1, y));
@@ -4614,7 +4836,7 @@ public:
 
     // A dark tab with the section's name.
     void DrawSectionTab(const char* text, float x, float top) {
-        const rgb_color tab = NavUI::MixColor(gNavAccent, rgb_color{0, 0, 0, 255}, 0.38f);
+        const rgb_color tab = NavUI::MixColor(DrawerHot(), rgb_color{0, 0, 0, 255}, 0.42f);
         SetFont(be_bold_font);
         SetFontSize(12.0f);
         font_height fh;
@@ -4633,7 +4855,7 @@ public:
         TruncateString(&truncated, B_TRUNCATE_END, itemW - 10.0f);
         const float textW = StringWidth(truncated.String());
         const BPoint at(floorf(x + (itemW / 2.0f) - (textW / 2.0f)), floorf(y + 90.0f));
-        const rgb_color fill = NavUI::PillFill();
+        const rgb_color fill = DrawerFill();
         SetDrawingMode(B_OP_ALPHA);
         SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
         if (!lit) {
@@ -4644,10 +4866,26 @@ public:
         DrawString(truncated.String(), at);
     }
 
+    // The scroll bar's range follows the grid: BScrollView gives a plain view's bar a fixed range of 0 to 1000, which let the
+    // drawer scroll on past the last row (or stop short of it, with enough apps), so it is set to what is not in view.
+    void UpdateScrollRange(float virtualHeight) {
+        BScrollBar* bar = ScrollBar(B_VERTICAL);
+        if (bar == nullptr || Parent() == nullptr) return;
+        const float visible = Parent()->Bounds().Height() + 1.0f;
+        const float total = virtualHeight + 1.0f;
+        const float range = std::max(0.0f, total - visible);
+        float oldMin, oldMax;
+        bar->GetRange(&oldMin, &oldMax);
+        if (std::fabs(oldMax - range) < 0.5f) return;
+        bar->SetRange(0.0f, range);
+        bar->SetProportion(std::min(1.0f, visible / std::max(1.0f, total)));
+        bar->SetSteps(30.0f, std::max(30.0f, visible - 30.0f));
+    }
+
     void DrawSnake(BRect updateRect) {
         const float canvasWidth = Bounds().Width();
-        const rgb_color fill = NavUI::PillFill();
-        const rgb_color hot = NavUI::PillHot();
+        const rgb_color fill = DrawerFill();
+        const rgb_color hot = DrawerHot();
         const rgb_color raised = NavUI::MixColor(fill, hot, 0.38f);    // the title and the buttons
         const rgb_color lit = NavUI::MixColor(fill, hot, 0.55f);       // a hovered app, and a hovered button
 
@@ -4740,6 +4978,7 @@ public:
                 const float targetVirtualHeight = currentY + (rows * (itemH + spacingY)) + 40.0f;
                 if (Bounds().Height() != targetVirtualHeight)
                     ResizeTo(Bounds().Width(), targetVirtualHeight);
+                UpdateScrollRange(targetVirtualHeight);
             }
         }
     }
@@ -5120,6 +5359,7 @@ public:
         if (Bounds().Height() != targetVirtualHeight) {
             ResizeTo(Bounds().Width(), targetVirtualHeight);
         }
+        UpdateScrollRange(targetVirtualHeight);
 
     }
 
@@ -5328,7 +5568,7 @@ public:
 
     DrawerFrameView(BRect frame, BRect screenFrame)
         : BView(frame, "DrawerFrame", B_FOLLOW_ALL, B_WILL_DRAW) {
-        SetViewColor(NavUI::PillFill());
+        SetViewColor(DrawerFill());
         for (int i = 0; i < 4; ++i) fCorner[i] = nullptr;
         for (int i = 0; i < 4; ++i) {
             const bool right = (i & 1) != 0, bottom = (i & 2) != 0;
@@ -5362,7 +5602,7 @@ public:
 
     virtual void Draw(BRect) {
         SetDrawingMode(B_OP_COPY);
-        SetHighColor(NavUI::PillFill());
+        SetHighColor(DrawerFill());
         FillRect(Bounds());
         SetDrawingMode(B_OP_ALPHA);
         SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
@@ -6046,7 +6286,7 @@ public:
             DrawString(label, textPos);
         }
 
-        SetHighColor(fHovered ? gNavAccent : rgb_color{48, 50, 58, 255});
+        SetHighColor(fHovered ? NavAccentColor() : rgb_color{48, 50, 58, 255});
         StrokeRect(bounds);
         if (fHovered) StrokeRect(bounds.InsetByCopy(1.0f, 1.0f));
     }
@@ -6320,8 +6560,9 @@ public:
         // little deeper on a light one; the hovered row gets the Selector Color itself.
         const bool darkTheme = TitleColorLuminance(pal.bg) < 128.0f;
         const rgb_color white = rgb_color{255, 255, 255, 255};
-        const rgb_color pillColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.62f : 0.42f);
-        const rgb_color hotColor = NavUI::MixColor(gNavAccent, white, darkTheme ? 0.18f : 0.0f);
+        (void)darkTheme; (void)white;
+        const rgb_color pillColor = NavUI::PillFill();
+        const rgb_color hotColor = NavUI::PillHot();
         const rgb_color dark = rgb_color{20, 22, 28, 255};
 
         for (size_t i = 0; i < fEntries.size(); ++i) {
@@ -12734,6 +12975,11 @@ void SaveConfiguration() {
             settingsMsg.AddBool("nav_snake_flat", gNavSnakeFlat);
             settingsMsg.AddInt32("nav_accent", (static_cast<int32>(gNavAccent.red) << 16) |
                 (static_cast<int32>(gNavAccent.green) << 8) | static_cast<int32>(gNavAccent.blue));
+            settingsMsg.AddBool("nav_use_system_colors", gNavUseSystemColors);
+            settingsMsg.AddBool("drawer_use_system_colors", gDrawerUseSystemColors);
+            settingsMsg.AddBool("drawer_color_auto", gDrawerColorAuto);
+            settingsMsg.AddInt32("drawer_color", (static_cast<int32>(gDrawerColor.red) << 16) |
+                (static_cast<int32>(gDrawerColor.green) << 8) | static_cast<int32>(gDrawerColor.blue));
             settingsMsg.AddBool("show_clock", fShowClock);
             settingsMsg.AddBool("show_volume", fShowVolume);
             settingsMsg.AddBool("show_cpu_graph", fShowCpuGraph);
@@ -12803,6 +13049,13 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("nav_snake_flat", &valBool) == B_OK) gNavSnakeFlat = valBool;
                 if (settingsMsg.FindInt32("nav_accent", &valInt32) == B_OK) {
                     gNavAccent = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
+                        static_cast<uint8>((valInt32 >> 8) & 0xFF), static_cast<uint8>(valInt32 & 0xFF), 255};
+                }
+                if (settingsMsg.FindBool("nav_use_system_colors", &valBool) == B_OK) gNavUseSystemColors = valBool;
+                if (settingsMsg.FindBool("drawer_use_system_colors", &valBool) == B_OK) gDrawerUseSystemColors = valBool;
+                if (settingsMsg.FindBool("drawer_color_auto", &valBool) == B_OK) gDrawerColorAuto = valBool;
+                if (settingsMsg.FindInt32("drawer_color", &valInt32) == B_OK) {
+                    gDrawerColor = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
                         static_cast<uint8>((valInt32 >> 8) & 0xFF), static_cast<uint8>(valInt32 & 0xFF), 255};
                 }
                 if (settingsMsg.FindBool("show_clock", &valBool) == B_OK) fShowClock = valBool;
