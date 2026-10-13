@@ -4505,13 +4505,248 @@ public:
 
     BList fItemsList;
 
-    DrawerView(BRect frame) : BView(frame, "DrawerView", B_FOLLOW_ALL, B_WILL_DRAW) {
-        // Set a sleek matte background color that coordinates with your dark desktop setup
-        SetViewColor(rgb_color{24, 24, 28, 255});
+    // The Snake look (Snake Tracker's pill look, when its preference is on): a lavender panel in the Selector Color's light
+    // tint, with raised pills for the buttons, the title, the section tabs and the hovered app.
+    bool fSnake;
+    std::map<uint64_t, BBitmap*> fPillCache;
+
+    DrawerView(BRect frame) : BView(frame, "DrawerView", B_FOLLOW_ALL, B_WILL_DRAW), fSnake(NavUI::SnakeLookPreference()) {
+        if (fSnake)
+            SetViewColor(NavUI::PillFill());
+        else
+            // Set a sleek matte background color that coordinates with your dark desktop setup
+            SetViewColor(rgb_color{24, 24, 28, 255});
         ScanSystemDirectories();
     }
 
+    // The header's two buttons (their places are the same for drawing and for clicks)
+    BRect ShutdownRect() const { return fSnake ? BRect(30.0f, 14.0f, 140.0f, 46.0f) : BRect(30.0f, 45.0f, 110.0f, 76.0f); }
+    BRect RebootRect() const { return fSnake ? BRect(152.0f, 14.0f, 292.0f, 46.0f) : BRect(120.0f, 45.0f, 215.0f, 76.0f); }
+
+    // A raised pill (or rounded square), lit from the top left, in `color`; made once for each size and colour.
+    BBitmap* RaisedPill(int w, int h, int radius, rgb_color color) {
+        const uint64_t key = (static_cast<uint64_t>(w & 0xFFF) << 44) | (static_cast<uint64_t>(h & 0xFFF) << 32)
+            | (static_cast<uint64_t>(radius & 0xFF) << 24) | (static_cast<uint64_t>(color.red) << 16)
+            | (static_cast<uint64_t>(color.green) << 8) | color.blue;
+        std::map<uint64_t, BBitmap*>::iterator it = fPillCache.find(key);
+        if (it != fPillCache.end()) return it->second;
+        BBitmap* bitmap = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGBA32);
+        const float fw = static_cast<float>(w), fh = static_cast<float>(h), rad = static_cast<float>(radius);
+        // the distance in from the edge of the rounded rectangle at a point (0 at the edge, positive inside)
+        auto inside = [&](float px, float py) -> float {
+            const float hx = fw / 2.0f, hy = fh / 2.0f;
+            const float qx = std::fabs(px - hx) - hx + rad, qy = std::fabs(py - hy) - hy + rad;
+            const float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
+            return -(std::min(std::max(qx, qy), 0.0f) + outside - rad);
+        };
+        // the height of a round bar of this section, a quarter circle across its rim
+        const float crown = std::max(2.0f, std::min(6.0f, fh * 0.22f));
+        auto height = [&](float px, float py) -> float {
+            const float t = std::min(1.0f, std::max(0.0f, inside(px, py)) / crown);
+            return crown * std::sqrt(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
+        };
+        const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
+        const float ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+        uint8* bits = static_cast<uint8*>(bitmap->Bits());
+        const int32 bpr = bitmap->BytesPerRow();
+        for (int y = 0; y < h; ++y) {
+            uint8* row = bits + y * bpr;
+            for (int x = 0; x < w; ++x) {
+                const float px = x + 0.5f, py = y + 0.5f;
+                const float di = inside(px, py);
+                const float cover = NavUI::Clamp01(0.5f + di);
+                float rs = 0.0f;
+                if (cover > 0.0f) {
+                    const float gx = (height(px + 1.0f, py) - height(px - 1.0f, py)) * 0.5f;
+                    const float gy = (height(px, py + 1.0f) - height(px, py - 1.0f)) * 0.5f;
+                    const float nn = std::sqrt(gx * gx + gy * gy + 1.0f);
+                    rs = ((-gx * lx - gy * ly + lz) / (nn * ln) - lz / ln) * 0.6f;
+                }
+                float r = color.red, g = color.green, b = color.blue;
+                if (rs > 0.0f) { r += (255.0f - r) * rs; g += (255.0f - g) * rs; b += (255.0f - b) * rs; }
+                else if (rs < 0.0f) { r *= 1.0f + rs; g *= 1.0f + rs; b *= 1.0f + rs; }
+                // a thin darker rim gives the edge a clean line
+                const float rim = 1.0f - 0.2f * NavUI::Clamp01(1.5f - di);
+                r *= rim; g *= rim; b *= rim;
+                row[x * 4 + 0] = static_cast<uint8>(std::lround(std::min(255.0f, b)));
+                row[x * 4 + 1] = static_cast<uint8>(std::lround(std::min(255.0f, g)));
+                row[x * 4 + 2] = static_cast<uint8>(std::lround(std::min(255.0f, r)));
+                row[x * 4 + 3] = static_cast<uint8>(std::lround(cover * 255.0f));
+            }
+        }
+        fPillCache[key] = bitmap;
+        return bitmap;
+    }
+
+    void DrawRaisedPill(BRect rect, int radius, rgb_color color) {
+        const int w = static_cast<int>(rect.Width()) + 1, h = static_cast<int>(rect.Height()) + 1;
+        if (w < 2 || h < 2) return;
+        BBitmap* bitmap = RaisedPill(w, h, std::min(radius, std::min(w, h) / 2), color);
+        SetDrawingMode(B_OP_ALPHA);
+        SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+        DrawBitmap(bitmap, rect.LeftTop());
+    }
+
+    // Text with a dark shadow behind it, centred in `rect`, in `face`.
+    void DrawShadowed(const char* text, BRect rect, rgb_color face) {
+        font_height fh;
+        GetFontHeight(&fh);
+        // (whole pixels: text at a fraction of one is smeared)
+        const float x = floorf(rect.left + (rect.Width() - StringWidth(text)) / 2.0f);
+        const float y = floorf(rect.top + (rect.Height() + fh.ascent - fh.descent) / 2.0f);
+        SetDrawingMode(B_OP_ALPHA);
+        SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+        SetHighColor(rgb_color{10, 8, 30, 190});
+        DrawString(text, BPoint(x + 1.0f, y + 1.0f));
+        SetHighColor(face);
+        DrawString(text, BPoint(x, y));
+    }
+
+    // A groove across the panel: a darker line over a lighter one.
+    void DrawGroove(float x0, float x1, float y) {
+        const rgb_color fill = NavUI::PillFill();
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(NavUI::MixColor(fill, rgb_color{0, 0, 0, 255}, 0.22f));
+        StrokeLine(BPoint(x0, y), BPoint(x1, y));
+        SetHighColor(NavUI::MixColor(fill, rgb_color{255, 255, 255, 255}, 0.55f));
+        StrokeLine(BPoint(x0, y + 1.0f), BPoint(x1, y + 1.0f));
+    }
+
+    // A dark tab with the section's name.
+    void DrawSectionTab(const char* text, float x, float top) {
+        const rgb_color tab = NavUI::MixColor(gNavAccent, rgb_color{0, 0, 0, 255}, 0.38f);
+        SetFont(be_bold_font);
+        SetFontSize(12.0f);
+        font_height fh;
+        GetFontHeight(&fh);
+        const float w = floorf(StringWidth(text)) + 24.0f;
+        BRect rect(floorf(x), floorf(top), floorf(x) + w, floorf(top) + 22.0f);
+        DrawRaisedPill(rect, 8, tab);
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(NavUI::PillText(tab));
+        DrawString(text, BPoint(rect.left + 12.0f, floorf(rect.top + (rect.Height() + fh.ascent - fh.descent) / 2.0f)));
+    }
+
+    // An app's name under its icon: dark on the panel, with a faint light edge, light on a lit card.
+    void DrawAppLabel(const BString& name, float x, float y, float itemW, bool lit) {
+        BString truncated = name;
+        TruncateString(&truncated, B_TRUNCATE_END, itemW - 10.0f);
+        const float textW = StringWidth(truncated.String());
+        const BPoint at(floorf(x + (itemW / 2.0f) - (textW / 2.0f)), floorf(y + 90.0f));
+        const rgb_color fill = NavUI::PillFill();
+        SetDrawingMode(B_OP_ALPHA);
+        SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+        if (!lit) {
+            SetHighColor(rgb_color{255, 255, 255, 110});
+            DrawString(truncated.String(), at + BPoint(1.0f, 1.0f));
+        }
+        SetHighColor(lit ? rgb_color{15, 12, 40, 255} : NavUI::PillText(fill));
+        DrawString(truncated.String(), at);
+    }
+
+    void DrawSnake(BRect updateRect) {
+        const float canvasWidth = Bounds().Width();
+        const rgb_color fill = NavUI::PillFill();
+        const rgb_color hot = NavUI::PillHot();
+        const rgb_color raised = NavUI::MixColor(fill, hot, 0.38f);    // the title and the buttons
+        const rgb_color lit = NavUI::MixColor(fill, hot, 0.55f);       // a hovered app, and a hovered button
+
+        BPoint cursorPoint;
+        uint32 transitButtons;
+        GetMouse(&cursorPoint, &transitButtons, false);
+
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(fill);
+        FillRect(Bounds());
+
+        // the title, in the middle of the header
+        SetFont(be_bold_font);
+        SetFontSize(20.0f);
+        const BString title("hdesktop");
+        const float titleW = StringWidth(title.String()) + 44.0f;
+        BRect titleRect((canvasWidth - titleW) / 2.0f, 10.0f, (canvasWidth + titleW) / 2.0f, 50.0f);
+        DrawRaisedPill(titleRect, 20, raised);
+        DrawShadowed(title.String(), titleRect, rgb_color{18, 38, 130, 255});
+
+        // the power buttons
+        SetFont(be_bold_font);
+        SetFontSize(12.0f);
+        const BRect shutdown = ShutdownRect(), reboot = RebootRect();
+        DrawRaisedPill(shutdown, 16, shutdown.Contains(cursorPoint) ? lit : raised);
+        DrawShadowed("Power off", shutdown, rgb_color{200, 28, 28, 255});
+        DrawRaisedPill(reboot, 16, reboot.Contains(cursorPoint) ? lit : raised);
+        DrawShadowed("Restart system", reboot, rgb_color{28, 60, 200, 255});
+
+        DrawGroove(20.0f, canvasWidth - 20.0f, 90.0f);
+
+        float itemW = 100.0f;
+        float itemH = 110.0f;
+        float startX = 30.0f;
+        float currentY = 115.0f;
+        float spacingX = 24.0f;
+        float spacingY = 20.0f;
+
+        int32 cols = static_cast<int32>((Bounds().Width() - (startX * 2.0f)) / (itemW + spacingX));
+        if (cols < 1) cols = 1;
+
+        std::vector<DrawerItem*> favoriteItems;
+        std::vector<DrawerItem*> standardItems;
+        for (int32 i = 0; i < fItemsList.CountItems(); i++) {
+            DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
+            BPath itemPath(&item->ref);
+            std::string pathKey(itemPath.Path());
+            if (gFavoritePaths.find(pathKey) != gFavoritePaths.end())
+                favoriteItems.push_back(item);
+            else
+                standardItems.push_back(item);
+        }
+
+        // (the same grid, in the same places, as the plain drawer: the clicks are worked out from those)
+        for (int pass = 0; pass < 2; ++pass) {
+            std::vector<DrawerItem*>& list = pass == 0 ? favoriteItems : standardItems;
+            if (pass == 0 && list.empty()) continue;
+            SetDrawingMode(B_OP_COPY);
+            // (each tab hangs from the groove above it: the header's, or the one after the favorites)
+            DrawSectionTab(pass == 0 ? "Favorites" : "Applications", startX,
+                (pass == 1 && !favoriteItems.empty()) ? currentY - 1.0f : 93.0f);
+            currentY += 25.0f;
+
+            SetFont(be_plain_font);
+            SetFontSize(11.0f);
+            for (size_t i = 0; i < list.size(); i++) {
+                const int32 c = i % cols;
+                const int32 r = i / cols;
+                const float x = startX + (c * (itemW + spacingX));
+                const float y = currentY + (r * (itemH + spacingY));
+                const BRect itemBounds(x, y, x + itemW, y + itemH);
+                if (y + itemH < updateRect.top - 4.0f || y > updateRect.bottom + 4.0f) continue;   // (not in view)
+
+                const bool hovered = itemBounds.Contains(cursorPoint);
+                if (hovered) DrawRaisedPill(itemBounds, 16, lit);
+                DrawerItem* item = list[i];
+                if (item->icon) {
+                    SetDrawingMode(B_OP_ALPHA);
+                    SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+                    DrawBitmap(item->icon, BPoint(x + (itemW / 2.0f) - 24.0f, y + 15.0f));
+                }
+                DrawAppLabel(item->name, x, y, itemW, hovered);
+            }
+
+            const int32 rows = (list.size() + cols - 1) / cols;
+            if (pass == 0) {
+                currentY += (rows * (itemH + spacingY)) + 15.0f;
+                DrawGroove(startX, canvasWidth - startX, currentY - 5.0f);
+            } else {
+                const float targetVirtualHeight = currentY + (rows * (itemH + spacingY)) + 40.0f;
+                if (Bounds().Height() != targetVirtualHeight)
+                    ResizeTo(Bounds().Width(), targetVirtualHeight);
+            }
+        }
+    }
+
     ~DrawerView() {
+        for (std::map<uint64_t, BBitmap*>::iterator it = fPillCache.begin(); it != fPillCache.end(); ++it)
+            delete it->second;
         for (int32 i = 0; i < fItemsList.CountItems(); i++) {
             DrawerItem* item = (DrawerItem*)fItemsList.ItemAt(i);
             if (item) {
@@ -4684,6 +4919,10 @@ public:
 
 
     virtual void Draw(BRect updateRect) {
+        if (fSnake) {
+            DrawSnake(updateRect);
+            return;
+        }
         // =========================================================================
         // NEW STRUCTURAL HEADER SECTION
         // =========================================================================
@@ -4946,8 +5185,8 @@ public:
         BRect configIconRect(canvasWidth - 62.0f, 45.0f, canvasWidth - 31.0f, 76.0f);
         BRect exitIconRect(canvasWidth - 103.0f, 45.0f, canvasWidth - 72.0f, 76.0f);
 
-        BRect shutdownSysRect(30.0f, 45.0f, 110.0f, 76.0f);
-        BRect rebootSysRect(120.0f, 45.0f, 190.0f, 76.0f);
+        BRect shutdownSysRect = ShutdownRect();
+        BRect rebootSysRect = RebootRect();
 
 
         // --- INTERCEPT SHUTDOWN SYSTEM TRACKER ---
@@ -5080,6 +5319,65 @@ public:
 // =========================================================================
 // NATIVE BWINDOW BORDERLESS COMPONENT LAYOUT (DYNAMIC WIDTH MATRIX MANAGER)
 // =========================================================================
+// The drawer's panel in the Snake look: the lavender fill, with its four corners rounded. The drawer has a fixed size and
+// place, so the screen behind it is read only at the four corners (a small square each, before the window is shown), and
+// each is drawn over the fill with the panel's own curve cut out of it. The scrolling grid sits inside, clear of the edge.
+class DrawerFrameView : public BView {
+public:
+    static const int kCorner = 22;      // the corners' radius
+
+    DrawerFrameView(BRect frame, BRect screenFrame)
+        : BView(frame, "DrawerFrame", B_FOLLOW_ALL, B_WILL_DRAW) {
+        SetViewColor(NavUI::PillFill());
+        for (int i = 0; i < 4; ++i) fCorner[i] = nullptr;
+        for (int i = 0; i < 4; ++i) {
+            const bool right = (i & 1) != 0, bottom = (i & 2) != 0;
+            const float x = right ? screenFrame.right - (kCorner - 1) : screenFrame.left;
+            const float y = bottom ? screenFrame.bottom - (kCorner - 1) : screenFrame.top;
+            BBitmap* shot = CaptureScreenBehind(BRect(x, y, x + kCorner - 1, y + kCorner - 1));
+            if (shot == nullptr || !shot->IsValid()) { delete shot; continue; }
+            BBitmap* corner = new BBitmap(BRect(0, 0, kCorner - 1, kCorner - 1), B_RGBA32);
+            const BRect shotBounds = shot->Bounds();
+            for (int py = 0; py < kCorner; ++py) {
+                for (int px = 0; px < kCorner; ++px) {
+                    // how far the pixel is from the corner's point, as if the corner were the top left one
+                    const float fx = (right ? kCorner - 1 - px : px) + 0.5f, fy = (bottom ? kCorner - 1 - py : py) + 0.5f;
+                    const float inside = NavUI::Clamp01(0.5f + kCorner - std::sqrt((kCorner - fx) * (kCorner - fx)
+                        + (kCorner - fy) * (kCorner - fy)));
+                    uint8* dst = static_cast<uint8*>(corner->Bits()) + py * corner->BytesPerRow() + px * 4;
+                    const int sx = std::min(px, static_cast<int>(shotBounds.Width())), sy = std::min(py, static_cast<int>(shotBounds.Height()));
+                    const uint8* src = static_cast<const uint8*>(shot->Bits()) + sy * shot->BytesPerRow() + sx * 4;
+                    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+                    dst[3] = static_cast<uint8>(std::lround((1.0f - inside) * 255.0f));
+                }
+            }
+            delete shot;
+            fCorner[i] = corner;
+        }
+    }
+
+    ~DrawerFrameView() {
+        for (int i = 0; i < 4; ++i) delete fCorner[i];
+    }
+
+    virtual void Draw(BRect) {
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(NavUI::PillFill());
+        FillRect(Bounds());
+        SetDrawingMode(B_OP_ALPHA);
+        SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+        for (int i = 0; i < 4; ++i) {
+            if (fCorner[i] == nullptr) continue;
+            const BRect b = Bounds();
+            DrawBitmap(fCorner[i], BPoint((i & 1) ? b.right - (kCorner - 1) : b.left, (i & 2) ? b.bottom - (kCorner - 1) : b.top));
+        }
+    }
+
+private:
+    BBitmap* fCorner[4];
+};
+
+
 class HaikuAppDrawerWindow : public BWindow {
 private:
     BMessageRunner* fHoverTicker;
@@ -5111,14 +5409,27 @@ public:
         MoveTo(horizontalMarginGap, topY);
         ResizeTo(targetPanelWidth, targetPanelHeight);
 
-        BRect bounds = Bounds();
-        bounds.right -= B_V_SCROLL_BAR_WIDTH;
+        if (NavUI::SnakeLookPreference()) {
+            // the Snake look: a lavender panel with round corners, and the scrolling grid set in from its edge
+            DrawerFrameView* panel = new DrawerFrameView(Bounds(), Frame());
+            AddChild(panel);
+            const float inset = 12.0f;
+            BRect inner = Bounds().InsetByCopy(inset, inset);
+            inner.right -= B_V_SCROLL_BAR_WIDTH;
+            DrawerView* drawerView = new DrawerView(inner);
+            BScrollView* scrollView = new BScrollView("DashboardScroll", drawerView,
+                B_FOLLOW_ALL, 0, false, true, B_NO_BORDER);
+            panel->AddChild(scrollView);
+        } else {
+            BRect bounds = Bounds();
+            bounds.right -= B_V_SCROLL_BAR_WIDTH;
 
-        DrawerView* drawerView = new DrawerView(bounds);
-        BScrollView* scrollView = new BScrollView("DashboardScroll", drawerView,
-            B_FOLLOW_ALL, 0, false, true, B_NO_BORDER);
+            DrawerView* drawerView = new DrawerView(bounds);
+            BScrollView* scrollView = new BScrollView("DashboardScroll", drawerView,
+                B_FOLLOW_ALL, 0, false, true, B_NO_BORDER);
 
-        AddChild(scrollView);
+            AddChild(scrollView);
+        }
 
         // Run the position checker 10 times a second
         BMessage tickMessage('tick');

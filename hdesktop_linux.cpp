@@ -196,6 +196,9 @@ struct Settings {
     float  dockAlpha = 0.32f;
     int    dockColor[3] = {216, 216, 216}; // backplate RGB; Haiku's default panel grey
     int    accentColor[3] = {70, 110, 200}; // selector / highlight color (menus, sliders, checkboxes...)
+    int    drawerTransparency = 0;                // how see-through the drawer's panel is, in percent
+    bool   menuColorAuto = true;                  // the menus' and the drawer's panel color follows the selector color...
+    int    menuColor[3] = {185, 200, 234};        // ...unless it is set here (Settings > Menu & Drawer Color)
     int    effectDurationMs = 750;
     int    previewWidth = 180;        // window preview card width (logical px); height follows 180:110
     int    openEffect = kEffectSpin;
@@ -262,6 +265,14 @@ static void SaveConfiguration() {
     snprintf(colorHex, sizeof(colorHex), "#%02x%02x%02x", gSettings.accentColor[0], gSettings.accentColor[1],
         gSettings.accentColor[2]);
     g_key_file_set_string(kf, g, "accent_color", colorHex);
+    if (gSettings.menuColorAuto) {
+        g_key_file_set_string(kf, g, "menu_color", "auto");
+    } else {
+        snprintf(colorHex, sizeof(colorHex), "#%02x%02x%02x", gSettings.menuColor[0], gSettings.menuColor[1],
+            gSettings.menuColor[2]);
+        g_key_file_set_string(kf, g, "menu_color", colorHex);
+    }
+    g_key_file_set_integer(kf, g, "drawer_transparency", gSettings.drawerTransparency);
     g_key_file_set_integer(kf, g, "effect_duration", gSettings.effectDurationMs);
     g_key_file_set_integer(kf, g, "preview_width", gSettings.previewWidth);
     g_key_file_set_string(kf, g, "open_effect", kEffectNames[gSettings.openEffect]);
@@ -353,6 +364,17 @@ static void LoadConfiguration() {
         gSettings.accentColor[1] = static_cast<int>(gr);
         gSettings.accentColor[2] = static_cast<int>(b);
     }
+    getString("menu_color", colorHex);
+    if (colorHex.size() == 7 && sscanf(colorHex.c_str(), "#%02x%02x%02x", &r, &gr, &b) == 3) {
+        gSettings.menuColorAuto = false;
+        gSettings.menuColor[0] = static_cast<int>(r);
+        gSettings.menuColor[1] = static_cast<int>(gr);
+        gSettings.menuColor[2] = static_cast<int>(b);
+    } else {
+        gSettings.menuColorAuto = true;
+    }
+    getInt("drawer_transparency", gSettings.drawerTransparency);
+    gSettings.drawerTransparency = std::clamp(gSettings.drawerTransparency, 0, 80);
     getInt("effect_duration", gSettings.effectDurationMs);
     getInt("preview_width", gSettings.previewWidth);
     std::string effect;
@@ -2503,7 +2525,11 @@ inline RGBA Mix(RGBA a, RGBA b, double t) {
 }
 // The pill (the Selector Color in a light tint), the lit row's colour (the Selector Color), and the text on a colour.
 // (the menus are always dark-themed here, so the tints of Haiku's dark theme)
-inline RGBA Fill() { return Mix(AccentColor(), RGBA{1, 1, 1, 1}, 0.62); }
+inline RGBA DerivedFill() { return Mix(AccentColor(), RGBA{1, 1, 1, 1}, 0.62); }
+inline RGBA Fill() {
+    if (gSettings.menuColorAuto) return DerivedFill();
+    return RGBA{gSettings.menuColor[0] / 255.0, gSettings.menuColor[1] / 255.0, gSettings.menuColor[2] / 255.0, 1};
+}
 inline RGBA Hot() { return Mix(AccentColor(), RGBA{1, 1, 1, 1}, 0.18); }
 inline RGBA TextOn(RGBA c) {
     double lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
@@ -8578,6 +8604,54 @@ static DockEngine* gDock = nullptr;
 // Full-width grid of every installed application (from .desktop files rather
 // than /boot/system/apps), favorites first, power buttons in the header. New
 // on Linux: type to search, Enter launches the first match.
+// A raised pill (or rounded rectangle) lit from the top left, as a premultiplied ARGB32 image in device pixels: a smooth round
+// bar worked out from the shape's exact distance to its edge, with a thin darker rim, so the edge is a clean line.
+static cairo_surface_t* MakeRaisedPillSurface(int w, int h, double radius, RGBA color, double scale) {
+    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    uint8_t* data = cairo_image_surface_get_data(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+    const float fw = static_cast<float>(w), fh = static_cast<float>(h), rad = static_cast<float>(radius);
+    auto inside = [&](float px, float py) -> float {
+        const float hx = fw / 2.0f, hy = fh / 2.0f;
+        const float qx = std::fabs(px - hx) - hx + rad, qy = std::fabs(py - hy) - hy + rad;
+        const float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
+        return -(std::min(std::max(qx, qy), 0.0f) + outside - rad);
+    };
+    const float crown = std::max(static_cast<float>(2.0 * scale), std::min(static_cast<float>(6.0 * scale), fh * 0.22f));
+    auto height = [&](float px, float py) -> float {
+        const float t = std::min(1.0f, std::max(0.0f, inside(px, py)) / crown);
+        return crown * std::sqrt(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
+    };
+    const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
+    const float ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+    const float one = static_cast<float>(scale);
+    for (int y = 0; y < h; ++y) {
+        uint32_t* row = reinterpret_cast<uint32_t*>(data + y * stride);
+        for (int x = 0; x < w; ++x) {
+            const float px = x + 0.5f, py = y + 0.5f;
+            const float di = inside(px, py);
+            const float cover = std::max(0.0f, std::min(1.0f, 0.5f + di));
+            float rs = 0.0f;
+            if (cover > 0.0f) {
+                const float gx = (height(px + 1.0f, py) - height(px - 1.0f, py)) * 0.5f;
+                const float gy = (height(px, py + 1.0f) - height(px, py - 1.0f)) * 0.5f;
+                const float nn = std::sqrt(gx * gx + gy * gy + 1.0f);
+                rs = ((-gx * lx - gy * ly + lz) / (nn * ln) - lz / ln) * 0.6f;
+            }
+            float r = static_cast<float>(color.r) * 255.0f, g = static_cast<float>(color.g) * 255.0f,
+                b = static_cast<float>(color.b) * 255.0f;
+            if (rs > 0.0f) { r += (255.0f - r) * rs; g += (255.0f - g) * rs; b += (255.0f - b) * rs; }
+            else if (rs < 0.0f) { r *= 1.0f + rs; g *= 1.0f + rs; b *= 1.0f + rs; }
+            const float rim = 1.0f - 0.2f * std::max(0.0f, std::min(1.0f, 1.5f * one - di) / one);
+            r = std::min(255.0f, r * rim) * cover; g = std::min(255.0f, g * rim) * cover; b = std::min(255.0f, b * rim) * cover;
+            row[x] = (static_cast<uint32_t>(std::lround(cover * 255.0f)) << 24) | (static_cast<uint32_t>(std::lround(r)) << 16)
+                | (static_cast<uint32_t>(std::lround(g)) << 8) | static_cast<uint32_t>(std::lround(b));
+        }
+    }
+    cairo_surface_mark_dirty(surface);
+    return surface;
+}
+
 class AppDrawer : public LayerPanel {
 public:
     AppDrawer() {
@@ -8598,6 +8672,7 @@ public:
 
     ~AppDrawer() override {
         if (fCloseTimer) g_source_remove(fCloseTimer);
+        for (auto& entry : fPillCache) cairo_surface_destroy(entry.second);
     }
 
     void RebuildList() {
@@ -8614,85 +8689,128 @@ public:
         Redraw();
     }
 
+    // The drawer is a lavender panel (the Selector Color's light tint) with raised pills, as on Haiku: the buttons, the title
+    // and the section tabs, and a raised card for the app under the pointer.
+    void DrawRaisedPill(cairo_t* cr, double x, double y, double w, double h, double radius, RGBA color) {
+        const int dw = std::max(2, static_cast<int>(std::lround(w * scale))), dh = std::max(2, static_cast<int>(std::lround(h * scale)));
+        const uint64_t key = (static_cast<uint64_t>(dw & 0xFFF) << 44) | (static_cast<uint64_t>(dh & 0xFFF) << 32)
+            | (static_cast<uint64_t>(std::lround(radius * scale) & 0xFF) << 24)
+            | (static_cast<uint64_t>(std::lround(color.r * 255)) << 16) | (static_cast<uint64_t>(std::lround(color.g * 255)) << 8)
+            | static_cast<uint64_t>(std::lround(color.b * 255));
+        auto it = fPillCache.find(key);
+        if (it == fPillCache.end())
+            it = fPillCache.emplace(key, MakeRaisedPillSurface(dw, dh, radius * scale, color, scale)).first;
+        cairo_save(cr);
+        cairo_translate(cr, x, y);
+        cairo_scale(cr, w / dw, h / dh);
+        cairo_set_source_surface(cr, it->second, 0, 0);
+        cairo_paint(cr);
+        cairo_restore(cr);
+    }
+
+    // Text centred in a rectangle, on whole pixels, with a dark shadow behind it.
+    void DrawShadowedText(cairo_t* cr, const std::string& text, const HRect& r, double size, RGBA face) {
+        double tw = 0, th = 0;
+        MeasureText(text, size, true, &tw, &th);
+        const double x = std::floor(r.left + (r.Width() - tw) / 2), y = std::floor(r.top + (r.Height() - th) / 2);
+        DrawText(cr, text, x + 1, y + 1, size, true, RGBA{10 / 255.0, 8 / 255.0, 30 / 255.0, 0.75});
+        DrawText(cr, text, x, y, size, true, face);
+    }
+
+    void DrawGroove(cairo_t* cr, double x0, double x1, double y) {
+        const RGBA fill = PillGfx::Fill();
+        const RGBA dark = PillGfx::Mix(fill, RGBA{0, 0, 0, 1}, 0.22), light = PillGfx::Mix(fill, RGBA{1, 1, 1, 1}, 0.55);
+        cairo_set_source_rgba(cr, dark.r, dark.g, dark.b, 1);
+        cairo_rectangle(cr, x0, y, x1 - x0, 1);
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, light.r, light.g, light.b, 1);
+        cairo_rectangle(cr, x0, y + 1, x1 - x0, 1);
+        cairo_fill(cr);
+    }
+
+    void DrawHeaderButton(cairo_t* cr, const HRect& r, const char* label, RGBA face) {
+        const RGBA fill = PillGfx::Fill(), hot = PillGfx::Hot();
+        const bool hovered = r.Contains(fMouseX, fMouseY);
+        DrawRaisedPill(cr, r.left, r.top, r.Width(), r.Height(), 16,
+            PillGfx::Mix(fill, hot, hovered ? 0.55 : 0.38));
+        DrawShadowedText(cr, label, r, 12, face);
+    }
+
     void Paint(cairo_t* cr) override {
         const double w = width, h = height;
-        RoundedRectPath(cr, 0, 0, w, h, 10);
-        cairo_set_source_rgba(cr, 24 / 255.0, 24 / 255.0, 28 / 255.0, 0.97);
-        cairo_fill_preserve(cr);
-        cairo_set_source_rgba(cr, 48 / 255.0, 50 / 255.0, 58 / 255.0, 1);
-        cairo_set_line_width(cr, 1);
-        cairo_stroke(cr);
+        const RGBA fill = PillGfx::Fill(), hot = PillGfx::Hot();
+        const RGBA raised = PillGfx::Mix(fill, hot, 0.38), lit = PillGfx::Mix(fill, hot, 0.55);
+        const RGBA text = PillGfx::TextOn(fill);
+        const RGBA tabColor = PillGfx::Mix(AccentColor(), RGBA{0, 0, 0, 1}, 0.38);
+
+        RoundedRectPath(cr, 0, 0, w, h, 22);
+        cairo_set_source_rgba(cr, fill.r, fill.g, fill.b, 1.0 - gSettings.drawerTransparency / 100.0);
+        cairo_fill(cr);
 
         // ---- Header -----------------------------------------------------
-        double tw = 0;
-        MeasureText("hdesktop", 20, true, &tw, nullptr);
-        DrawText(cr, "hdesktop", (w - tw) / 2, 8, 20, true, RGBA{220 / 255.0, 225 / 255.0, 235 / 255.0, 1});
+        double tw = 0, th = 0;
+        MeasureText("hdesktop", 20, true, &tw, &th);
+        const HRect titleRect{static_cast<float>((w - (tw + 44)) / 2), 10, static_cast<float>((w + (tw + 44)) / 2), 50};
+        DrawRaisedPill(cr, titleRect.left, titleRect.top, titleRect.Width(), titleRect.Height(), 20, raised);
+        DrawShadowedText(cr, "hdesktop", titleRect, 20, RGBA{18 / 255.0, 38 / 255.0, 130 / 255.0, 1});
 
-        DrawHeaderButton(cr, PowerOffRect(), "Power off", RGBA{220 / 255.0, 60 / 255.0, 60 / 255.0, 45 / 255.0},
-            RGBA{1, 90 / 255.0, 90 / 255.0, 1}, RGBA{210 / 255.0, 100 / 255.0, 100 / 255.0, 1});
-        DrawHeaderButton(cr, LogoutRect(), "Log out", RGBA{225 / 255.0, 228 / 255.0, 235 / 255.0, 45 / 255.0},
-            RGBA{245 / 255.0, 246 / 255.0, 250 / 255.0, 1}, RGBA{185 / 255.0, 188 / 255.0, 196 / 255.0, 1});
-        DrawHeaderButton(cr, RebootRect(), "Restart system", RGBA{60 / 255.0, 140 / 255.0, 220 / 255.0, 45 / 255.0},
-            RGBA{90 / 255.0, 175 / 255.0, 1, 1}, RGBA{100 / 255.0, 160 / 255.0, 220 / 255.0, 1});
+        DrawHeaderButton(cr, PowerOffRect(), "Power off", RGBA{200 / 255.0, 28 / 255.0, 28 / 255.0, 1});
+        DrawHeaderButton(cr, LogoutRect(), "Log out", RGBA{40 / 255.0, 44 / 255.0, 70 / 255.0, 1});
+        DrawHeaderButton(cr, RebootRect(), "Restart system", RGBA{28 / 255.0, 60 / 255.0, 200 / 255.0, 1});
 
-        // Search field
+        // Search field: a sunken pill
         HRect sr = SearchRect();
-        RoundedRectPath(cr, sr.left, sr.top, sr.Width(), sr.Height(), 4);
-        cairo_set_source_rgba(cr, 35 / 255.0, 36 / 255.0, 42 / 255.0, 1);
+        RoundedRectPath(cr, sr.left, sr.top, sr.Width(), sr.Height(), 16);
+        const RGBA well = PillGfx::Mix(fill, RGBA{0, 0, 0, 1}, 0.12);
+        cairo_set_source_rgba(cr, well.r, well.g, well.b, 1);
         cairo_fill_preserve(cr);
-        SetAccent(cr, fSearch.empty() ? 0.35 : 0.9);
+        if (fSearch.empty()) {
+            const RGBA edge = PillGfx::Mix(fill, RGBA{0, 0, 0, 1}, 0.3);
+            cairo_set_source_rgba(cr, edge.r, edge.g, edge.b, 1);
+        } else
+            SetAccent(cr, 0.9);
+        cairo_set_line_width(cr, 1);
         cairo_stroke(cr);
         std::string shown = fSearch.empty() ? "Type to search…" : fSearch;
-        RGBA sc = fSearch.empty() ? RGBA{0.5, 0.5, 0.55, 1} : RGBA{0.94, 0.94, 0.96, 1};
-        double th = 0;
-        MeasureText("Ag", 12, false, nullptr, &th);
-        DrawText(cr, shown, sr.left + 10, sr.top + (sr.Height() - th) / 2, 12, false, sc, sr.Width() - 20);
+        RGBA sc = fSearch.empty() ? PillGfx::Mix(text, fill, 0.45) : text;
+        double sth = 0;
+        MeasureText("Ag", 12, false, nullptr, &sth);
+        DrawText(cr, shown, sr.left + 14, sr.top + (sr.Height() - sth) / 2, 12, false, sc, sr.Width() - 28);
         if (!fSearch.empty()) {
             double cw = 0;
             MeasureText(fSearch, 12, false, &cw, nullptr);
-            double cx = std::min(sr.left + 10 + cw + 1, static_cast<double>(sr.right) - 10);
-            cairo_set_source_rgba(cr, 0.9, 0.9, 0.95, 0.8);
-            cairo_rectangle(cr, cx, sr.top + 7, 1, sr.Height() - 14);
+            double cx = std::min(sr.left + 14 + cw + 1, static_cast<double>(sr.right) - 14);
+            cairo_set_source_rgba(cr, text.r, text.g, text.b, 0.8);
+            cairo_rectangle(cr, cx, sr.top + 8, 1, sr.Height() - 16);
             cairo_fill(cr);
         }
 
-        cairo_set_source_rgba(cr, 50 / 255.0, 52 / 255.0, 60 / 255.0, 1);
-        cairo_rectangle(cr, 20, 90, w - 40, 1);
-        cairo_fill(cr);
-        cairo_set_source_rgba(cr, 120 / 255.0, 130 / 255.0, 150 / 255.0, 20 / 255.0);
-        cairo_rectangle(cr, 20, 91, w - 40, 1);
-        cairo_fill(cr);
+        DrawGroove(cr, 20, w - 20, 90);
 
         // ---- Grid ---------------------------------------------------------
         cairo_save(cr);
-        cairo_rectangle(cr, 0, 95, w, h - 100);
+        cairo_rectangle(cr, 0, 92, w, h - 97);
         cairo_clip(cr);
         LayoutGrid();
-        for (const auto& sec : fSections) {
-            double y = sec.headerY - fScroll;
+        for (size_t si = 0; si < fSections.size(); ++si) {
+            const auto& sec = fSections[si];
+            // each tab hangs from the groove above it: the header's, or the one after the favorites
+            const double y = (si == 0 ? 93.0 : sec.headerY - 1.0) - fScroll;
             if (y > 60 && y < h) {
-                DrawText(cr, sec.title, kStartX, y, 12, true, sec.favorites
-                    ? RGBA{130 / 255.0, 145 / 255.0, 180 / 255.0, 200 / 255.0}
-                    : RGBA{120 / 255.0, 125 / 255.0, 135 / 255.0, 180 / 255.0});
+                double stw = 0, sth2 = 0;
+                MeasureText(sec.title, 12, true, &stw, &sth2);
+                DrawRaisedPill(cr, kStartX, y, stw + 24, 22, 8, tabColor);
+                DrawText(cr, sec.title, kStartX + 12, y + (22 - sth2) / 2, 12, true, PillGfx::TextOn(tabColor));
             }
-            if (sec.dividerY > 0) {
-                cairo_set_source_rgba(cr, 50 / 255.0, 52 / 255.0, 60 / 255.0, 120 / 255.0);
-                cairo_rectangle(cr, kStartX, sec.dividerY - fScroll, w - 2 * kStartX, 1);
-                cairo_fill(cr);
-            }
+            if (sec.dividerY > 0)
+                DrawGroove(cr, kStartX, w - kStartX, sec.dividerY - fScroll);
         }
         for (const auto& cell : fCells) {
             double x = cell.rect.left, y = cell.rect.top - fScroll;
-            if (y + kItemH < 95 || y > h) continue;
+            if (y + kItemH < 92 || y > h) continue;
             const Item& item = fItems[cell.item];
             bool hovered = (&cell - fCells.data()) == fHoveredCell;
-            if (hovered) {
-                cairo_rectangle(cr, x + 0.5, y + 0.5, kItemW - 1, kItemH - 1);
-                cairo_set_source_rgba(cr, 100 / 255.0, 140 / 255.0, 220 / 255.0, 30 / 255.0);
-                cairo_fill_preserve(cr);
-                cairo_set_source_rgba(cr, 130 / 255.0, 160 / 255.0, 220 / 255.0, 70 / 255.0);
-                cairo_stroke(cr);
-            }
+            if (hovered) DrawRaisedPill(cr, x, y, kItemW, kItemH, 16, lit);
             IconRef icon = CachedIcon(item.icon, static_cast<int>(std::ceil(48 * scale)));
             if (!icon) {
                 icon = MakeIconRef(MakePlaceholderIcon(static_cast<int>(std::ceil(48 * scale)), item.name));
@@ -8706,24 +8824,26 @@ public:
                 cairo_paint(cr);
                 cairo_restore(cr);
             }
-            DrawText(cr, item.name, x + 5, y + 76, 11, false, RGBA{240 / 255.0, 240 / 255.0, 245 / 255.0, 1},
+            if (!hovered)
+                DrawText(cr, item.name, x + 6, y + 77, 11, false, RGBA{1, 1, 1, 0.43}, kItemW - 10, true);
+            DrawText(cr, item.name, x + 5, y + 76, 11, false, hovered ? RGBA{15 / 255.0, 12 / 255.0, 40 / 255.0, 1} : text,
                 kItemW - 10, true);
         }
         if (fCells.empty()) {
             std::string msg = fSearch.empty() ? "No applications found" : "No matches for “" + fSearch + "”";
             double mw = 0;
             MeasureText(msg, 13, false, &mw, nullptr);
-            DrawText(cr, msg, (w - mw) / 2, 140, 13, false, RGBA{0.6, 0.6, 0.65, 1});
+            DrawText(cr, msg, (w - mw) / 2, 140, 13, false, PillGfx::Mix(text, fill, 0.35));
         }
         cairo_restore(cr);
 
         // Scroll position indicator
-        double viewH = h - 100;
+        double viewH = h - 97;
         if (fContentHeight > viewH + 1) {
             double barH = std::max(30.0, viewH * viewH / fContentHeight);
-            double barY = 95 + (viewH - barH) * (fScroll / (fContentHeight - viewH));
-            RoundedRectPath(cr, w - 9, barY, 4, barH, 2);
-            cairo_set_source_rgba(cr, 1, 1, 1, 0.18);
+            double barY = 92 + (viewH - barH) * (fScroll / (fContentHeight - viewH));
+            RoundedRectPath(cr, w - 14, barY, 5, barH, 2.5);
+            cairo_set_source_rgba(cr, hot.r, hot.g, hot.b, 0.7);
             cairo_fill(cr);
         }
     }
@@ -8864,25 +8984,11 @@ private:
 
     static constexpr double kItemW = 100, kItemH = 110, kStartX = 30, kSpacingX = 24, kSpacingY = 20;
 
-    HRect PowerOffRect() const { return HRect{30, 45, 110, 76}; }
-    HRect LogoutRect() const { return HRect{120, 45, 200, 76}; }
-    HRect RebootRect() const { return HRect{210, 45, 315, 76}; }
-    HRect SearchRect() const { return HRect{static_cast<float>(width - 330), 45, static_cast<float>(width - 30), 76}; }
-
-    void DrawHeaderButton(cairo_t* cr, const HRect& r, const char* label, RGBA hoverFill, RGBA hoverText, RGBA text) {
-        bool hovered = r.Contains(fMouseX, fMouseY);
-        cairo_rectangle(cr, r.left + 0.5, r.top + 0.5, r.Width() - 1, r.Height() - 1);
-        if (hovered) cairo_set_source_rgba(cr, hoverFill.r, hoverFill.g, hoverFill.b, hoverFill.a);
-        else cairo_set_source_rgba(cr, 35 / 255.0, 36 / 255.0, 42 / 255.0, 1);
-        cairo_fill_preserve(cr);
-        RGBA c = hovered ? hoverText : text;
-        cairo_set_source_rgba(cr, c.r, c.g, c.b, c.a);
-        cairo_set_line_width(cr, 1);
-        cairo_stroke(cr);
-        double tw = 0, th = 0;
-        MeasureText(label, 11, false, &tw, &th);
-        DrawText(cr, label, r.left + (r.Width() - tw) / 2, r.top + (r.Height() - th) / 2, 11, false, c);
-    }
+    HRect PowerOffRect() const { return HRect{30, 14, 140, 46}; }
+    HRect LogoutRect() const { return HRect{152, 14, 262, 46}; }
+    HRect RebootRect() const { return HRect{274, 14, 414, 46}; }
+    HRect SearchRect() const { return HRect{static_cast<float>(width - 330), 14, static_cast<float>(width - 30), 46}; }
+    std::map<uint64_t, cairo_surface_t*> fPillCache;
 
     bool Matches(const Item& item) const {
         if (fSearch.empty()) return true;
@@ -9916,6 +10022,8 @@ private:
 
 static std::unique_ptr<ColorPanel> gColorPanel;
 
+static std::function<void()> gColorPanelDoneHook;
+
 static void ShowColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int parentHeight, int* target,
     const char* title, const int* defaults) {
     if (gColorPanel || parent == nullptr) return;
@@ -9924,6 +10032,7 @@ static void ShowColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int p
         if (!gColorPanel) return;
         ColorPanel* raw = gColorPanel.release();
         RunLater([raw]() { delete raw; });
+        if (gColorPanelDoneHook) gColorPanelDoneHook();
     };
     // Dismissed by the compositor (a click outside it): same as Cancel.
     gColorPanel->onDismissed = []() { if (gColorPanel) gColorPanel->Cancel(); };
@@ -10017,7 +10126,12 @@ public:
                     DrawText(cr, w.label, w.rect.left, w.rect.top, 12, true, text);
                     HRect sw{w.rect.right - 40, w.rect.top, w.rect.right, w.rect.bottom};
                     RoundedRectPath(cr, sw.left + 0.5, sw.top + 0.5, sw.Width() - 1, sw.Height() - 1, 3);
-                    cairo_set_source_rgb(cr, w.color[0] / 255.0, w.color[1] / 255.0, w.color[2] / 255.0);
+                    if (w.color == gSettings.menuColor) {
+                        // (the menus' color: what is in use, which is the Selector Color's tint until it is set)
+                        const RGBA inUse = PillGfx::Fill();
+                        cairo_set_source_rgb(cr, inUse.r, inUse.g, inUse.b);
+                    } else
+                        cairo_set_source_rgb(cr, w.color[0] / 255.0, w.color[1] / 255.0, w.color[2] / 255.0);
                     cairo_fill_preserve(cr);
                     if (hovered) { RGBA ring = AccentLight(); cairo_set_source_rgba(cr, ring.r, ring.g, ring.b, 1); }
                     else cairo_set_source_rgba(cr, 110 / 255.0, 115 / 255.0, 130 / 255.0, 1);
@@ -10048,6 +10162,24 @@ public:
                     break;
                 }
                 case Widget::kSlider: {
+                    if (w.compact) {
+                        const double v = w.getDouble();
+                        char valueBuf[48];
+                        snprintf(valueBuf, sizeof(valueBuf), "%s: %d%%", w.label.c_str(), static_cast<int>(std::lround(v)));
+                        DrawText(cr, valueBuf, w.rect.left, w.rect.top + 1, 12, false, text);
+                        const double trackY = w.rect.top + 9, left = w.trackLeft, tw2 = w.rect.right - w.trackLeft;
+                        const double frac = (v - w.min) / (w.max - w.min);
+                        RoundedRectPath(cr, left, trackY - 3, tw2, 6, 3);
+                        cairo_set_source_rgba(cr, 45 / 255.0, 46 / 255.0, 54 / 255.0, 1);
+                        cairo_fill(cr);
+                        RoundedRectPath(cr, left, trackY - 3, tw2 * frac, 6, 3);
+                        SetAccent(cr);
+                        cairo_fill(cr);
+                        cairo_arc(cr, left + tw2 * frac, trackY, hovered || fDragging == static_cast<int>(i) ? 8 : 7, 0, 2 * M_PI);
+                        cairo_set_source_rgb(cr, 0.92, 0.93, 0.96);
+                        cairo_fill(cr);
+                        break;
+                    }
                     double v = w.getDouble();
                     char valueBuf[48];
                     snprintf(valueBuf, sizeof(valueBuf), "%s: %d", w.label.c_str(), static_cast<int>(std::lround(v)));
@@ -10178,6 +10310,8 @@ private:
         int* color = nullptr; // kColor: the RGB triple the swatch shows and edits
         std::string pickerTitle;
         const int* colorDefault = nullptr;
+        bool compact = false;      // kSlider: the short one on a line of its own with something else
+        float trackLeft = 0;       // (and where its track starts)
         std::string help;   // hover text for the [?] badge after a checkbox label
         HRect helpRect;
     };
@@ -10316,6 +10450,55 @@ private:
             };
             colorRow("Adjust Dock Color:", "Dock Color", gSettings.dockColor, kDockDefault);
             colorRow("Selector Color:", "Selector Color", gSettings.accentColor, kAccentDefault);
+            {
+                // "Menu & Drawer Color": the panel behind the menus and the drawer. Until it is set it is a light tint of
+                // the Selector Color; the picker starts from that, and "Defaults" in it (or choosing the same color again)
+                // puts it back to following the Selector Color.
+                static int sMenuDefault[3];
+                Widget w;
+                w.type = Widget::kColor;
+                w.label = "Menu & Drawer Color:";
+                w.color = gSettings.menuColor;
+                double tw;
+                MeasureText(w.label, 12, true, &tw, nullptr);
+                w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
+                w.onClick = [this]() {
+                    const RGBA derived = PillGfx::DerivedFill();
+                    sMenuDefault[0] = static_cast<int>(std::lround(derived.r * 255));
+                    sMenuDefault[1] = static_cast<int>(std::lround(derived.g * 255));
+                    sMenuDefault[2] = static_cast<int>(std::lround(derived.b * 255));
+                    if (gSettings.menuColorAuto)
+                        for (int i = 0; i < 3; ++i) gSettings.menuColor[i] = sMenuDefault[i];
+                    gSettings.menuColorAuto = false;
+                    gColorPanelDoneHook = []() {
+                        const RGBA d = PillGfx::DerivedFill();
+                        const int want[3] = {static_cast<int>(std::lround(d.r * 255)), static_cast<int>(std::lround(d.g * 255)),
+                            static_cast<int>(std::lround(d.b * 255))};
+                        bool same = true;
+                        for (int i = 0; i < 3; ++i) same = same && std::abs(gSettings.menuColor[i] - want[i]) <= 1;
+                        if (same) gSettings.menuColorAuto = true;
+                        gColorPanelDoneHook = nullptr;
+                    };
+                    ShowColorPanel(layerSurface, width, height, gSettings.menuColor, "Menu & Drawer Color", sMenuDefault);
+                };
+                fWidgets.push_back(w);
+                // the drawer's transparency, on the same line as the color
+                Widget t;
+                t.type = Widget::kSlider;
+                t.compact = true;
+                t.label = "Transparency";
+                t.min = 0;
+                t.max = 80;
+                t.getDouble = []() { return static_cast<double>(gSettings.drawerTransparency); };
+                t.setDouble = [](double v) { gSettings.drawerTransparency = static_cast<int>(std::lround(v)); };
+                const float left = w.rect.right + 36;
+                double lw = 0;
+                MeasureText("Transparency: 80%", 12, false, &lw, nullptr);
+                t.rect = HRect{left, y, kWidth - 40.0f, y + 18};
+                t.trackLeft = left + static_cast<float>(lw) + 12;
+                fWidgets.push_back(t);
+                y += 30;
+            }
         }
 
         slider("Effect Speed (ms)", 200, 1500, "Fast", "Slow",
@@ -10339,18 +10522,21 @@ private:
     int WidgetAt(double x, double y) const {
         for (size_t i = 0; i < fWidgets.size(); ++i) {
             HRect r = fWidgets[i].rect;
-            if (fWidgets[i].type == Widget::kSlider) { r.top += 14; r.bottom = r.top + 26; r.left -= 8; r.right += 8; }
+            if (fWidgets[i].type == Widget::kSlider && fWidgets[i].compact) { r.left = fWidgets[i].trackLeft - 8; r.right += 8; r.bottom += 4; }
+            else if (fWidgets[i].type == Widget::kSlider) { r.top += 14; r.bottom = r.top + 26; r.left -= 8; r.right += 8; }
             if (fWidgets[i].type != Widget::kLabel && r.Contains(x, y)) return static_cast<int>(i);
         }
         return -1;
     }
 
     void SetSliderFromX(Widget& w, double x) {
-        double frac = std::clamp((x - w.rect.left) / w.rect.Width(), 0.0, 1.0);
+        const double left = w.compact ? w.trackLeft : w.rect.left, span = w.compact ? w.rect.right - w.trackLeft : w.rect.Width();
+        double frac = std::clamp((x - left) / span, 0.0, 1.0);
         double v = w.min + frac * (w.max - w.min);
         if (std::lround(v) == std::lround(w.getDouble())) return;
         w.setDouble(v);
         if (gDock) gDock->SettingsChanged();
+        if (gDrawer) gDrawer->Redraw();
     }
 
     void Apply() {
