@@ -130,6 +130,28 @@ enum DockLocation {
 };
 int32 gDockLocation = kDockLocationBottom;
 
+// If the user's Deskbar sits along the same edge of the screen as the dock (at the top, in either corner of it, or all along it;
+// the same at the bottom), the dock goes to the other edge, so the two do not overlap. Done when hdesktop starts, from where the
+// Deskbar is then; a Deskbar on the left or right edge leaves the dock where it was set.
+static void AvoidDeskbarEdge() {
+    BDeskbar deskbar;
+    for (int i = 0; i < 25 && !deskbar.IsRunning(); ++i) snooze(200000);   // (the Deskbar may still be starting)
+    if (!deskbar.IsRunning()) return;
+    bool expanded = false;
+    const deskbar_location location = deskbar.Location(&expanded);
+    const bool atTop = location == B_DESKBAR_TOP || location == B_DESKBAR_LEFT_TOP || location == B_DESKBAR_RIGHT_TOP;
+    const bool atBottom = location == B_DESKBAR_BOTTOM || location == B_DESKBAR_LEFT_BOTTOM || location == B_DESKBAR_RIGHT_BOTTOM;
+    std::cout << "[i] hDesktop: the Deskbar is at the " << (atTop ? "top" : atBottom ? "bottom" : "side") << " (location "
+        << static_cast<int>(location) << ")" << std::endl;
+    if (atTop && gDockLocation == kDockLocationTop) {
+        gDockLocation = kDockLocationBottom;
+        std::cout << "[i] hDesktop: the dock moves to the bottom, clear of the Deskbar" << std::endl;
+    } else if (atBottom && gDockLocation == kDockLocationBottom) {
+        gDockLocation = kDockLocationTop;
+        std::cout << "[i] hDesktop: the dock moves to the top, clear of the Deskbar" << std::endl;
+    }
+}
+
 bool fShowWindowThumbnails = false;
 bool fShowAdvancedOptions = false;
 
@@ -13557,6 +13579,7 @@ int main(int argc, char* argv[]) {
     // Load settings (including the dock's screen edge) before computing any
     // geometry that depends on it.
     LoadConfiguration();
+    AvoidDeskbarEdge();
     WallpaperWatcher wallpaperWatcher;
 
     // Converts a window-local Y coordinate into world/screen space, and gives
