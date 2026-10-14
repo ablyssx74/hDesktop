@@ -667,6 +667,14 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
             client_window_info* wInfo = get_window_info(windowTokens[i]);
             if (wInfo == nullptr) continue;
 
+            // A window that is hidden but not minimized is one its program keeps for later (Tracker's preferences window is
+            // hidden, not closed, when it is closed): it is not one of the program's windows to the user, and offering it
+            // (to bring forward, or to close) left Tracker with no way to open a folder, and its preferences window gone.
+            if (wInfo->show_hide_level > 0 && !wInfo->is_mini) {
+                free(wInfo);
+                continue;
+            }
+
             // B_NORMAL_WINDOW_FEEL only -- the same filter every other
             // window-enumeration path in this file already applies (the
             // occlusion check, WorkspacePreviewView, the taskbar's own
@@ -7264,6 +7272,9 @@ private:
     int32 fDragWindowIndex;
 
     BMessageRunner* fRefreshTicker;
+    // The screen behind the popup, taken just before it is shown: with Rounded Edges the panel's corners are round, and a window
+    // is a rectangle, so what lies behind is drawn in the corners (see CaptureScreenBehind()).
+    BBitmap* fBackdrop = nullptr;
 
     // Icons load once per team and are reused across the twice-a-second window
     // list refresh; a cached nullptr means "looked it up, nothing found" so we
@@ -7277,11 +7288,19 @@ public:
           fDragging(false), fDragBoxIndex(-1), fDropTargetWorkspace(-1),
           fDragOriginalWorkspace(-1), fDragWindowIndex(-1),
           fRefreshTicker(nullptr) {
-        SetViewColor(rgb_color{24, 24, 28, 255});
+        SetViewColor(B_TRANSPARENT_COLOR);   // (Draw paints every pixel: the screen behind, or the panel's color)
         RefreshWindowList();
     }
 
+    // Takes ownership of the picture (nullptr: none).
+    void SetBackdrop(BBitmap* bitmap) {
+        delete fBackdrop;
+        fBackdrop = bitmap;
+        Invalidate();
+    }
+
     virtual ~WorkspacePreviewView() {
+        delete fBackdrop;
         delete fRefreshTicker;
         for (auto& entry : fIconCache) {
             delete entry.second;
@@ -7386,8 +7405,19 @@ public:
 
     virtual void Draw(BRect updateRect) {
         BRect bounds = Bounds();
-        SetHighColor(rgb_color{24, 24, 28, 255});
-        FillRect(bounds);
+        if (gNavRoundedEdges && fBackdrop != nullptr && fBackdrop->IsValid()) {
+            // round corners: the screen as it was behind the popup, and the panel over it
+            SetDrawingMode(B_OP_COPY);
+            DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+            SetDrawingMode(B_OP_ALPHA);
+            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            SetHighColor(rgb_color{24, 24, 28, 255});
+            FillRoundRect(bounds, 12.0f, 12.0f);
+            SetDrawingMode(B_OP_COPY);
+        } else {
+            SetHighColor(rgb_color{24, 24, 28, 255});
+            FillRect(bounds);
+        }
 
         float gap = 10.0f;
         float cellW = (bounds.Width()  - gap * (fGridCols + 1)) / fGridCols;
@@ -7903,6 +7933,8 @@ public:
 
         fView = new WorkspacePreviewView(Bounds());
         AddChild(fView);
+        // (the picture of the screen behind it, for the round corners: taken now, before the popup is shown)
+        if (gNavRoundedEdges) fView->SetBackdrop(CaptureScreenBehind(Frame()));
 
         BMessage tickMessage('tick');
         fHoverTicker = new BMessageRunner(BMessenger(this), &tickMessage, 100000);
@@ -9590,7 +9622,10 @@ void SyncDockWithRunningDeskbarApps() {
 	                        for (int32 i = 0; i < tokenCount; ++i) {
 	                            client_window_info* wInfo = get_window_info(tokens[i]);
 	                            if (wInfo != nullptr) {
-	                                if (wInfo->name[0] != '\0' && strcmp(wInfo->name, "Tracker status") != 0) {
+	                                // (only windows a user could have open: not the ones Tracker keeps hidden, such as its preferences
+	                                // window and its cached menus)
+	                                if (wInfo->name[0] != '\0' && strcmp(wInfo->name, "Tracker status") != 0
+	                                    && wInfo->feel != 1025 && (wInfo->show_hide_level == 0 || wInfo->is_mini)) {
 	                                    // If the window name is "Desktop", check if it is a real folder window or the system background.
 	                                    // B_DESKTOP_WINDOW_FEEL has a constant value of 1024.
 	                                    if (strcmp(wInfo->name, "Desktop") == 0 || BString(wInfo->name).EndsWith("/Desktop")) {
@@ -9677,7 +9712,7 @@ void SyncDockWithRunningDeskbarApps() {
                         for (int32 i = 0; i < systemCount; ++i) {
                             client_window_info* cInfo = get_window_info(systemTokens[i]);
                             if (cInfo != nullptr) {
-                                if (cInfo->team == focusTeam && cInfo->feel == B_NORMAL_WINDOW_FEEL) {
+                                if (cInfo->team == focusTeam && cInfo->feel == B_NORMAL_WINDOW_FEEL && (cInfo->show_hide_level == 0 || cInfo->is_mini)) {
                                     // Inject sub-message to force individual window wakeups
                                     BPrivate::AppServerLink winLink;
                                     winLink.StartMessage(AS_BRING_TEAM_TO_FRONT);
@@ -12393,7 +12428,7 @@ void SyncDockWithRunningDeskbarApps() {
                         for (int32 i = 0; i < systemCount; ++i) {
                             client_window_info* cInfo = get_window_info(systemTokens[i]);
                             if (cInfo != nullptr) {
-                                if (cInfo->team == fHoveredTeam && cInfo->feel == B_NORMAL_WINDOW_FEEL) {
+                                if (cInfo->team == fHoveredTeam && cInfo->feel == B_NORMAL_WINDOW_FEEL && (cInfo->show_hide_level == 0 || cInfo->is_mini)) {
                                     BPrivate::AppServerLink winLink;
                                     winLink.StartMessage(AS_BRING_TEAM_TO_FRONT);
                                     winLink.Attach<int32>(systemTokens[i]);

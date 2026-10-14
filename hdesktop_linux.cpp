@@ -2346,6 +2346,7 @@ struct MenuItem {
     int check = kCheckNone;
     std::function<void()> action;                     // with a submenu too: runs on click, hover opens the submenu
     std::function<std::vector<MenuItem>()> submenu;
+    bool noArrow = false;         // a submenu with no arrow on its row (the CPU graph's menus, like ProcessController's)
     unsigned liveMs = 0;          // re-run `submenu` this often while it's open (live CPU/memory menus)
     // BCpuBarMenuItem / BMemoryBarMenuItem style rows.
     double barPercent = -1.0;
@@ -2713,13 +2714,13 @@ public:
             } else if (fCentered) {
                 DrawText(cr, it.label, 4, textY, kFontSize, it.header, textColor, w - 8, true);
             } else {
-                double maxW = w - left - kPadX - (it.submenu ? 14 : 0);
+                double maxW = w - left - kPadX - (it.submenu && !it.noArrow ? 14 : 0);
                 DrawText(cr, it.label, left, textY, kFontSize, it.header, textColor, maxW);
             }
 
             // (an arrow that the trail's bar passes through is not drawn)
             const bool underTrail = fTrailBar.valid && fTrailBar.onRight && y + rh / 2 >= fTrailBar.top && y + rh / 2 <= fTrailBar.bottom;
-            if (it.submenu && !underTrail) {
+            if (it.submenu && !it.noArrow && !underTrail) {
                 double ax = w - kPadX - 4, ay = y + rh / 2;
                 cairo_new_path(cr);
                 cairo_set_source_rgba(cr, textColor.r, textColor.g, textColor.b, 0.9);
@@ -2878,7 +2879,7 @@ private:
             if (it.separator) continue;
             if (it.icon || !it.iconName.empty() || it.check != kCheckNone) fHasLeftColumn = true;
             if (it.barPercent >= 0) hasBars = true;
-            if (it.submenu) hasSubmenus = true;
+            if (it.submenu && !it.noArrow) hasSubmenus = true;
             if (it.wantThumb) hasThumbs = true;
             double tw = 0;
             MeasureText(it.label, kFontSize, it.header, &tw, nullptr);
@@ -8258,6 +8259,7 @@ private:
         quitApps.label = "Quit an application";
         quitApps.iconName = "application-exit";
         quitApps.submenu = [this]() { return QuitApplicationItems(); };
+        quitApps.noArrow = true;
         items.push_back(quitApps);
 
         MenuItem memory;
@@ -8265,6 +8267,7 @@ private:
         memory.iconName = "memory";
         memory.submenu = []() { return MemoryItems(); };
         memory.liveMs = 500;
+        memory.noArrow = true;
         items.push_back(memory);
 
         MenuItem threads;
@@ -8274,6 +8277,7 @@ private:
         sampler->Sample(); // prime the deltas
         threads.submenu = [this, sampler]() { return CpuProcessItems(*sampler); };
         threads.liveMs = 1000;
+        threads.noArrow = true;
         items.push_back(threads);
 
         std::string profile = CurrentPowerProfile();
@@ -8389,6 +8393,7 @@ private:
             // Sampled only once the submenu opens; the first pass primes the CPU deltas
             auto threads = std::make_shared<ThreadSampler>(pid);
             m.submenu = [pid, name, mine, threads]() { return ThreadItems(pid, name, mine, *threads); };
+            m.noArrow = true;
             m.liveMs = 1000;
             items.push_back(m);
         }
@@ -8513,6 +8518,7 @@ private:
             row.valueText = buf;
             pid_t tid = t.tid;
             row.submenu = [tid, mine]() { return ThreadPriorityItems(tid, mine); };
+            row.noArrow = true;
             items.push_back(row);
         }
         return items;
