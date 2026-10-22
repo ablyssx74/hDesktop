@@ -9,12 +9,14 @@
 #include <functional>
 #include <algorithm>
 #include <AppKit.h>
+#include <AppMisc.h>
 #include <AppServerLink.h>
 #include <atomic> // gDirectCaptureVerified and friends -- see their own comment
 #include <Autolock.h>
 #include <Bitmap.h>
 #include <Button.h>
 #include <CheckBox.h>
+#include <ControlLook.h>
 #include <cmath>
 #include <csetjmp> // sigsetjmp/siglongjmp -- SetupDirectCaptureIfNeeded()'s SIGSEGV/SIGBUS safety net
 #include <cstdint> // uintptr_t -- FastFramebufferCopy()'s own alignment check
@@ -30,6 +32,7 @@
 #include <Entry.h>
 #include <File.h>
 #include <FindDirectory.h>
+#include <KernelExport.h>
 #include <Font.h>
 #include <fs_attr.h>
 #include <GL/gl.h>
@@ -2477,101 +2480,260 @@ static bool ShowTrackerNavMenu(BPoint anchor, bool below, std::function<void(con
 static const bool kUseCustomTrackerMenu = true;
 
 // =========================================================================
-// CUSTOM RENDERING LAYER: LIVE GEOMETRIC REAL-TIME MEMORY USAGE GRAPH BAR
+// MEMORY USAGE ROWS, THE WAY PROCESSCONTROLLER'S MEMORY USAGE MENU HAS THEM
 // =========================================================================
-// Which memory row a bar shows -- each is colored by its own rule, see
-// BMemoryBarMenuItem::DrawContent().
-enum MemoryBarKind {
-    kMemoryBarUsed,   // Used Physical Memory: green <= 40%, orange 41-80%, red above
-    kMemoryBarFree,   // Free Available RAM:   red <= 40%, orange 41-80%, green above
-    kMemoryBarTotal   // Total Installed Capacity: always full, green
-};
+// One row for the system ("System resources & caches...": what is in use and what is cached, as a share of the physical
+// memory) and one for every team: its icon and name, the memory it has written to and all the memory it has, and a bar
+// of the two (written: dark blue, the rest: light blue, the share of the system's memory in use that nobody has: white).
+static const rgb_color kMemKernelBlue = {20, 20, 231, 255};
+static const rgb_color kMemLavender = {193, 122, 255, 255};
 
-class BMemoryBarMenuItem : public BMenuItem {
-public:
-    BMemoryBarMenuItem(const char* label, double fillPercentage, MemoryBarKind kind)
-        : BMenuItem(label, nullptr), fFillPercentage(fillPercentage), fKind(kind) {}
-
-    void UpdateMetrics(double newPercentage, const char* newLabel) {
-        fFillPercentage = newPercentage;
-        SetLabel(newLabel);
+// A number of KiB the way Haiku's string_for_size() writes it: "923.98 MiB", "1.58 GiB".
+static void FormatKiB(int64 kib, char* out, size_t size) {
+    double value = static_cast<double>(kib) * 1024.0;
+    static const char* const units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    int unit = 0;
+    while (value >= 1024.0 && unit < 4) {
+        value /= 1024.0;
+        unit++;
     }
+    if (unit == 0) std::snprintf(out, size, "%d B", static_cast<int>(value));
+    else std::snprintf(out, size, "%.2f %s", value, units[unit]);
+}
+
+// What ProcessController calls get_team_name_and_icon(): the name a row shows and its 16x16 icon (the caller owns it).
+static void TeamNameAndIcon(const team_info& teamInfo, BString& name, BBitmap** icon) {
+    char args[sizeof(teamInfo.args)];
+    std::strncpy(args, teamInfo.args, sizeof(args));
+    args[sizeof(args) - 1] = '\0';
+    for (int len = static_cast<int>(std::strlen(args)) - 1; len >= 0 && args[len] == ' '; len--) args[len] = '\0';
+
+    bool nameFromArgs = false;
+    bool tryTrackerIcon = true;
+    app_info info;
+    if (be_roster->GetRunningAppInfo(teamInfo.team, &info) != B_OK) {
+        nameFromArgs = true;
+        if (teamInfo.team == B_SYSTEM_TEAM) {
+            // the kernel: its name and icon are the kernel image's
+            system_info systemInfo;
+            get_system_info(&systemInfo);
+            BPath kernelPath;
+            find_directory(B_BEOS_SYSTEM_DIRECTORY, &kernelPath);
+            kernelPath.Append(systemInfo.kernel_name);
+            get_ref_for_path(kernelPath.Path(), &info.ref);
+        } else {
+            tryTrackerIcon = BPrivate::get_app_ref(teamInfo.team, &info.ref) == B_OK;
+        }
+    }
+    name = nameFromArgs ? args : info.ref.name;
+
+    *icon = nullptr;
+    BBitmap* bitmap = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32);
+    if (!tryTrackerIcon || BNodeInfo::GetTrackerIcon(&info.ref, bitmap, B_MINI_ICON) != B_OK) {
+        BMimeType genericApp(B_APP_MIME_TYPE);
+        if (genericApp.GetIcon(bitmap, B_MINI_ICON) != B_OK) {
+            delete bitmap;
+            return;
+        }
+    }
+    *icon = bitmap;
+}
+
+// The parts the system row and the team rows share: the icon, the label, the numbers and the frame of the bar.
+class BMemoryRowItem : public BMenuItem {
+public:
+    BMemoryRowItem(const char* label, BBitmap* icon) : BMenuItem(label, nullptr), fIcon(icon) {}
+    virtual ~BMemoryRowItem() override { delete fIcon; }
 
 protected:
+    static const int kBarWidth = 100;
+
+    // Room for two numbers like "95.37 MiB" and a gap (ProcessController's gMemoryTextWidth)
+    static float NumbersWidth(BMenu* menu) {
+        char widest[32];
+        FormatKiB(97656, widest, sizeof(widest));
+        return 2.0f * menu->StringWidth(widest) + 32.0f;
+    }
+
     virtual void GetContentSize(float* width, float* height) override {
         BMenuItem::GetContentSize(width, height);
-        *width = 420.0f;
-        *height = 18.0f;
+        if (*height < 16.0f) *height = 16.0f;
+        BFont font;
+        Menu()->GetFont(&font);
+        *width += ceilf(be_control_look->DefaultLabelSpacing() * 3.3f) + 20.0f + kBarWidth + font.Size() + NumbersWidth(Menu());
     }
+
+    BRect BarRect(const BRect& frame, const BFont& font) const {
+        font_height metrics;
+        font.GetHeight(&metrics);
+        const float barHeight = metrics.ascent;
+        return BRect(frame.right - font.Size() - kBarWidth, frame.top + (frame.Height() - barHeight) / 2.0f,
+            frame.right - font.Size(), frame.top + (frame.Height() + barHeight) / 2.0f);
+    }
+
+    rgb_color Lit(const rgb_color& color) const {
+        return IsSelected() ? tint_color(color, B_HIGHLIGHT_BACKGROUND_TINT) : color;
+    }
+
+    // The bar's frame, and the inside of it ready to be filled (returned)
+    BRect DrawBarFrame(BMenu* menu, const BRect& bar) const {
+        menu->SetHighColor(Lit(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), B_HIGHLIGHT_BACKGROUND_TINT)));
+        menu->StrokeRect(bar);
+        BRect inside = bar;
+        inside.InsetBy(1, 1);
+        return inside;
+    }
+
+    // Three pieces across the bar: up to `first` in the first color, up to `second` in the second, the rest white.
+    void FillBar(BMenu* menu, const BRect& inside, double first, double second, const rgb_color& firstColor,
+        const rgb_color& secondColor) const {
+        double mid1 = std::min<double>(inside.right, inside.left + (inside.right - inside.left) * first);
+        double mid2 = std::min<double>(inside.right, inside.left + (inside.right - inside.left) * second);
+        BRect part = inside;
+        part.right = static_cast<float>(mid1);
+        if (part.left < part.right) {
+            menu->SetHighColor(Lit(firstColor));
+            menu->FillRect(part);
+        }
+        part.left = static_cast<float>(mid1);
+        part.right = static_cast<float>(mid2);
+        if (part.left < part.right) {
+            menu->SetHighColor(Lit(secondColor));
+            menu->FillRect(part);
+        }
+        part.left = static_cast<float>(mid2);
+        part.right = inside.right;
+        if (part.left < part.right) {
+            menu->SetHighColor(Lit(rgb_color{255, 255, 255, 255}));
+            menu->FillRect(part);
+        }
+    }
+
+    // The two numbers left of the bar: the first in the middle of their room, the second against the bar.
+    void DrawNumbers(BMenu* menu, const BRect& bar, const BFont& font, int64 firstKiB, int64 secondKiB) const {
+        menu->SetHighColor(IsSelected() ? ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR) : ui_color(B_MENU_ITEM_TEXT_COLOR));
+        char text[32];
+        const float margin = font.Size();
+        const float edge = bar.left + 1.0f;
+        FormatKiB(firstKiB, text, sizeof(text));
+        menu->DrawString(text, BPoint(edge - margin - NumbersWidth(menu) / 2.0f - menu->StringWidth(text), bar.bottom));
+        FormatKiB(secondKiB, text, sizeof(text));
+        menu->DrawString(text, BPoint(edge - margin - menu->StringWidth(text), bar.bottom));
+    }
+
+    virtual void DrawBar(BMenu* menu, const BRect& bar, const BFont& font) = 0;
 
     virtual void DrawContent() override {
         BMenu* menu = Menu();
-        if (!menu) return;
-
-        BRect bounds = Frame();
-        float itemHeight = bounds.Height();
-
-        font_height fh;
-        menu->GetFontHeight(&fh);
-        float fontBaseline = bounds.top + (itemHeight - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
-
-        float nameColumnLeft = bounds.left + 5.0f;
-        float textColumnLeft = bounds.left + 280.0f;
-        float barColumnLeft  = bounds.left + 330.0f;
-        float barWidth = 80.0f;
-
-        // Render the descriptive text label
-        menu->MovePenTo(nameColumnLeft, fontBaseline);
-        menu->DrawString(Label());
-
-        // Format and render the numeric consumption percentage string
-        char pctStr[16];
-        std::snprintf(pctStr, sizeof(pctStr), "%3.1f%%", fFillPercentage);
-        menu->MovePenTo(textColumnLeft, fontBaseline);
-        menu->DrawString(pctStr);
-
-        // Build and draw the visual progress track capsule
-        float barHeight = 10.0f;
-        float barTop = bounds.top + (itemHeight - barHeight) / 2.0f;
-        BRect barTrack(barColumnLeft, barTop, barColumnLeft + barWidth, barTop + barHeight);
-
-        double clampedPercent = (fFillPercentage < 0.0) ? 0.0 : (fFillPercentage > 100.0) ? 100.0 : fFillPercentage;
-        BRect fillCap(barColumnLeft, barTop, barColumnLeft + (barWidth * (clampedPercent / 100.0)), barTop + barHeight);
-
-        // Dark track background silhouette
-        menu->SetHighColor(45, 45, 45);
-        menu->FillRect(barTrack);
-
-        // Dynamic resource footprint styling thresholds: plenty of free RAM
-        // (or little used) is green, getting tight is orange, low is red.
-        const rgb_color kGreen  = {50, 205, 50, 255};   // Neon Green
-        const rgb_color kOrange = {255, 140, 0, 255};   // Dark Orange
-        const rgb_color kRed    = {220, 20, 60, 255};   // Crimson Red
-        if (fKind == kMemoryBarTotal) {
-            menu->SetHighColor(kGreen);
-        } else if (fFillPercentage <= 40.0) {
-            menu->SetHighColor(fKind == kMemoryBarFree ? kRed : kGreen);
-        } else if (fFillPercentage <= 80.0) {
-            menu->SetHighColor(kOrange);
-        } else {
-            menu->SetHighColor(fKind == kMemoryBarFree ? kGreen : kRed);
+        if (menu == nullptr) return;
+        BFont font;
+        menu->GetFont(&font);
+        BRect frame = Frame();
+        BPoint where = ContentLocation();
+        if (fIcon != nullptr) {
+            menu->SetDrawingMode(B_OP_ALPHA);
+            menu->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            menu->DrawBitmap(fIcon, BPoint(where.x, frame.top + (frame.Height() - 15.0f) / 2.0f));
+            menu->SetDrawingMode(B_OP_COPY);
         }
+        DrawBar(menu, BarRect(frame, font), font);
+        where.x += ceilf(be_control_look->DefaultLabelSpacing() * 3.3f);
+        menu->SetHighColor(IsSelected() ? ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR) : ui_color(B_MENU_ITEM_TEXT_COLOR));
+        menu->MovePenTo(where);
+        BMenuItem::DrawContent();
+    }
 
-        if (fillCap.Width() > 0) {
-            menu->FillRect(fillCap);
+    BBitmap* fIcon;
+};
+
+
+// "System resources & caches...": in use (the number in the middle) and cached (against the bar), the bar the share of the
+// physical memory that is cached (dark blue), in use besides that (lavender), and free (white).
+class BSystemMemoryRowItem : public BMemoryRowItem {
+public:
+    BSystemMemoryRowItem() : BMemoryRowItem("System resources & caches...", nullptr) {
+        Update();
+    }
+
+    // true when what is drawn changed
+    bool Update() {
+        system_info info;
+        if (get_system_info(&info) != B_OK) return false;
+        int64 physical = static_cast<int64>(info.max_pages) * B_PAGE_SIZE / 1024;
+        int64 committed = static_cast<int64>(info.used_pages) * B_PAGE_SIZE / 1024;
+        int64 cached = static_cast<int64>(info.cached_pages) * B_PAGE_SIZE / 1024;
+        bool changed = physical != fPhysical || committed != fCommitted || cached != fCached;
+        fPhysical = physical;
+        fCommitted = committed;
+        fCached = cached;
+        return changed;
+    }
+
+protected:
+    virtual void DrawBar(BMenu* menu, const BRect& bar, const BFont& font) override {
+        BRect inside = DrawBarFrame(menu, bar);
+        if (fPhysical > 0) {
+            FillBar(menu, inside, static_cast<double>(fCached) / fPhysical, static_cast<double>(fCommitted) / fPhysical,
+                kMemKernelBlue, kMemLavender);
         }
-
-        // Apply a fine glass border overlay frame highlight
-        menu->SetHighColor(90, 90, 90);
-        menu->StrokeRect(barTrack);
-
-        // Restore brush configurations back to standard text properties
-        menu->SetHighColor(ui_color(B_MENU_ITEM_TEXT_COLOR));
+        DrawNumbers(menu, bar, font, fCommitted, fCached);
     }
 
 private:
-    double fFillPercentage;
-    MemoryBarKind fKind;
+    int64 fPhysical = 0, fCommitted = 0, fCached = 0;
+};
+
+
+// One team: what it has written to (RAM in writable areas) and all the RAM it has, drawn against the memory in use.
+class BTeamMemoryRowItem : public BMemoryRowItem {
+public:
+    BTeamMemoryRowItem(const char* label, team_id team, BBitmap* icon)
+        : BMemoryRowItem(label, icon), fTeam(team), fIsAppServer(std::strcmp(label, "app_server") == 0) {}
+
+    team_id Team() const { return fTeam; }
+
+    // Looks at the team's areas again. false when the team is gone; `changed` tells whether what is drawn changed.
+    bool Update(int64 committedKiB, bool* changed) {
+        area_info area;
+        ssize_t cookie = 0;
+        int64 all = 0, written = 0;
+        bool exists = false;
+        while (get_next_area_info(fTeam, &cookie, &area) == B_OK) {
+            exists = true;
+            all += area.ram_size;
+            if (fIsAppServer && std::strncmp(area.name, "a:", 2) == 0) continue;   // the clients' bitmaps
+            uint32 protection = area.protection;
+            if (fTeam == B_SYSTEM_TEAM && (protection & B_KERNEL_WRITE_AREA) != 0) protection |= B_WRITE_AREA;
+            if ((protection & B_WRITE_AREA) != 0) written += area.ram_size;
+        }
+        if (fTeam == B_SYSTEM_TEAM) {
+            system_info info;
+            if (get_system_info(&info) == B_OK) written -= static_cast<int64>(info.block_cache_pages) * B_PAGE_SIZE;
+        } else if (!exists) {
+            team_info teamInfo;
+            if (get_team_info(fTeam, &teamInfo) != B_OK) return false;
+        }
+        *changed = written / 1024 != fWritten || all / 1024 != fAll || committedKiB != fCommitted;
+        fWritten = written / 1024;
+        fAll = all / 1024;
+        fCommitted = committedKiB;
+        return true;
+    }
+
+protected:
+    virtual void DrawBar(BMenu* menu, const BRect& bar, const BFont& font) override {
+        BRect inside = DrawBarFrame(menu, bar);
+        if (fCommitted > 0) {
+            FillBar(menu, inside, static_cast<double>(fWritten) / fCommitted, static_cast<double>(fAll) / fCommitted,
+                kMemKernelBlue, tint_color(kMemKernelBlue, B_LIGHTEN_2_TINT));
+        }
+        DrawNumbers(menu, bar, font, fWritten, fAll);
+    }
+
+private:
+    team_id fTeam;
+    bool fIsAppServer;
+    int64 fWritten = 0, fAll = 0, fCommitted = 0;
 };
 
 
@@ -2678,63 +2840,70 @@ private:
 
 
 // =========================================================================
-// LIVE-PULSING SUBSYSTEM: DETAILED MEMORY AND RAM CACHE PROFILER CASCADE
+// LIVE-PULSING SUBSYSTEM: THE MEMORY USAGE MENU (ProcessController's: the system, then every team)
 // =========================================================================
 class BLiveMemoryMenu : public BMenu {
 public:
     BLiveMemoryMenu(const char* title) : BMenu(title) {
         SetFlags(Flags() | B_PULSE_NEEDED);
+        SetFont(be_plain_font);
+        // filled before it is first shown, so that the window is the right size from the start
+        AddItem(new BSystemMemoryRowItem());
+        Refresh(false);
     }
 
     virtual void AttachedToWindow() override {
         BMenu::AttachedToWindow();
-        Window()->SetPulseRate(500000); // Pulse metrics smoothly every half second
+        Window()->SetPulseRate(500000);   // the numbers move twice a second
+        Refresh(true);
     }
 
-     virtual void Pulse() override {
+    virtual void Pulse() override {
         BMenu::Pulse();
-
-        system_info info;
-        if (get_system_info(&info) == B_OK) {
-            double pageSize = static_cast<double>(B_PAGE_SIZE);
-            double totalBytes = static_cast<double>(info.max_pages) * pageSize;
-            double usedBytes = static_cast<double>(info.used_pages) * pageSize;
-
-            int32 totalMB = static_cast<int32>(totalBytes / (1024.0 * 1024.0));
-            int32 usedMB = static_cast<int32>(usedBytes / (1024.0 * 1024.0));
-            int32 freeMB = totalMB - usedMB;
-
-            // Compute actual global RAM consumption utilization scaling
-            double overallMemoryUsagePercent = 0.0;
-            if (totalBytes > 0) {
-                overallMemoryUsagePercent = (usedBytes / totalBytes) * 100.0;
-            }
-
-            // Create clean text strings
-            char i1[64], i2[64], i3[64];
-            std::snprintf(i1, sizeof(i1), "Used Physical Memory: %d MB", usedMB);
-            std::snprintf(i2, sizeof(i2), "Free Available RAM: %d MB", freeMB);
-            std::snprintf(i3, sizeof(i3), "Total Installed Capacity: %d MB", totalMB);
-
-            // Update row item text metrics or inject custom green graph bar items seamlessly
-            UpdateOrAddMemoryBarItem(0, i1, overallMemoryUsagePercent, kMemoryBarUsed);
-            UpdateOrAddMemoryBarItem(1, i2, 100.0 - overallMemoryUsagePercent, kMemoryBarFree); // Remaining percentage space
-            UpdateOrAddMemoryBarItem(2, i3, 100.0, kMemoryBarTotal); // Total capacity sits solid filled
-        }
+        Refresh(true);
     }
 
 private:
-    void UpdateOrAddMemoryBarItem(int32 idx, const char* label, double percentage, MemoryBarKind kind) {
-        BMemoryBarMenuItem* item = dynamic_cast<BMemoryBarMenuItem*>(ItemAt(idx));
-        if (item) {
-            item->UpdateMetrics(percentage, label);
-        } else {
-            // Instantiate our brand new memory bar object class
-            BMemoryBarMenuItem* newItem = new BMemoryBarMenuItem(label, percentage, kind);
-            AddItem(newItem);
+    void Refresh(bool attached) {
+        system_info info;
+        if (get_system_info(&info) != B_OK) return;
+        const int64 committedKiB = static_cast<int64>(info.used_pages) * B_PAGE_SIZE / 1024;
+
+        BSystemMemoryRowItem* system = dynamic_cast<BSystemMemoryRowItem*>(ItemAt(0));
+        if (system != nullptr && system->Update() && attached) Invalidate(system->Frame());
+
+        // teams that are gone, and the numbers of those that are not
+        for (int32 i = CountItems() - 1; i >= 1; i--) {
+            BTeamMemoryRowItem* row = dynamic_cast<BTeamMemoryRowItem*>(ItemAt(i));
+            if (row == nullptr) continue;
+            bool changed = false;
+            if (!row->Update(committedKiB, &changed)) {
+                RemoveItem(row);
+                delete row;
+            } else if (changed && attached) {
+                Invalidate(row->Frame());
+            }
+        }
+
+        // teams that are new
+        team_info teamInfo;
+        int32 cookie = 0;
+        while (get_next_team_info(&cookie, &teamInfo) == B_OK) {
+            bool known = false;
+            for (int32 i = 1; i < CountItems() && !known; i++) {
+                BTeamMemoryRowItem* row = dynamic_cast<BTeamMemoryRowItem*>(ItemAt(i));
+                known = row != nullptr && row->Team() == teamInfo.team;
+            }
+            if (known) continue;
+            BString name;
+            BBitmap* icon = nullptr;
+            TeamNameAndIcon(teamInfo, name, &icon);
+            BTeamMemoryRowItem* row = new BTeamMemoryRowItem(name.String(), teamInfo.team, icon);
+            bool changed = false;
+            if (row->Update(committedKiB, &changed)) AddItem(row);
+            else delete row;
         }
     }
-
 };
 
 

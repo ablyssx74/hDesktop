@@ -631,17 +631,18 @@ static Image RenderCapsuleTextImage(const std::string& text, double pixelSize, d
     double tw = 0, th = 0;
     MeasureText(text, pixelSize, true, &tw, &th);
     Image img;
-    img.logicalW = std::ceil(tw + 16.0);
+    // a pill, with fully rounded ends (as on Haiku), so the text starts half a height in
     img.logicalH = std::ceil(th + 10.0);
+    img.logicalW = std::ceil(tw + img.logicalH);
     int pw = std::max(1, static_cast<int>(std::ceil(img.logicalW * scale)));
     int ph = std::max(1, static_cast<int>(std::ceil(img.logicalH * scale)));
     img.surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
     cairo_t* cr = cairo_create(img.surface);
     cairo_scale(cr, scale, scale);
-    RoundedRectPath(cr, 0, 0, img.logicalW, img.logicalH, 5.0);
+    RoundedRectPath(cr, 0, 0, img.logicalW, img.logicalH, img.logicalH / 2.0);
     cairo_set_source_rgba(cr, 15 / 255.0, 15 / 255.0, 15 / 255.0, 190 / 255.0);
     cairo_fill(cr);
-    DrawText(cr, text, 8.0, 5.0, pixelSize, true, RGBA{1, 1, 1, 1});
+    DrawText(cr, text, img.logicalH / 2.0, 5.0, pixelSize, true, RGBA{1, 1, 1, 1});
     cairo_destroy(cr);
     cairo_surface_flush(img.surface);
     return img;
@@ -3558,22 +3559,24 @@ static void DrawFilledRect(const HRect& rc, float r, float g, float b, float a) 
     glEnd();
 }
 
-static void DrawRectOutline(const HRect& rc, float r, float g, float b, float a) {
-    SetColor(r, g, b, a);
-    glLineWidth(1.0f);
-    glBegin(GL_LINE_LOOP);
-    glVertex2f(rc.left + 0.5f, rc.top + 0.5f);
-    glVertex2f(rc.right - 0.5f, rc.top + 0.5f);
-    glVertex2f(rc.right - 0.5f, rc.bottom - 0.5f);
-    glVertex2f(rc.left + 0.5f, rc.bottom - 0.5f);
-    glEnd();
-}
-
 static void CornerArc(float cx, float cy, float radius, float startDeg, float endDeg) {
     const float degToRad = 3.14159265f / 180.0f;
     for (float a = startDeg; a <= endDeg + 0.01f; a += 10.0f) {
         glVertex2f(cx + radius * std::cos(a * degToRad), cy + radius * std::sin(a * degToRad));
     }
+}
+
+// The one pixel outline of a rounded rectangle (see DrawFilledRoundedRect).
+static void DrawRoundedRectOutline(const HRect& rc, float radius, float r, float g, float b, float a) {
+    radius = std::min(radius, std::min(rc.Width(), rc.Height()) / 2.0f);
+    SetColor(r, g, b, a);
+    glLineWidth(1.0f);
+    glBegin(GL_LINE_LOOP);
+    CornerArc(rc.right - 0.5f - radius, rc.top + 0.5f + radius, radius, 270.0f, 360.0f);
+    CornerArc(rc.right - 0.5f - radius, rc.bottom - 0.5f - radius, radius, 0.0f, 90.0f);
+    CornerArc(rc.left + 0.5f + radius, rc.bottom - 0.5f - radius, radius, 90.0f, 180.0f);
+    CornerArc(rc.left + 0.5f + radius, rc.top + 0.5f + radius, radius, 180.0f, 270.0f);
+    glEnd();
 }
 
 static void DrawFilledRoundedRect(const HRect& rc, float radius, float r, float g, float b, float a) {
@@ -7580,14 +7583,16 @@ private:
                 FreeImage(img);
                 fCpuTooltipText = buf;
             }
-            float w = fCpuTooltip.logicalW + 12.0f, h = fCpuTooltip.logicalH + 8.0f;
+            float h = fCpuTooltip.logicalH + 8.0f;
+            float w = fCpuTooltip.logicalW + h;   // a pill: room for the round ends
             float left = g.left + g.Width() / 2.0f - w / 2.0f;
             HRect box;
             if (gSettings.dockLocation == kDockLocationTop) box = HRect{left, g.bottom + 1.0f, left + w, g.bottom + 1.0f + h};
             else box = HRect{left, g.top - 1.0f - h, left + w, g.top - 1.0f};
-            DrawFilledRect(box, 0.15f, 0.15f, 0.15f, 0.75f);
-            DrawRectOutline(box, 0.10f, 0.10f, 0.10f, 0.5f);
-            DrawTexture(fCpuTooltip, box.left + 6.0f, box.top + 4.0f, fCpuTooltip.logicalW, fCpuTooltip.logicalH);
+            DrawFilledRoundedRect(box, h / 2.0f, 0.15f, 0.15f, 0.15f, 0.75f);
+            DrawRoundedRectOutline(box, h / 2.0f, 0.10f, 0.10f, 0.10f, 0.5f);
+            DrawTexture(fCpuTooltip, box.left + (w - fCpuTooltip.logicalW) / 2.0f, box.top + 4.0f, fCpuTooltip.logicalW,
+                fCpuTooltip.logicalH);
         }
     }
 
