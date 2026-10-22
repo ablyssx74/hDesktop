@@ -16,4 +16,4 @@ The CPU graph's Memory usage menu is ProcessController's on Haiku, and the Linux
 - Linux: `cd linux && makepkg -si`, or `sudo make -f Makefile.linux install`.
 
 ## Tested on
-- Haiku R1/beta6 in a VM (64-bit): the Memory usage menu opened from the CPU graph. The 32-bit package was built but not run. The Linux change was built, but not run on a desktop before release.
+- Haiku R1/beta6 in a VM (64-bit): the Memory usage menu opened from the CPU graph. No package was built for this release (the Haiku packages are those of v1.0.70, which has this menu). The Linux change was built, but not run on a desktop before release.

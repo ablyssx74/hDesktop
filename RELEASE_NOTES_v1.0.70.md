@@ -9,7 +9,8 @@ The Linux dock's CPU graph has ProcessController's Memory usage menu.
 
 ## Upgrading
 - Linux: `cd linux && makepkg -si`, or `sudo make -f Makefile.linux install`. Check with `pacman -Q hdesktop-git` that the new version is the one installed.
-- Haiku: no changes in this release.
+- Haiku: the 64-bit and 32-bit packages of this version carry v1.0.69's Memory usage menu; nothing else changed.
 
 ## Tested on
+- Haiku R1/beta6: the 64-bit and 32-bit packages were built (on 64-bit Haiku and on 32-bit Haiku). v1.0.69's Memory usage menu was run in a 64-bit VM, from a build and not from the package. The 32-bit package was not run.
 - Linux (KDE Plasma on Wayland): the Memory usage menu and the rounded date, tray and CPU labels from v1.0.69, run from the build tree.
