@@ -2218,6 +2218,20 @@ struct PopupAnchor {
     int offsetX = 0, offsetY = 0;
 };
 
+// A size in KiB the way Haiku's string_for_size() writes it: "923.98 MiB", "1.58 GiB".
+static void FormatSizeKb(long long kb, char* out, size_t size) {
+    double value = static_cast<double>(kb) * 1024.0;
+    static const char* const units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    int unit = 0;
+    while (value >= 1024.0 && unit < 4) {
+        value /= 1024.0;
+        unit++;
+    }
+    if (unit == 0) snprintf(out, size, "%d B", static_cast<int>(value));
+    else snprintf(out, size, "%.2f %s", value, units[unit]);
+}
+
+
 class PopupSurface : public CairoSurface {
 public:
     xdg_surface* xdgSurface = nullptr;
@@ -2353,6 +2367,12 @@ struct MenuItem {
     double barPercent = -1.0;
     int barPalette = 0;           // 0 = CPU thresholds, 1 = memory used, 2 = memory free, 3 = memory total
     std::string valueText;
+    // Memory rows (ProcessController's Memory usage menu): two sizes in KiB, and what share of the bar the first and the first
+    // two together fill; the system row's bar is blue and lavender, a process's two blues.
+    bool memRow = false;
+    bool memSystem = false;
+    long long memFirstKb = 0, memSecondKb = 0;
+    double memBarFirst = 0.0, memBarSecond = 0.0;
     // Window-preview rows: a thumbnail card above the label (placeholder until `thumb` arrives).
     bool wantThumb = false;
     IconRef thumb;
@@ -2674,7 +2694,44 @@ public:
                 }
             }
 
-            if (it.barPercent >= 0.0) {
+            if (it.memRow) {
+                // Name, the two sizes (the first in the middle of their room, the second against the bar) and a three-piece bar,
+                // as ProcessController's memory rows have them.
+                DrawText(cr, it.label, left, textY, kFontSize, false, textColor, fNameColumnW - 8);
+                const double numbersX = left + fNameColumnW;
+                const double barX = numbersX + fNumbersW;
+                char first[32], second[32];
+                FormatSizeKb(it.memFirstKb, first, sizeof(first));
+                FormatSizeKb(it.memSecondKb, second, sizeof(second));
+                double w1 = 0, w2 = 0;
+                MeasureText(first, kFontSize, false, &w1, nullptr);
+                MeasureText(second, kFontSize, false, &w2, nullptr);
+                DrawText(cr, first, barX - 8 - fNumbersW / 2 - w1, textY, kFontSize, false, textColor);
+                DrawText(cr, second, barX - 8 - w2, textY, kFontSize, false, textColor);
+                const double barH = 10, barY = y + (rh - barH) / 2;
+                const RGBA frame{90 / 255.0, 90 / 255.0, 90 / 255.0, 1};
+                const RGBA blue{20 / 255.0, 20 / 255.0, 231 / 255.0, 1};
+                const RGBA second1 = it.memSystem ? RGBA{193 / 255.0, 122 / 255.0, 1.0, 1} : RGBA{165 / 255.0, 165 / 255.0, 246 / 255.0, 1};
+                const double inner = kMemBarW - 2;
+                const double e1 = std::clamp(it.memBarFirst, 0.0, 1.0) * inner, e2 = std::clamp(it.memBarSecond, 0.0, 1.0) * inner;
+                cairo_set_source_rgb(cr, 1, 1, 1);
+                cairo_rectangle(cr, barX + 1, barY + 1, inner, barH - 2);
+                cairo_fill(cr);
+                if (e2 > e1) {
+                    cairo_set_source_rgb(cr, second1.r, second1.g, second1.b);
+                    cairo_rectangle(cr, barX + 1 + e1, barY + 1, e2 - e1, barH - 2);
+                    cairo_fill(cr);
+                }
+                if (e1 > 0) {
+                    cairo_set_source_rgb(cr, blue.r, blue.g, blue.b);
+                    cairo_rectangle(cr, barX + 1, barY + 1, e1, barH - 2);
+                    cairo_fill(cr);
+                }
+                cairo_set_source_rgb(cr, frame.r, frame.g, frame.b);
+                cairo_set_line_width(cr, 1);
+                cairo_rectangle(cr, barX + 0.5, barY + 0.5, kMemBarW - 1, barH - 1);
+                cairo_stroke(cr);
+            } else if (it.barPercent >= 0.0) {
                 // Name / percentage / capsule bar columns, as BCpuBarMenuItem draws them.
                 DrawText(cr, it.label, left, textY, kFontSize, false, textColor, fNameColumnW - 8);
                 double valueX = left + fNameColumnW;
@@ -2826,6 +2883,8 @@ private:
     static constexpr double kLeftColumn = 34.0;
     static constexpr double kValueColumnW = 54.0;
     static constexpr double kBarW = 80.0;
+    static constexpr double kMemBarW = 100.0;   // the memory rows' bar, as ProcessController's
+    double fNumbersW = 0;                       // room for a memory row's two sizes
     static constexpr double kArrowH = 16.0;   // scroll arrow strips at the top and bottom
     static constexpr double kScreenMargin = 24.0;
 
@@ -2873,6 +2932,7 @@ private:
         bool hasBars = false;
         bool hasSubmenus = false;
         bool hasThumbs = false;
+        bool hasMem = false;
         double maxLabel = 0;
         double h = kPadY * 2;
         for (const auto& it : fItems) {
@@ -2880,6 +2940,7 @@ private:
             if (it.separator) continue;
             if (it.icon || !it.iconName.empty() || it.check != kCheckNone) fHasLeftColumn = true;
             if (it.barPercent >= 0) hasBars = true;
+            if (it.memRow) hasMem = true;
             if (it.submenu && !it.noArrow) hasSubmenus = true;
             if (it.wantThumb) hasThumbs = true;
             double tw = 0;
@@ -2888,7 +2949,13 @@ private:
         }
         double left = fHasLeftColumn ? kLeftColumn : kPadX;
         double w;
-        if (hasBars) {
+        if (hasMem) {
+            double sizeW = 0;
+            MeasureText("95.37 MiB", kFontSize, false, &sizeW, nullptr);
+            fNumbersW = 2 * sizeW + 20;
+            fNameColumnW = std::clamp(maxLabel + 16, 120.0, 280.0);
+            w = left + fNameColumnW + fNumbersW + kMemBarW + kPadX + 4;
+        } else if (hasBars) {
             fNameColumnW = std::clamp(maxLabel + 16, 120.0, 280.0);
             w = left + fNameColumnW + kValueColumnW + kBarW + kPadX + 4 + (hasSubmenus ? 14 : 0);
         } else if (fCentered) {
@@ -5783,7 +5850,7 @@ private:
 };
 
 struct MemInfo {
-    uint64_t totalKb = 0, availableKb = 0;
+    uint64_t totalKb = 0, availableKb = 0, freeKb = 0, cachedKb = 0;
     static MemInfo Read() {
         MemInfo m;
         std::string s = ReadFile("/proc/meminfo");
@@ -5794,6 +5861,8 @@ struct MemInfo {
         };
         m.totalKb = field("MemTotal:");
         m.availableKb = field("MemAvailable:");
+        m.freeKb = field("MemFree:");
+        m.cachedKb = field("Cached:") + field("Buffers:");
         return m;
     }
 };
@@ -5806,6 +5875,23 @@ struct ProcessInfo {
     uint64_t cpuTicks = 0;
     double cpuPercent = 0;
 };
+
+// A process's memory in KiB from /proc/<pid>/status: all the RAM it has (VmRSS), and what it has written to (private and
+// shared anonymous pages: RssAnon + RssShmem), the pair ProcessController shows as "all" and "written". false for a process
+// that is gone or has no memory (a kernel thread).
+static bool ReadProcessMemory(pid_t pid, long long* allKb, long long* writtenKb) {
+    std::string s = ReadFile("/proc/" + std::to_string(pid) + "/status");
+    auto field = [&](const char* name) -> long long {
+        size_t p = s.find(name);
+        return p == std::string::npos ? -1 : strtoll(s.c_str() + p + strlen(name), nullptr, 10);
+    };
+    long long all = field("VmRSS:");
+    if (all < 0) return false;
+    long long anon = field("RssAnon:"), shmem = field("RssShmem:");
+    *allKb = all;
+    *writtenKb = std::max(0LL, anon) + std::max(0LL, shmem);
+    return true;
+}
 
 struct ThreadInfo {
     pid_t tid = 0;
@@ -8353,28 +8439,53 @@ private:
         return items;
     }
 
+    // ProcessController's Memory usage menu: "System resources & caches..", then a row for every process: its icon and name,
+    // what it has written to and all the RAM it has, and a bar of the two against the memory in use (written: dark blue, the
+    // rest: light blue). The system row's bar is what is cached (dark blue), what else is in use (lavender) and what is free.
     static std::vector<MenuItem> MemoryItems() {
         MemInfo m = MemInfo::Read();
-        double total = m.totalKb / 1024.0;
-        double used = (m.totalKb - m.availableKb) / 1024.0;
-        double pct = total > 0 ? used / total * 100.0 : 0.0;
-        auto row = [](const std::string& label, double percent, int palette) {
-            MenuItem it;
-            it.label = label;
-            it.barPercent = percent;
-            it.barPalette = palette;
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%3.1f%%", percent);
-            it.valueText = buf;
-            it.action = []() {};
-            it.enabled = true;
-            return it;
-        };
-        char a[64], b[64], c[64];
-        snprintf(a, sizeof(a), "Used Physical Memory: %d MB", static_cast<int>(used));
-        snprintf(b, sizeof(b), "Free Available RAM: %d MB", static_cast<int>(total - used));
-        snprintf(c, sizeof(c), "Total Installed Capacity: %d MB", static_cast<int>(total));
-        return {row(a, pct, 1), row(b, 100.0 - pct, 2), row(c, 100.0, 3)};
+        const long long physical = static_cast<long long>(m.totalKb);
+        const long long inUse = physical - static_cast<long long>(m.freeKb);
+        const long long cached = static_cast<long long>(m.cachedKb);
+        std::vector<MenuItem> items;
+
+        MenuItem system;
+        system.label = "System resources & caches\u2026";
+        system.iconName = "computer";
+        system.memRow = true;
+        system.memSystem = true;
+        system.memFirstKb = inUse;
+        system.memSecondKb = cached;
+        if (physical > 0) {
+            system.memBarFirst = static_cast<double>(cached) / physical;
+            system.memBarSecond = static_cast<double>(inUse) / physical;
+        }
+        system.action = []() {};
+        items.push_back(system);
+
+        struct Row { MenuItem item; long long all; };
+        std::vector<Row> rows;
+        ProcessSampler sampler;
+        for (const auto& p : sampler.Sample()) {
+            long long all = 0, written = 0;
+            if (!ReadProcessMemory(p.pid, &all, &written)) continue;
+            MenuItem row;
+            row.label = p.name;
+            AppEntry* e = p.exe.empty() ? nullptr : gApps->ResolveExecutable(AppDatabase::Basename(p.exe));
+            row.iconName = e ? e->iconName : "application-x-executable";
+            row.memRow = true;
+            row.memFirstKb = written;
+            row.memSecondKb = all;
+            if (inUse > 0) {
+                row.memBarFirst = static_cast<double>(written) / inUse;
+                row.memBarSecond = static_cast<double>(all) / inUse;
+            }
+            row.action = []() {};
+            rows.push_back({row, all});
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.all > b.all; });
+        for (const auto& r : rows) items.push_back(r.item);
+        return items;
     }
 
     std::vector<MenuItem> CpuProcessItems(ProcessSampler& sampler) {
