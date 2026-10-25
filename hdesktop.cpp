@@ -162,8 +162,13 @@ bool fShowAdvancedOptions = false;
 // "snake trail" through the open submenus (Settings > Snake Trail), and the selector's accent colour
 // (Settings > Selector Color). The bevel's light and dark edges are worked out from it.
 bool gNavSnakeTrail = true;
+// Raised look: the Tracker menu in the pill look, with its raised, shaded selector. Off, it is the older rectangular menu with its
+// beveled selector (the Flat setting below belongs to that one). It starts from Snake Tracker's preference of the same name
+// when hDesktop has no choice of its own saved ("nav_raised_look").
+bool gNavRaisedLook = true;
 // Flat selector: one colour inside the outline. Off brings back the light top / dark bottom edges
-// (Settings > Flat). Shared with Tracker's menus through the "nav_snake_flat" setting.
+// (Settings > Flat). Shared with Tracker's menus through the "nav_snake_flat" setting. Only the look without the raised
+// selector has these edges; the raised look shades the selector itself.
 bool gNavSnakeFlat = true;
 rgb_color gNavAccent = {70, 110, 200, 255};
 // Settings > Use System Colors (Selector Color): the dock's menus take Haiku's own menu colours (Appearance preferences)
@@ -294,6 +299,7 @@ enum {
     MSG_DRAWER_COLOR_UPDATED = 'drcu',
     MSG_NAV_SYSTEM_COLORS_TOGGLED = 'nvsc',
     MSG_ROUNDED_EDGES_TOGGLED = 'rdge',
+    MSG_RAISED_LOOK_TOGGLED = 'rsdl',
     MSG_DRAWER_SYSTEM_COLORS_TOGGLED = 'drsc',   // sent to the settings view so its swatch repaints
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_CLOCK_TOGGLED = 'cktg',
@@ -1718,7 +1724,7 @@ public:
         fScreen = sf;
 
         // (the look is chosen once for a menu and its submenus: a level takes what its root had)
-        if (parent == nullptr) NavUI::ApplyNavLook(NavUI::SnakeLookPreference());
+        if (parent == nullptr) NavUI::ApplyNavLook(gNavRaisedLook);
 
         if (kNavPillLook && parent == nullptr) {
             // Another pill popup or the dock's hover popups still on screen would be frozen into the capture: close
@@ -3802,6 +3808,7 @@ private:
     BCheckBox* fSnakeTrailCheckbox;
     BCheckBox* fSnakeFlatCheckbox;
     BCheckBox* fRoundedEdgesCheckbox;
+    BCheckBox* fRaisedLookCheckbox;
     BButton*   fSelectorColorButton;
     BButton*   fDrawerColorButton;
     BCheckBox* fNavSystemColorsCheckbox;
@@ -3926,6 +3933,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fRoundedEdgesCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fRoundedEdgesCheckbox->SetValue(gNavRoundedEdges ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fRoundedEdgesCheckbox);
+        // "Raised Look": the Tracker menu with its raised, shaded selector (off: the older rectangular menu, which has the Flat
+        // choice). In the row's free right half.
+        fRaisedLookCheckbox = new BCheckBox(BRect(290.0f, 222.0f, 310.0f, 238.0f), "raised_look_cb", nullptr,
+            new BMessage(MSG_RAISED_LOOK_TOGGLED));
+        fRaisedLookCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fRaisedLookCheckbox->SetValue(gNavRaisedLook ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fRaisedLookCheckbox);
+        fSnakeFlatCheckbox->SetEnabled(!gNavRaisedLook);
         // The two colours, a row each: a swatch that shows the colour in use (it follows the colour as it is chosen), the button
         // that opens the colour control, and Use System Colors (Haiku's own menu colours instead).
         fDrawerColorButton = new BButton(BRect(76.0f, 264.0f, 216.0f, 288.0f), "drawer_color_btn",
@@ -3952,7 +3967,11 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         BFont plain12(be_plain_font);
         plain12.SetSize(12.0f);
         AddChild(new HelpMark(BPoint(317.0f + plain12.StringWidth("Flat") + 6.0f, 202.0f),
-            "The selector is drawn flat: one color, without its light top edge and dark bottom edge."));
+            "The selector is drawn flat: one color, without its light top edge and dark bottom edge.\n"
+            "Only the look without the raised selector has these edges, so this is off while Raised Look is on."));
+        AddChild(new HelpMark(BPoint(317.0f + plain12.StringWidth("Raised Look") + 6.0f, 222.0f),
+            "The Tracker menu's selector is raised and shaded, in the pill look, as in Snake Tracker.\n"
+            "Off, the menu is the older rectangular one with a beveled selector (which can be flat)."));
         AddChild(new HelpMark(BPoint(62.0f + plain12.StringWidth("Rounded Edges") + 6.0f, 222.0f),
             "Round corners on the popups the dock opens (the Tracker menu, the title list, the tray and other menus) and on its small tiles\n"
             "(the CPU graph, the workspace switcher, the clock). Off, they are square."));
@@ -4252,7 +4271,10 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
         DrawString("Snake Trail (Tracker menu)", BPoint(62.0f, 214.0f));
+        SetHighColor(gNavRaisedLook ? rgb_color{110, 115, 130, 255} : rgb_color{220, 225, 235, 255});   // (dimmed while the raised look has no use for it)
         DrawString("Flat", BPoint(317.0f, 214.0f));
+        SetHighColor(rgb_color{220, 225, 235, 255});
+        DrawString("Raised Look", BPoint(317.0f, 234.0f));
         DrawString("Rounded Edges", BPoint(62.0f, 234.0f));
         {   // the two colours in use, beside their buttons (they follow a colour as it is chosen)
             const rgb_color rim = rgb_color{110, 115, 130, 255};
@@ -4403,6 +4425,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fSnakeTrailCheckbox->SetTarget(this);
         fSnakeFlatCheckbox->SetTarget(this);
         fRoundedEdgesCheckbox->SetTarget(this);
+        fRaisedLookCheckbox->SetTarget(this);
         fSelectorColorButton->SetTarget(this);
         fDrawerColorButton->SetTarget(this);
         fNavSystemColorsCheckbox->SetTarget(this);
@@ -4538,6 +4561,14 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
             case MSG_SNAKEFLAT_TOGGLED: {
                 gNavSnakeFlat = (fSnakeFlatCheckbox->Value() == B_CONTROL_ON);
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_RAISED_LOOK_TOGGLED: {
+                gNavRaisedLook = (fRaisedLookCheckbox->Value() == B_CONTROL_ON);
+                fSnakeFlatCheckbox->SetEnabled(!gNavRaisedLook);   // (the flat selector is the other look's)
+                Invalidate();
                 SaveConfiguration();
                 break;
             }
@@ -13254,6 +13285,7 @@ void SaveConfiguration() {
             settingsMsg.AddInt32("thumbnail_size", fThumbnailSize);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
             settingsMsg.AddBool("nav_snake_trail", gNavSnakeTrail);
+            settingsMsg.AddBool("nav_raised_look", gNavRaisedLook);
             settingsMsg.AddBool("nav_snake_flat", gNavSnakeFlat);
             settingsMsg.AddInt32("nav_accent", (static_cast<int32>(gNavAccent.red) << 16) |
                 (static_cast<int32>(gNavAccent.green) << 8) | static_cast<int32>(gNavAccent.blue));
@@ -13329,6 +13361,8 @@ void LoadConfiguration() {
                 }
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
                 if (settingsMsg.FindBool("nav_snake_trail", &valBool) == B_OK) gNavSnakeTrail = valBool;
+                if (settingsMsg.FindBool("nav_raised_look", &valBool) == B_OK) gNavRaisedLook = valBool;
+                else gNavRaisedLook = NavUI::SnakeLookPreference();   // (no choice of its own yet: Snake Tracker's)
                 if (settingsMsg.FindBool("nav_snake_flat", &valBool) == B_OK) gNavSnakeFlat = valBool;
                 if (settingsMsg.FindInt32("nav_accent", &valInt32) == B_OK) {
                     gNavAccent = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
