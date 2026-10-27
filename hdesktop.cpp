@@ -8593,6 +8593,24 @@ public:
 		return 0;
 	}
 
+	// SnakeTracker Workspaces: the transition when the workspace changes (its own settings file).
+	static int32 WorkspaceFadeMs(int32* effect) {
+		*effect = 0;
+		BPath path;
+		if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK || path.Append("snaketracker_workspaces") != B_OK)
+			return 0;
+		BFile file(path.Path(), B_READ_ONLY);
+		BMessage settings;
+		int32 ms = 0;
+		if (file.InitCheck() == B_OK && settings.Unflatten(&file) == B_OK && settings.FindInt32("ms", &ms) == B_OK && ms > 0) {
+			int32 style = 0;
+			if (settings.FindInt32("effect", &style) == B_OK && style >= 0 && style <= 3)
+				*effect = style;
+			return ms;
+		}
+		return 0;
+	}
+
 	// 0..1 while the fade runs (linear time, as in Tracker), 1 otherwise; frees the old picture when it is done.
 	float WallpaperFadeProgress() {
 		if (fOldWallpaperTexture.id == 0 && !fWallpaperFading)
@@ -8640,14 +8658,18 @@ public:
 	void SetHasStencil(bool has) { fHasStencil = has; }
 
 	// fade: the wallpaper itself changed (rather than the workspace), so blend from the old one when Tracker does.
-	void ReloadWallpaperBackground(bool fade = false) {
+	// workspace: the workspace changed (SnakeTracker Workspaces' transition, and only when the two workspaces show different
+	// pictures: Tracker does not blend a picture into itself).
+	void ReloadWallpaperBackground(bool fade = false, bool workspace = false) {
 	    if (fOldWallpaperTexture.id != 0) {
 	        glDeleteTextures(1, &fOldWallpaperTexture.id);
 	        fOldWallpaperTexture.id = 0;
 	    }
 	    fWallpaperFading = false;
+	    HaikuWallpaperInfo capturedWallpaper = GetActiveHaikuWallpaperInfo();
 	    int32 effect = 0;
-	    const int32 fadeMs = fade ? SnakeFadeMs(&effect) : 0;
+	    const bool samePicture = workspace && capturedWallpaper.path == fWallpaperLoadedPath;
+	    const int32 fadeMs = !fade || samePicture ? 0 : (workspace ? WorkspaceFadeMs(&effect) : SnakeFadeMs(&effect));
 	    fWallpaperEffect = effect;
 	    if (fadeMs > 0 && fWallpaperTexture.id != 0) {
 	        // keep the old picture to blend from
@@ -8662,7 +8684,7 @@ public:
 	        fWallpaperTexture.id = 0;
 	    }
 
-	    HaikuWallpaperInfo capturedWallpaper = GetActiveHaikuWallpaperInfo();
+	    fWallpaperLoadedPath = capturedWallpaper.path;
 	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.path.String());
 	    fWallpaperMode = capturedWallpaper.mode;
 	    fWallpaperOffset = capturedWallpaper.offset;
@@ -13340,6 +13362,7 @@ private:
     bool         fWallpaperFading = false;
     bigtime_t    fWallpaperFadeStartUs = 0;
     bool         fWallpaperWaiting = false;
+    BString      fWallpaperLoadedPath;     // the file of the picture the dock shows now
     Uint32       fWallpaperWaitDeadline = 0;
     bool         fHavePendingFade = false;
     bigtime_t    fPendingFadeStart = 0;
@@ -14217,7 +14240,8 @@ int main(int argc, char* argv[]) {
                     needsRender = true;
                 }
                 else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED) {
-                    desktopEngine.ReloadWallpaperBackground(incomingEventPackage.user.code == 1);
+                    desktopEngine.ReloadWallpaperBackground(incomingEventPackage.user.code == 1 || incomingEventPackage.user.code == 3,
+                        incomingEventPackage.user.code == 3);
                     desktopEngine.SyncDockWithRunningDeskbarApps();
 
 
@@ -14555,6 +14579,7 @@ int main(int argc, char* argv[]) {
             SDL_Event workspaceSwitchEvent;
             SDL_zero(workspaceSwitchEvent);
             workspaceSwitchEvent.type = SDL_EVENT_WALLPAPER_CHANGED;
+            workspaceSwitchEvent.user.code = 3;   // the workspace changed (SnakeTracker Workspaces may blend to its picture)
             SDL_PushEvent(&workspaceSwitchEvent);
         }
 
