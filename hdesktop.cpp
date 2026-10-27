@@ -48,6 +48,7 @@
 #include <MessageRunner.h>
 #include <MenuItem.h>
 #include <Message.h>
+#include <MessageFilter.h>
 #include <Messenger.h>
 #include <MenuField.h>
 #include <Node.h>
@@ -8353,7 +8354,308 @@ public:
         return (gDockLocation == kDockLocationTop) ? insetFromEdge : (fHeight - insetFromEdge);
     }
 
-	void ReloadWallpaperBackground() {
+    // The old and the new wallpaper at this moment of a change, the same picture SnakeTracker draws on the desktop
+    // (SnakeFade.cpp: its numbers are kept in step with these). Wipe and slide move with an easing, the soft edge of
+    // the wipe is a tenth of the width and that of the circle 6%.
+    void DrawWallpaperTransition(float linear) {
+        const float eased = linear * linear * (3.0f - 2.0f * linear);
+        const float W = static_cast<float>(fWidth), H = static_cast<float>(fHeight);
+        int32 effect = fWallpaperEffect;
+        if (effect == 3 && !fHasStencil)
+            effect = 0;   // (no stencil buffer: a fade instead of the circle)
+
+        if (effect == 1) {
+            DrawWallpaperLayer(fOldWallpaperTexture, fOldWallpaperMode, fOldWallpaperOffset, 1.0f);
+            const float feather = W / 10.0f > 1.0f ? W / 10.0f : 1.0f;
+            const float edge = eased * (W + feather);
+            glEnable(GL_SCISSOR_TEST);
+            if (edge - feather > 0.0f) {
+                glScissor(0, 0, static_cast<GLsizei>(edge - feather), 4096);
+                DrawWallpaperLayer(fWallpaperTexture, fWallpaperMode, fWallpaperOffset, 1.0f);
+            }
+            const int bands = 24;
+            const float bandWidth = feather / bands;
+            for (int k = 0; k < bands; k++) {
+                const float x0 = edge - feather + k * bandWidth;
+                if (x0 + bandWidth <= 0.0f || x0 >= W)
+                    continue;
+                const float left = x0 < 0.0f ? 0.0f : x0;
+                glScissor(static_cast<GLint>(left), 0, static_cast<GLsizei>(x0 + bandWidth - left) + 1, 4096);
+                DrawWallpaperLayer(fWallpaperTexture, fWallpaperMode, fWallpaperOffset, 1.0f - (k + 0.5f) / bands);
+            }
+            glDisable(GL_SCISSOR_TEST);
+        } else if (effect == 2) {
+            const float shift = static_cast<float>(static_cast<int>(eased * W));
+            glPushMatrix();
+            glTranslatef(-shift, 0.0f, 0.0f);
+            DrawWallpaperLayer(fOldWallpaperTexture, fOldWallpaperMode, fOldWallpaperOffset, 1.0f);
+            glPopMatrix();
+            glPushMatrix();
+            glTranslatef(W - shift, 0.0f, 0.0f);
+            DrawWallpaperLayer(fWallpaperTexture, fWallpaperMode, fWallpaperOffset, 1.0f);
+            glPopMatrix();
+        } else if (effect == 3) {
+            DrawWallpaperLayer(fOldWallpaperTexture, fOldWallpaperMode, fOldWallpaperOffset, 1.0f);
+            const float feather = W * 0.06f > 2.0f ? W * 0.06f : 2.0f;
+            const float cx = W / 2.0f, cy = H / 2.0f;
+            const float maxRadius = std::sqrt(cx * cx + cy * cy) + feather;
+            const float radius = eased * maxRadius;
+            // Rings of a growing share of the new picture, each one inside the last: n pictures laid over each other with
+            // opacity 1/n, 1/(n-1) ... 1 make the share of the new one step up 1/n at a time toward the middle.
+            const int rings = 10;
+            glEnable(GL_STENCIL_TEST);
+            for (int k = 1; k <= rings; k++) {
+                const float r = radius - feather * (k - 1) / rings;
+                if (r <= 0.0f)
+                    break;
+                glClear(GL_STENCIL_BUFFER_BIT);
+                glStencilFunc(GL_ALWAYS, 1, 0xff);
+                glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                glBegin(GL_TRIANGLE_FAN);
+                    glVertex2f(cx, cy);
+                    for (int i = 0; i <= 96; i++) {
+                        const float a = i * 6.28318531f / 96.0f;
+                        glVertex2f(cx + r * std::cos(a), cy + r * std::sin(a));
+                    }
+                glEnd();
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                glStencilFunc(GL_EQUAL, 1, 0xff);
+                glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+                DrawWallpaperLayer(fWallpaperTexture, fWallpaperMode, fWallpaperOffset, 1.0f / (rings - k + 1));
+            }
+            glDisable(GL_STENCIL_TEST);
+        } else {
+            DrawWallpaperLayer(fOldWallpaperTexture, fOldWallpaperMode, fOldWallpaperOffset, 1.0f);
+            DrawWallpaperLayer(fWallpaperTexture, fWallpaperMode, fWallpaperOffset, linear);
+        }
+    }
+
+    // One layer of the wallpaper pass: the picture (or the workspace color when there is none) drawn with the given
+    // opacity. A fade from one wallpaper to the next draws the old one whole and the new one over it.
+    void DrawWallpaperLayer(const HaikuTexture& tex, int32 mode, BPoint offset, float alpha) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (tex.id != 0) {
+        float texW    = static_cast<float>(tex.width);
+        float texH    = static_cast<float>(tex.height);
+        float screenW = static_cast<float>(fWidth);
+        float screenH = static_cast<float>(fHeight);
+
+        // Centered / Manual placement don't necessarily cover the whole screen --
+        // fill with this workspace's real desktop background color first, same
+        // as Haiku's own Desktop window does around an undersized or offset image.
+        if (mode == kWallpaperCentered || mode == kWallpaperAtOffset) {
+            rgb_color gapColor = GetHaikuWorkspaceDesktopColor(current_workspace());
+            glColor4f(gapColor.red / 255.0f, gapColor.green / 255.0f, gapColor.blue / 255.0f, alpha);
+            glBegin(GL_QUADS);
+                glVertex2f(0.0f, 0.0f);
+                glVertex2f(screenW, 0.0f);
+                glVertex2f(screenW, screenH);
+                glVertex2f(0.0f, screenH);
+            glEnd();
+        }
+
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, tex.id);
+        glColor4f(1.0f, 1.0f, 1.0f, alpha);
+
+        switch (mode) {
+            case kWallpaperCentered: {
+                // Unscaled, centered on screen.
+                float destX = (screenW - texW) / 2.0f;
+                float destY = (screenH - texH) / 2.0f;
+                glBegin(GL_QUADS);
+                    glTexCoord2f(0.0f, 0.0f); glVertex2f(destX, destY);
+                    glTexCoord2f(1.0f, 0.0f); glVertex2f(destX + texW, destY);
+                    glTexCoord2f(1.0f, 1.0f); glVertex2f(destX + texW, destY + texH);
+                    glTexCoord2f(0.0f, 1.0f); glVertex2f(destX, destY + texH);
+                glEnd();
+                break;
+            }
+
+            case kWallpaperAtOffset: {
+                // Unscaled, placed at the "Manual" position saved by Backgrounds.
+                float destX = offset.x;
+                float destY = offset.y;
+                glBegin(GL_QUADS);
+                    glTexCoord2f(0.0f, 0.0f); glVertex2f(destX, destY);
+                    glTexCoord2f(1.0f, 0.0f); glVertex2f(destX + texW, destY);
+                    glTexCoord2f(1.0f, 1.0f); glVertex2f(destX + texW, destY + texH);
+                    glTexCoord2f(0.0f, 1.0f); glVertex2f(destX, destY + texH);
+                glEnd();
+                break;
+            }
+
+            case kWallpaperTiled: {
+                // Repeat the bitmap across the whole screen, phase-centered exactly
+                // like BackgroundImage::Show()'s kTiled anchor calculation.
+                if (texW > 0.0f && texH > 0.0f) {
+                    float anchorX = (screenW - texW) / 2.0f;
+                    float anchorY = (screenH - texH) / 2.0f;
+                    float startX = anchorX - texW * std::floor(anchorX / texW) - texW;
+                    float startY = anchorY - texH * std::floor(anchorY / texH) - texH;
+
+                    // Safety cap: bail out to a single tile rather than looping
+                    // thousands of times if a pathologically tiny image is set to Tile.
+                    double estimatedTiles = (static_cast<double>(screenW) / texW + 2.0)
+                        * (static_cast<double>(screenH) / texH + 2.0);
+                    if (estimatedTiles > 20000.0) {
+                        glBegin(GL_QUADS);
+                            glTexCoord2f(0.0f, 0.0f); glVertex2f(startX, startY);
+                            glTexCoord2f(1.0f, 0.0f); glVertex2f(startX + texW, startY);
+                            glTexCoord2f(1.0f, 1.0f); glVertex2f(startX + texW, startY + texH);
+                            glTexCoord2f(0.0f, 1.0f); glVertex2f(startX, startY + texH);
+                        glEnd();
+                    } else {
+                        for (float y = startY; y < screenH; y += texH) {
+                            for (float x = startX; x < screenW; x += texW) {
+                                glBegin(GL_QUADS);
+                                    glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);
+                                    glTexCoord2f(1.0f, 0.0f); glVertex2f(x + texW, y);
+                                    glTexCoord2f(1.0f, 1.0f); glVertex2f(x + texW, y + texH);
+                                    glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + texH);
+                                glEnd();
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+
+            case kWallpaperScaledToFit:
+            default: {
+                // Center-cropped scale-to-fill (Tracker's "Scale to fit" placement).
+                float screenAspect = screenW / screenH;
+                float imageAspect  = texW / texH;
+
+                float uMin = 0.0f, uMax = 1.0f;
+                float vMin = 0.0f, vMax = 1.0f;
+
+                if (imageAspect > screenAspect) {
+                    // Image is wider than your screen aspect: crop left/right sides
+                    float cropWidth = texH * screenAspect;
+                    float horizontalDiff = (texW - cropWidth) / texW;
+                    uMin = horizontalDiff / 2.0f;
+                    uMax = 1.0f - uMin;
+                } else if (imageAspect < screenAspect) {
+                    // Image is taller than your screen aspect: crop top/bottom sides
+                    float cropHeight = texW / screenAspect;
+                    float verticalDiff = (texH - cropHeight) / texH;
+                    vMin = verticalDiff / 2.0f;
+                    vMax = 1.0f - vMin;
+                }
+
+                glBegin(GL_QUADS);
+                    glTexCoord2f(uMin, vMin); glVertex2f(0.0f, 0.0f);
+                    glTexCoord2f(uMax, vMin); glVertex2f(screenW, 0.0f);
+                    glTexCoord2f(uMax, vMax); glVertex2f(screenW, screenH);
+                    glTexCoord2f(uMin, vMax); glVertex2f(0.0f, screenH);
+                glEnd();
+                break;
+            }
+        }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    } else {
+        // No image at all for this workspace ("Image: None" in Backgrounds) --
+        // fill with this workspace's real desktop background color instead of
+        // leaving the transparent clear showing through as flat black.
+        rgb_color noImageColor = GetHaikuWorkspaceDesktopColor(current_workspace());
+        glColor4f(noImageColor.red / 255.0f, noImageColor.green / 255.0f, noImageColor.blue / 255.0f, alpha);
+        glBegin(GL_QUADS);
+            glVertex2f(0.0f, 0.0f);
+            glVertex2f(static_cast<float>(fWidth), 0.0f);
+            glVertex2f(static_cast<float>(fWidth), static_cast<float>(fHeight));
+            glVertex2f(0.0f, static_cast<float>(fHeight));
+        glEnd();
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+    }
+
+	// Seconds-free fade state: a fade runs when SnakeTracker's wallpaper settings ask for one and the wallpaper
+	// changed (not when only the workspace changed, Tracker does not fade those).
+	static int32 SnakeFadeMs(int32* effect) {
+		*effect = 0;
+		BPath path;
+		if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK || path.Append("snaketracker_wallpaper") != B_OK)
+			return 0;
+		BFile file(path.Path(), B_READ_ONLY);
+		BMessage settings;
+		int32 ms = 0;
+		if (file.InitCheck() == B_OK && settings.Unflatten(&file) == B_OK && settings.FindInt32("fadems", &ms) == B_OK && ms > 0) {
+			int32 style = 0;
+			if (settings.FindInt32("fadestyle", &style) == B_OK && style >= 0 && style <= 3)
+				*effect = style;
+			return ms;
+		}
+		return 0;
+	}
+
+	// 0..1 while the fade runs (linear time, as in Tracker), 1 otherwise; frees the old picture when it is done.
+	float WallpaperFadeProgress() {
+		if (fOldWallpaperTexture.id == 0 && !fWallpaperFading)
+			return 1.0f;
+		if (fWallpaperWaiting) {
+			// the new picture is ready; SnakeTracker says when its own change begins (see TrackerFadeStarted). Without word
+			// from it (it does not fade, or it is not running) this one begins by itself after a moment.
+			if (SDL_GetTicks() < fWallpaperWaitDeadline)
+				return 0.0f;
+			fWallpaperWaiting = false;
+			fWallpaperFadeStartUs = system_time();
+		}
+		const float t = float(system_time() - fWallpaperFadeStartUs) / float(fWallpaperFadeMs * 1000);
+		if (t >= 1.0f) {
+			if (fOldWallpaperTexture.id != 0) {
+				glDeleteTextures(1, &fOldWallpaperTexture.id);
+				fOldWallpaperTexture.id = 0;
+			}
+			fWallpaperFading = false;
+			return 1.0f;
+		}
+		return t < 0.0f ? 0.0f : t;
+	}
+
+	bool WallpaperFadeActive() const { return fWallpaperFading; }
+
+	// SnakeTracker began changing the picture on the desktop (start: its system_time()): this one starts the same moment
+	// and goes the same way, so the dock and the desktop stay together. It can arrive before this one has loaded the new
+	// picture, then it is kept for that.
+	void TrackerFadeStarted(bigtime_t start, int32 ms, int32 effect) {
+		if (ms < 1)
+			return;
+		if (fWallpaperFading && fWallpaperWaiting) {
+			fWallpaperFadeStartUs = start;
+			fWallpaperFadeMs = ms;
+			fWallpaperEffect = effect;
+			fWallpaperWaiting = false;
+		} else {
+			fHavePendingFade = true;
+			fPendingFadeStart = start;
+			fPendingFadeMs = ms;
+			fPendingFadeEffect = effect;
+		}
+	}
+	void SetHasStencil(bool has) { fHasStencil = has; }
+
+	// fade: the wallpaper itself changed (rather than the workspace), so blend from the old one when Tracker does.
+	void ReloadWallpaperBackground(bool fade = false) {
+	    if (fOldWallpaperTexture.id != 0) {
+	        glDeleteTextures(1, &fOldWallpaperTexture.id);
+	        fOldWallpaperTexture.id = 0;
+	    }
+	    fWallpaperFading = false;
+	    int32 effect = 0;
+	    const int32 fadeMs = fade ? SnakeFadeMs(&effect) : 0;
+	    fWallpaperEffect = effect;
+	    if (fadeMs > 0 && fWallpaperTexture.id != 0) {
+	        // keep the old picture to blend from
+	        fOldWallpaperTexture = fWallpaperTexture;
+	        fOldWallpaperMode = fWallpaperMode;
+	        fOldWallpaperOffset = fWallpaperOffset;
+	        fWallpaperTexture.id = 0;
+	    }
 	    // Use the inner integer identifier field for the OpenGL cleanup
 	    if (fWallpaperTexture.id != 0) {
 	        glDeleteTextures(1, &fWallpaperTexture.id);
@@ -8364,6 +8666,20 @@ public:
 	    fWallpaperTexture = LoadWallpaperViaTranslationKit(capturedWallpaper.path.String());
 	    fWallpaperMode = capturedWallpaper.mode;
 	    fWallpaperOffset = capturedWallpaper.offset;
+	    if (fOldWallpaperTexture.id != 0) {
+	        fWallpaperFadeMs = fadeMs;
+	        fWallpaperFading = true;
+	        if (fHavePendingFade && system_time() - fPendingFadeStart < 3000000) {
+	            fWallpaperFadeStartUs = fPendingFadeStart;
+	            fWallpaperFadeMs = fPendingFadeMs;
+	            fWallpaperEffect = fPendingFadeEffect;
+	            fWallpaperWaiting = false;
+	        } else {
+	            fWallpaperWaiting = true;
+	            fWallpaperWaitDeadline = SDL_GetTicks() + 1500;
+	        }
+	    }
+	    fHavePendingFade = false;
 	}
 
 
@@ -10640,141 +10956,14 @@ void SyncDockWithRunningDeskbarApps() {
         // Mirrors BPrivate::BackgroundImage::Show()'s four placement modes:
         // kCentered / kAtOffset (Manual) / kScaledToFit / kTiled
         // =========================================================================
-        if (fWallpaperTexture.id != 0) {
-            float texW    = static_cast<float>(fWallpaperTexture.width);
-            float texH    = static_cast<float>(fWallpaperTexture.height);
-            float screenW = static_cast<float>(fWidth);
-            float screenH = static_cast<float>(fHeight);
-
-            // Centered / Manual placement don't necessarily cover the whole screen --
-            // fill with this workspace's real desktop background color first, same
-            // as Haiku's own Desktop window does around an undersized or offset image.
-            if (fWallpaperMode == kWallpaperCentered || fWallpaperMode == kWallpaperAtOffset) {
-                rgb_color gapColor = GetHaikuWorkspaceDesktopColor(current_workspace());
-                glColor4f(gapColor.red / 255.0f, gapColor.green / 255.0f, gapColor.blue / 255.0f, 1.0f);
-                glBegin(GL_QUADS);
-                    glVertex2f(0.0f, 0.0f);
-                    glVertex2f(screenW, 0.0f);
-                    glVertex2f(screenW, screenH);
-                    glVertex2f(0.0f, screenH);
-                glEnd();
-            }
-
-            glEnable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, fWallpaperTexture.id);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-            switch (fWallpaperMode) {
-                case kWallpaperCentered: {
-                    // Unscaled, centered on screen.
-                    float destX = (screenW - texW) / 2.0f;
-                    float destY = (screenH - texH) / 2.0f;
-                    glBegin(GL_QUADS);
-                        glTexCoord2f(0.0f, 0.0f); glVertex2f(destX, destY);
-                        glTexCoord2f(1.0f, 0.0f); glVertex2f(destX + texW, destY);
-                        glTexCoord2f(1.0f, 1.0f); glVertex2f(destX + texW, destY + texH);
-                        glTexCoord2f(0.0f, 1.0f); glVertex2f(destX, destY + texH);
-                    glEnd();
-                    break;
-                }
-
-                case kWallpaperAtOffset: {
-                    // Unscaled, placed at the "Manual" position saved by Backgrounds.
-                    float destX = fWallpaperOffset.x;
-                    float destY = fWallpaperOffset.y;
-                    glBegin(GL_QUADS);
-                        glTexCoord2f(0.0f, 0.0f); glVertex2f(destX, destY);
-                        glTexCoord2f(1.0f, 0.0f); glVertex2f(destX + texW, destY);
-                        glTexCoord2f(1.0f, 1.0f); glVertex2f(destX + texW, destY + texH);
-                        glTexCoord2f(0.0f, 1.0f); glVertex2f(destX, destY + texH);
-                    glEnd();
-                    break;
-                }
-
-                case kWallpaperTiled: {
-                    // Repeat the bitmap across the whole screen, phase-centered exactly
-                    // like BackgroundImage::Show()'s kTiled anchor calculation.
-                    if (texW > 0.0f && texH > 0.0f) {
-                        float anchorX = (screenW - texW) / 2.0f;
-                        float anchorY = (screenH - texH) / 2.0f;
-                        float startX = anchorX - texW * std::floor(anchorX / texW) - texW;
-                        float startY = anchorY - texH * std::floor(anchorY / texH) - texH;
-
-                        // Safety cap: bail out to a single tile rather than looping
-                        // thousands of times if a pathologically tiny image is set to Tile.
-                        double estimatedTiles = (static_cast<double>(screenW) / texW + 2.0)
-                            * (static_cast<double>(screenH) / texH + 2.0);
-                        if (estimatedTiles > 20000.0) {
-                            glBegin(GL_QUADS);
-                                glTexCoord2f(0.0f, 0.0f); glVertex2f(startX, startY);
-                                glTexCoord2f(1.0f, 0.0f); glVertex2f(startX + texW, startY);
-                                glTexCoord2f(1.0f, 1.0f); glVertex2f(startX + texW, startY + texH);
-                                glTexCoord2f(0.0f, 1.0f); glVertex2f(startX, startY + texH);
-                            glEnd();
-                        } else {
-                            for (float y = startY; y < screenH; y += texH) {
-                                for (float x = startX; x < screenW; x += texW) {
-                                    glBegin(GL_QUADS);
-                                        glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);
-                                        glTexCoord2f(1.0f, 0.0f); glVertex2f(x + texW, y);
-                                        glTexCoord2f(1.0f, 1.0f); glVertex2f(x + texW, y + texH);
-                                        glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + texH);
-                                    glEnd();
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                case kWallpaperScaledToFit:
-                default: {
-                    // Center-cropped scale-to-fill (Tracker's "Scale to fit" placement).
-                    float screenAspect = screenW / screenH;
-                    float imageAspect  = texW / texH;
-
-                    float uMin = 0.0f, uMax = 1.0f;
-                    float vMin = 0.0f, vMax = 1.0f;
-
-                    if (imageAspect > screenAspect) {
-                        // Image is wider than your screen aspect: crop left/right sides
-                        float cropWidth = texH * screenAspect;
-                        float horizontalDiff = (texW - cropWidth) / texW;
-                        uMin = horizontalDiff / 2.0f;
-                        uMax = 1.0f - uMin;
-                    } else if (imageAspect < screenAspect) {
-                        // Image is taller than your screen aspect: crop top/bottom sides
-                        float cropHeight = texW / screenAspect;
-                        float verticalDiff = (texH - cropHeight) / texH;
-                        vMin = verticalDiff / 2.0f;
-                        vMax = 1.0f - vMin;
-                    }
-
-                    glBegin(GL_QUADS);
-                        glTexCoord2f(uMin, vMin); glVertex2f(0.0f, 0.0f);
-                        glTexCoord2f(uMax, vMin); glVertex2f(screenW, 0.0f);
-                        glTexCoord2f(uMax, vMax); glVertex2f(screenW, screenH);
-                        glTexCoord2f(uMin, vMax); glVertex2f(0.0f, screenH);
-                    glEnd();
-                    break;
-                }
-            }
-
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glDisable(GL_TEXTURE_2D);
-        } else {
-            // No image at all for this workspace ("Image: None" in Backgrounds) --
-            // fill with this workspace's real desktop background color instead of
-            // leaving the transparent clear showing through as flat black.
-            rgb_color noImageColor = GetHaikuWorkspaceDesktopColor(current_workspace());
-            glColor4f(noImageColor.red / 255.0f, noImageColor.green / 255.0f, noImageColor.blue / 255.0f, 1.0f);
-            glBegin(GL_QUADS);
-                glVertex2f(0.0f, 0.0f);
-                glVertex2f(static_cast<float>(fWidth), 0.0f);
-                glVertex2f(static_cast<float>(fWidth), static_cast<float>(fHeight));
-                glVertex2f(0.0f, static_cast<float>(fHeight));
-            glEnd();
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        // Changing from the old wallpaper to the new one, over the time SnakeTracker takes for its own (the progress is 1
+        // when nothing changes).
+        {
+            const float progress = WallpaperFadeProgress();
+            if (progress < 1.0f)
+                DrawWallpaperTransition(progress);
+            else
+                DrawWallpaperLayer(fWallpaperTexture, fWallpaperMode, fWallpaperOffset, 1.0f);
         }
 
         // =========================================================================
@@ -13145,6 +13334,20 @@ private:
     HaikuTexture fWallpaperTexture;
     int32        fWallpaperMode = kWallpaperScaledToFit;
     BPoint       fWallpaperOffset = BPoint(0.0f, 0.0f);
+    HaikuTexture fOldWallpaperTexture;   // the picture a wallpaper fade starts from (id 0: no fade)
+    int32        fOldWallpaperMode = kWallpaperScaledToFit;
+    BPoint       fOldWallpaperOffset = BPoint(0.0f, 0.0f);
+    bool         fWallpaperFading = false;
+    bigtime_t    fWallpaperFadeStartUs = 0;
+    bool         fWallpaperWaiting = false;
+    Uint32       fWallpaperWaitDeadline = 0;
+    bool         fHavePendingFade = false;
+    bigtime_t    fPendingFadeStart = 0;
+    int32        fPendingFadeMs = 0;
+    int32        fPendingFadeEffect = 0;
+    int32        fWallpaperFadeMs = 1;
+    int32        fWallpaperEffect = 0;   // 0 fade, 1 wipe, 2 slide, 3 circle reveal (as SnakeTracker's wallpaper settings)
+    bool         fHasStencil = false;
     HaikuTexture fHaikuMenuIcon;
     HaikuTexture fHaikuTrashIcon;
 
@@ -13214,6 +13417,30 @@ public:
 };
 
 
+// SnakeTracker's message 'SnkF' (its change of the desktop picture begins): handed to the main loop as an SDL event.
+static bigtime_t gTrackerFadeStart = 0;
+static int32 gTrackerFadeMs = 0;
+static int32 gTrackerFadeEffect = 0;
+
+static filter_result TrackerFadeFilter(BMessage* message, BHandler**, BMessageFilter*) {
+    if (message->what != 'SnkF')
+        return B_DISPATCH_MESSAGE;
+    int64 start = 0;
+    int32 ms = 0, effect = 0;
+    if (message->FindInt64("start", &start) == B_OK && message->FindInt32("ms", &ms) == B_OK) {
+        message->FindInt32("effect", &effect);
+        gTrackerFadeStart = start;
+        gTrackerFadeMs = ms;
+        gTrackerFadeEffect = effect;
+        SDL_Event userEvent;
+        SDL_zero(userEvent);
+        userEvent.type = SDL_EVENT_WALLPAPER_CHANGED;
+        userEvent.user.code = 2;
+        SDL_PushEvent(&userEvent);
+    }
+    return B_SKIP_MESSAGE;
+}
+
 class WallpaperWatcher : public BHandler {
 private:
     node_ref fDesktopNodeRef;
@@ -13256,6 +13483,7 @@ public:
                     SDL_Event userEvent;
                     SDL_zero(userEvent);
                     userEvent.type = SDL_EVENT_WALLPAPER_CHANGED;
+                    userEvent.user.code = 1;   // the wallpaper itself changed (SnakeTracker may fade to it)
                     SDL_PushEvent(&userEvent);
                 }
             }
@@ -13792,6 +14020,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);   // (the circle reveal of a wallpaper change needs one)
 
     // =========================================================================
     // RESOLVE MONITOR RESOLUTION BOUNDS DYNAMICALLY
@@ -13819,6 +14048,10 @@ int main(int argc, char* argv[]) {
     LoadConfiguration();
     AvoidDeskbarEdge();
     WallpaperWatcher wallpaperWatcher;
+    if (be_app != nullptr && be_app->Lock()) {
+        be_app->AddCommonFilter(new BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, 'SnkF', TrackerFadeFilter));
+        be_app->Unlock();
+    }
 
     // Converts a window-local Y coordinate into world/screen space, and gives
     // the SDL window's own screen-space Y position -- 0 when the dock is
@@ -13893,6 +14126,11 @@ int main(int argc, char* argv[]) {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     HaikuGlDesktopEngine desktopEngine(screenWidth, screenHeight);
+    {
+        int stencilBits = 0;
+        SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &stencilBits);
+        desktopEngine.SetHasStencil(stencilBits > 0);
+    }
 
 
     bool appExecuting = true;
@@ -13974,8 +14212,12 @@ int main(int argc, char* argv[]) {
                 // =========================================================================
                 // NATIVE WALLPAPER MONITOR INTERACTION PROTOCOL
                 // =========================================================================
+                else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED && incomingEventPackage.user.code == 2) {
+                    desktopEngine.TrackerFadeStarted(gTrackerFadeStart, gTrackerFadeMs, gTrackerFadeEffect);
+                    needsRender = true;
+                }
                 else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED) {
-                    desktopEngine.ReloadWallpaperBackground();
+                    desktopEngine.ReloadWallpaperBackground(incomingEventPackage.user.code == 1);
                     desktopEngine.SyncDockWithRunningDeskbarApps();
 
 
@@ -14326,6 +14568,9 @@ int main(int argc, char* argv[]) {
             lastRosterScanTime = currentTime;
             needsRender = true;
         }
+
+        if (desktopEngine.WallpaperFadeActive())
+            needsRender = true;
 
         if (needsRender) {
             // =========================================================================
