@@ -13292,6 +13292,52 @@ private:
 	}
 
 
+    // The icon the user chose for Tracker in the SnakeTracker Settings (an HVIF file in the settings folder), as a texture; an empty
+    // one when there is none.
+    HaikuTexture LoadCustomTrackerTexture(int targetSize) {
+        HaikuTexture texture;
+        BPath path;
+        if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK || path.Append("snaketracker_tracker_icon.hvif") != B_OK)
+            return texture;
+        BFile file(path.Path(), B_READ_ONLY);
+        off_t size = 0;
+        if (file.InitCheck() != B_OK || file.GetSize(&size) != B_OK || size < 4 || size > 256 * 1024)
+            return texture;
+        std::vector<uint8> data((size_t)size);
+        if (file.Read(data.data(), data.size()) != (ssize_t)data.size() || memcmp(data.data(), "ncif", 4) != 0)
+            return texture;
+        BBitmap bitmap(BRect(0, 0, targetSize - 1, targetSize - 1), B_RGBA32);
+        if (bitmap.InitCheck() != B_OK || BIconUtils::GetVectorIcon(data.data(), data.size(), &bitmap) != B_OK)
+            return texture;
+        texture.width = targetSize;
+        texture.height = targetSize;
+        glGenTextures(1, &texture.id);
+        glBindTexture(GL_TEXTURE_2D, texture.id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, targetSize, targetSize, 0, GL_BGRA, GL_UNSIGNED_BYTE, bitmap.Bits());
+        return texture;
+    }
+
+    // The user chose another icon for Tracker (or went back to the default one): its entry in the dock is given the new picture.
+public:
+    void ReloadTrackerIcon() {
+        for (auto& item : fTaskbarWindows) {
+            if (item.signature != "application/x-vnd.Be-TRAK") continue;
+            app_info info;
+            if (be_roster->GetAppInfo(item.signature.c_str(), &info) != B_OK) continue;
+            BPath path(&info.ref);
+            if (path.InitCheck() != B_OK) continue;
+            HaikuTexture fresh = LoadIconFromNode(path.Path(), 128);
+            if (fresh.id == 0) continue;
+            if (item.icon.id != 0) glDeleteTextures(1, &item.icon.id);
+            item.icon = fresh;
+        }
+    }
+private:
+
     // Helper function that handles real files, directories, and symlink resolution paths
     HaikuTexture LoadIconFromNode(const char* filepath, int targetSize) {
         HaikuTexture texture;
@@ -13307,6 +13353,15 @@ private:
         // Fetch the absolute resolved path of the target item
         BPath resolvedPath;
         entry.GetPath(&resolvedPath);
+
+        // Tracker, when the user chose an icon for it
+        {
+            const char* leaf = std::strrchr(resolvedPath.Path(), '/');
+            if (leaf != nullptr && std::strcmp(leaf + 1, "Tracker") == 0) {
+                HaikuTexture custom = LoadCustomTrackerTexture(targetSize);
+                if (custom.id != 0) return custom;
+            }
+        }
 
         // 2. Open the true resolved node target
         BNode node(resolvedPath.Path());
@@ -13446,6 +13501,15 @@ static int32 gTrackerFadeMs = 0;
 static int32 gTrackerFadeEffect = 0;
 
 static filter_result TrackerFadeFilter(BMessage* message, BHandler**, BMessageFilter*) {
+    if (message->what == 'SnkI') {
+        // SnakeTracker Settings: Tracker has another icon now (told to the main loop, which owns the textures)
+        SDL_Event iconEvent;
+        SDL_zero(iconEvent);
+        iconEvent.type = SDL_EVENT_WALLPAPER_CHANGED;
+        iconEvent.user.code = 4;
+        SDL_PushEvent(&iconEvent);
+        return B_SKIP_MESSAGE;
+    }
     if (message->what != 'SnkF')
         return B_DISPATCH_MESSAGE;
     int64 start = 0;
@@ -14073,6 +14137,7 @@ int main(int argc, char* argv[]) {
     WallpaperWatcher wallpaperWatcher;
     if (be_app != nullptr && be_app->Lock()) {
         be_app->AddCommonFilter(new BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, 'SnkF', TrackerFadeFilter));
+        be_app->AddCommonFilter(new BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE, 'SnkI', TrackerFadeFilter));
         be_app->Unlock();
     }
 
@@ -14235,6 +14300,10 @@ int main(int argc, char* argv[]) {
                 // =========================================================================
                 // NATIVE WALLPAPER MONITOR INTERACTION PROTOCOL
                 // =========================================================================
+                else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED && incomingEventPackage.user.code == 4) {
+                    desktopEngine.ReloadTrackerIcon();
+                    needsRender = true;
+                }
                 else if (incomingEventPackage.type == SDL_EVENT_WALLPAPER_CHANGED && incomingEventPackage.user.code == 2) {
                     desktopEngine.TrackerFadeStarted(gTrackerFadeStart, gTrackerFadeMs, gTrackerFadeEffect);
                     needsRender = true;
