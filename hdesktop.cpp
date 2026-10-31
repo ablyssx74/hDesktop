@@ -542,6 +542,30 @@ struct DesktopIconItem {
 const int32 kOcclusionGridSize = 8; // 8x8 = 64 cells, plenty for a threshold decision
 const float kOcclusionThreshold = 0.5f; // >50% covered counts as occluded
 
+// Wine runs each of its processes (the desktop's explorer, services, a program) as a team of the one signature below, named "wine",
+// that the roster lists like an application. Only one with a window of its own is an application to the user.
+static const char* const kWineSignature = "application/x-vnd.Wayland-App";
+
+static bool TeamHasUserWindow(team_id team) {
+    int32 workspaces = count_workspaces();
+    for (int32 ws = 0; ws < workspaces; ++ws) {
+        int32* tokens = nullptr;
+        int32 count = 0;
+        if (BPrivate::get_window_order(ws, &tokens, &count) != B_OK || tokens == nullptr) continue;
+        bool found = false;
+        for (int32 i = 0; i < count && !found; ++i) {
+            client_window_info* info = get_window_info(tokens[i]);
+            if (info == nullptr) continue;
+            found = info->team == team && info->feel == B_NORMAL_WINDOW_FEEL
+                && (info->show_hide_level == 0 || info->is_mini);
+            free(info);
+        }
+        free(tokens);
+        if (found) return true;
+    }
+    return false;
+}
+
 // The team that owns the frontmost real window on the current workspace --
 // what the user actually sees on top -- skipping hDesktop's own windows, the
 // Desktop and other non-normal feels (menus, floating palettes), minimized and
@@ -8769,6 +8793,7 @@ void SyncDockWithRunningDeskbarApps() {
             if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
 
             std::string appSignature(info.signature);
+            if (appSignature == kWineSignature && !TeamHasUserWindow(id)) continue;
 
             bool isDuplicate = false;
             if (appSignature == "application/x-vnd.iceweasel"    ||
