@@ -212,7 +212,26 @@ struct Settings {
     std::string mixerCommand;
     std::string terminalCommand;
     bool   checkForUpdates = true;
+    // Wallpaper (KDE Plasma): rotates the desktop picture from folders or an online source
+    bool   wallpaperOn = false;
+    std::set<std::string> wallpaperSources = {"folders"};   // any of: folders, bing, wikimedia, wallhaven, picsum, artic
+    std::vector<std::string> wallpaperFolders;
+    int    wallpaperInterval = 2;              // index into kWallpaperMinutes
+    bool   wallpaperRandom = true;             // folders: random order (off: in order)
+    int    wallpaperFill = 0;                  // index into kWallpaperFills
+    bool   wallpaperPerWorkspace = false;      // a picture of its own on each workspace
+    int    wallpaperIndex = 0;                 // next picture of a folder in order
 };
+
+// The picture each workspace has when "a picture of its own on each workspace" is on: workspace id -> file (kept between runs)
+static std::map<std::string, std::string> gWallpaperByWorkspace;
+
+namespace Wallpaper { static void WorkspaceChanged(); }   // (defined with the rest of the wallpaper code, further down)
+
+static const int kWallpaperMinutes[] = {1, 5, 15, 30, 60, 360, 1440};
+static const int kWallpaperIntervals = sizeof(kWallpaperMinutes) / sizeof(kWallpaperMinutes[0]);
+// Plasma's FillMode values for "Fill", "Fit", "Stretch" and "Tile"
+static const int kWallpaperFillModes[] = {2, 1, 0, 3};
 
 static Settings gSettings;
 
@@ -287,6 +306,28 @@ static void SaveConfiguration() {
     std::vector<const char*> favs;
     for (const auto& f : gSettings.favorites) favs.push_back(f.c_str());
     g_key_file_set_string_list(kf, "Drawer", "favorites", favs.data(), favs.size());
+
+    g_key_file_set_boolean(kf, "Wallpaper", "enabled", gSettings.wallpaperOn);
+    {
+        std::vector<const char*> sources;
+        for (const auto& src : gSettings.wallpaperSources) sources.push_back(src.c_str());
+        g_key_file_set_string_list(kf, "Wallpaper", "sources", sources.data(), sources.size());
+        std::vector<std::string> pairs;
+        for (const auto& entry : gWallpaperByWorkspace) pairs.push_back(entry.first + "|" + entry.second);
+        std::vector<const char*> pairPointers;
+        for (const auto& pr : pairs) pairPointers.push_back(pr.c_str());
+        g_key_file_set_string_list(kf, "Wallpaper", "workspace_pictures", pairPointers.data(), pairPointers.size());
+    }
+    {
+        std::vector<const char*> folders;
+        for (const auto& f : gSettings.wallpaperFolders) folders.push_back(f.c_str());
+        g_key_file_set_string_list(kf, "Wallpaper", "folders", folders.data(), folders.size());
+    }
+    g_key_file_set_integer(kf, "Wallpaper", "interval", gSettings.wallpaperInterval);
+    g_key_file_set_boolean(kf, "Wallpaper", "random", gSettings.wallpaperRandom);
+    g_key_file_set_integer(kf, "Wallpaper", "placement", gSettings.wallpaperFill);
+    g_key_file_set_boolean(kf, "Wallpaper", "per_workspace", gSettings.wallpaperPerWorkspace);
+    g_key_file_set_integer(kf, "Wallpaper", "index", gSettings.wallpaperIndex);
 
     GError* err = nullptr;
     if (!g_key_file_save_to_file(kf, SettingsPath().c_str(), &err)) {
@@ -398,6 +439,55 @@ static void LoadConfiguration() {
             if (favs[i][0] != '\0') gSettings.favorites.insert(favs[i]);
         }
         g_strfreev(favs);
+    }
+    {
+        const char* w = "Wallpaper";
+        GError* e = nullptr;
+        gboolean on = g_key_file_get_boolean(kf, w, "enabled", &e);
+        if (e == nullptr) gSettings.wallpaperOn = on; else g_clear_error(&e);
+        gsize sourceCount = 0;
+        char** sources = g_key_file_get_string_list(kf, w, "sources", &sourceCount, nullptr);
+        if (sources != nullptr) {
+            gSettings.wallpaperSources.clear();
+            for (gsize i = 0; i < sourceCount; ++i)
+                if (sources[i][0] != '\0') gSettings.wallpaperSources.insert(sources[i]);
+            g_strfreev(sources);
+        } else if (char* source = g_key_file_get_string(kf, w, "source", nullptr)) {   // (an older file: one source)
+            gSettings.wallpaperSources = {source};
+            g_free(source);
+        }
+        if (gSettings.wallpaperSources.empty()) gSettings.wallpaperSources = {"folders"};
+        gsize pairCount = 0;
+        char** pairs = g_key_file_get_string_list(kf, w, "workspace_pictures", &pairCount, nullptr);
+        if (pairs != nullptr) {
+            gWallpaperByWorkspace.clear();
+            for (gsize i = 0; i < pairCount; ++i) {
+                const char* bar = strchr(pairs[i], '|');
+                if (bar != nullptr && bar != pairs[i]) gWallpaperByWorkspace[std::string(pairs[i], bar - pairs[i])] = bar + 1;
+            }
+            g_strfreev(pairs);
+        }
+        gsize folderCount = 0;
+        char** folders = g_key_file_get_string_list(kf, w, "folders", &folderCount, nullptr);
+        if (folders != nullptr) {
+            gSettings.wallpaperFolders.clear();
+            for (gsize i = 0; i < folderCount; ++i)
+                if (folders[i][0] != '\0') gSettings.wallpaperFolders.push_back(folders[i]);
+            g_strfreev(folders);
+        }
+        int v = g_key_file_get_integer(kf, w, "interval", &e);
+        if (e == nullptr) gSettings.wallpaperInterval = v; else g_clear_error(&e);
+        gboolean rnd = g_key_file_get_boolean(kf, w, "random", &e);
+        if (e == nullptr) gSettings.wallpaperRandom = rnd; else g_clear_error(&e);
+        v = g_key_file_get_integer(kf, w, "placement", &e);
+        if (e == nullptr) gSettings.wallpaperFill = v; else g_clear_error(&e);
+        gboolean per = g_key_file_get_boolean(kf, w, "per_workspace", &e);
+        if (e == nullptr) gSettings.wallpaperPerWorkspace = per; else g_clear_error(&e);
+        v = g_key_file_get_integer(kf, w, "index", &e);
+        if (e == nullptr) gSettings.wallpaperIndex = v; else g_clear_error(&e);
+        gSettings.wallpaperInterval = std::clamp(gSettings.wallpaperInterval, 0, kWallpaperIntervals - 1);
+        gSettings.wallpaperFill = std::clamp(gSettings.wallpaperFill, 0, 3);
+        gSettings.wallpaperIndex = std::max(0, gSettings.wallpaperIndex);
     }
     g_key_file_free(kf);
 
@@ -6021,6 +6111,7 @@ static void ToggleAppDrawer();
 static bool AppDrawerOpen();
 static void CloseAppDrawer();
 static void ShowConfigPanel();
+static int gInitialSettingsTab = 0;   // the settings panel opens on this tab
 static void ShowAlert(const std::string& title, const std::string& text, std::vector<std::string> buttons,
     std::function<void(int)> onChoice, int defaultButton = -1);
 static void ShowAboutAlert();
@@ -6574,7 +6665,7 @@ public:
         wl_surface_commit(surface);
 
         gToplevels.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); };
-        gWorkspaces.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); };
+        gWorkspaces.onChanged = [this]() { SyncApps(); RequestRender(); if (gWsPopup) gWsPopup->Refresh(); Wallpaper::WorkspaceChanged(); };
         // The Tracker icon and the app list are built by SyncApps(), which normally runs
         // when the first window or workspace event arrives. On a desktop with no windows
         // and no workspace information (Wayfire without its IPC plugins, say) nothing
@@ -10161,6 +10252,699 @@ static void ShowColorPanel(zwlr_layer_surface_v1* parent, int parentWidth, int p
 }
 
 // =========================================================================
+// WALLPAPER (KDE Plasma) AND WORKSPACE EFFECTS (KWin)
+// =========================================================================
+// The wallpaper tab rotates the desktop picture from folders or from an online source and hands it to Plasma
+// (plasma-apply-wallpaperimage); the workspaces tab picks the effect KWin plays when the workspace changes and writes it to
+// kwinrc, the way System Settings does. Both only exist on KDE Plasma.
+static void RedrawConfigPanel();
+static void RebuildConfigPanel();   // the rows of the open settings panel are made again
+
+static bool OnKdePlasma() {
+    const char* d = g_getenv("XDG_CURRENT_DESKTOP");
+    return d != nullptr && strstr(d, "KDE") != nullptr;
+}
+
+namespace Wallpaper {
+
+struct Picture {
+    std::string id;         // the name of the cached file, without its extension
+    std::string url;
+    std::string fallback;   // another address, if the first one is refused
+    std::string title;      // what the picture is called
+    std::string credit;     // who made it / where it is from (shown under the settings)
+};
+
+static std::string sStatus;                              // the line shown in the panel
+static std::string sCurrentId;                           // the online picture on the desktop now (not picked twice in a row)
+static std::string sCurrentFile;                         // the file put on the desktop last (what the credit line describes)
+static std::atomic<bool> sBusy(false);
+static guint sTimer = 0;
+static std::string sLastWorkspace;                        // the workspace whose picture was put on last
+
+static bool Available() {
+    static int cached = -1;
+    if (cached < 0) {
+        char* tool = g_find_program_in_path("plasma-apply-wallpaperimage");
+        cached = (OnKdePlasma() && tool != nullptr) ? 1 : 0;
+        g_free(tool);
+    }
+    return cached == 1;
+}
+
+static void SetStatus(const std::string& text) {
+    sStatus = text;
+    RedrawConfigPanel();
+}
+
+static std::string CacheDir() { return std::string(g_get_user_cache_dir()) + "/hdesktop/wallpapers"; }
+
+// --- a little JSON (the answers are read for a few strings and numbers only) ---
+static void AppendUtf8(std::string* out, unsigned code) {
+    if (code < 0x80) out->push_back(static_cast<char>(code));
+    else if (code < 0x800) {
+        out->push_back(static_cast<char>(0xC0 | (code >> 6)));
+        out->push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    } else {
+        out->push_back(static_cast<char>(0xE0 | (code >> 12)));
+        out->push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+        out->push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    }
+}
+
+// The string value of "key": "..." found at or after `from` (decoded); `end`: just after it.
+static bool JsonString(const std::string& text, const char* key, size_t from, std::string* value, size_t* end = nullptr) {
+    const std::string quoted = std::string("\"") + key + "\"";
+    size_t at = text.find(quoted, from);
+    while (at != std::string::npos) {
+        size_t i = at + quoted.size();
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\n' || text[i] == '\t')) i++;
+        if (i < text.size() && text[i] == ':') {
+            i++;
+            while (i < text.size() && (text[i] == ' ' || text[i] == '\n' || text[i] == '\t')) i++;
+            if (i < text.size() && text[i] == '"') {
+                i++;
+                value->clear();
+                while (i < text.size() && text[i] != '"') {
+                    if (text[i] == '\\' && i + 1 < text.size()) {
+                        i++;
+                        switch (text[i]) {
+                            case 'n': value->push_back('\n'); break;
+                            case 't': value->push_back('\t'); break;
+                            case 'u':
+                                if (i + 4 < text.size()) {
+                                    AppendUtf8(value, static_cast<unsigned>(strtoul(text.substr(i + 1, 4).c_str(), nullptr, 16)));
+                                    i += 4;
+                                }
+                                break;
+                            default: value->push_back(text[i]); break;
+                        }
+                    } else
+                        value->push_back(text[i]);
+                    i++;
+                }
+                if (end != nullptr) *end = i;
+                return true;
+            }
+        }
+        at = text.find(quoted, at + 1);
+    }
+    return false;
+}
+
+static long JsonNumber(const std::string& text, const char* key, size_t from = 0) {
+    const std::string quoted = std::string("\"") + key + "\":";
+    size_t at = text.find(quoted, from);
+    if (at == std::string::npos) return -1;
+    at += quoted.size();
+    while (at < text.size() && text[at] == ' ') at++;
+    if (at >= text.size() || text[at] < '0' || text[at] > '9') return -1;
+    return strtol(text.c_str() + at, nullptr, 10);
+}
+
+// The text from each occurrence of `marker` up to the next: one object of a list.
+static std::vector<std::string> Objects(const std::string& json, const char* marker) {
+    std::vector<std::string> objects;
+    size_t at = json.find(marker);
+    while (at != std::string::npos) {
+        const size_t next = json.find(marker, at + 1);
+        objects.push_back(json.substr(at, next == std::string::npos ? std::string::npos : next - at));
+        at = next;
+    }
+    return objects;
+}
+
+// --- downloading ---
+static size_t Append(char* data, size_t size, size_t count, void* user) {
+    auto* text = static_cast<std::string*>(user);
+    if (text->size() + size * count > 80u * 1024 * 1024) return 0;
+    text->append(data, size * count);
+    return size * count;
+}
+
+static bool HttpGet(const std::string& url, std::string* body, long timeout = 60) {
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) return false;
+    body->clear();
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Append);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, body);
+    // (the Art Institute turns away a User-Agent that has an address in it)
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hdesktop");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    const CURLcode result = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(curl);
+    return result == CURLE_OK && status == 200 && !body->empty();
+}
+
+static std::string DateString(time_t when, const char* format) {
+    char text[32];
+    struct tm local;
+    localtime_r(&when, &local);
+    strftime(text, sizeof(text), format, &local);
+    return text;
+}
+
+// --- the online sources (the ones that need no key) ---
+static void ListBing(std::vector<Picture>* pictures) {
+    std::string json;
+    if (!HttpGet("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=4&mkt=en-US", &json)) return;
+    size_t at = 0;
+    std::string date, base, copyright, title;
+    while (JsonString(json, "startdate", at, &date, &at)) {
+        if (!JsonString(json, "urlbase", at, &base, &at)) break;
+        JsonString(json, "copyright", at, &copyright, &at);
+        JsonString(json, "title", at, &title, &at);
+        Picture picture;
+        picture.id = "bing-" + date;
+        picture.url = "https://www.bing.com" + base + "_1920x1080.jpg";
+        picture.title = title;
+        picture.credit = copyright.empty() ? "Bing" : copyright + " (Bing)";
+        pictures->push_back(picture);
+    }
+}
+
+static void ListWikimedia(std::vector<Picture>* pictures) {
+    for (int back = 0; back < 3; back++) {
+        const std::string day = DateString(time(nullptr) - back * 86400, "%Y/%m/%d");
+        std::string json;
+        if (!HttpGet("https://api.wikimedia.org/feed/v1/wikipedia/en/featured/" + day, &json)) continue;
+        const size_t image = json.find("\"image\":{");
+        if (image == std::string::npos) continue;
+        std::string thumb, original, title;
+        JsonString(json, "title", image, &title);
+        const size_t thumbnail = json.find("\"thumbnail\"", image);
+        size_t afterThumb = image;
+        if (thumbnail != std::string::npos && JsonString(json, "source", thumbnail, &thumb, &afterThumb))
+            JsonString(json, "source", afterThumb, &original);
+        if (thumb.empty() && original.empty()) continue;
+        Picture picture;
+        std::string date = day;
+        for (auto& c : date) if (c == '/') c = '-';
+        picture.id = "wikimedia-" + date;
+        // (the thumbnail's address names its width: ask for 1920)
+        const size_t px = thumb.find("/960px-");
+        picture.url = px != std::string::npos ? thumb.substr(0, px) + "/1920px-" + thumb.substr(px + 7) : thumb;
+        picture.fallback = original;
+        picture.title = title.compare(0, 5, "File:") == 0 ? title.substr(5) : title;
+        picture.credit = "Wikimedia Commons, Picture of the Day";
+        pictures->push_back(picture);
+    }
+}
+
+static void ListWallhaven(std::vector<Picture>* pictures) {
+    std::string json;
+    if (!HttpGet("https://wallhaven.cc/api/v1/search?categories=100&purity=100&sorting=toplist&topRange=1d"
+            "&ratios=16x9,16x10&atleast=1920x1080", &json, 30)) return;
+    const std::string today = DateString(time(nullptr), "%Y%m%d");
+    const std::vector<std::string> objects = Objects(json, "{\"id\":\"");
+    int count = 0;
+    for (size_t i = 0; i < objects.size() && count < 6; i++) {
+        std::string id, path, page;
+        if (!JsonString(objects[i], "id", 0, &id) || !JsonString(objects[i], "path", 0, &path)) continue;
+        JsonString(objects[i], "url", 0, &page);
+        Picture picture;
+        picture.id = "wallhaven-" + today + "-" + id;
+        picture.url = path;
+        picture.title = "Wallhaven " + id;
+        picture.credit = "wallhaven.cc" + (page.empty() ? std::string() : " - " + page);
+        pictures->push_back(picture);
+        count++;
+    }
+}
+
+static void ListPicsum(std::vector<Picture>* pictures) {
+    std::string json;
+    char page[64];
+    snprintf(page, sizeof(page), "page=%d&limit=40", 1 + rand() % 20);
+    if (!HttpGet(std::string("https://picsum.photos/v2/list?") + page, &json, 30)) return;
+    const std::string today = DateString(time(nullptr), "%Y%m%d");
+    const std::vector<std::string> objects = Objects(json, "{\"id\":\"");
+    std::vector<size_t> good;
+    for (size_t i = 0; i < objects.size(); i++) {
+        const long width = JsonNumber(objects[i], "width"), height = JsonNumber(objects[i], "height");
+        if (width >= 3000 && height > 0 && width > height * 13 / 10) good.push_back(i);
+    }
+    for (int count = 0; count < 4 && !good.empty(); count++) {
+        const size_t pick = static_cast<size_t>(rand()) % good.size();
+        std::string id, author;
+        if (JsonString(objects[good[pick]], "id", 0, &id)) {
+            JsonString(objects[good[pick]], "author", 0, &author);
+            Picture picture;
+            picture.id = "picsum-" + today + "-" + id;
+            picture.url = "https://picsum.photos/id/" + id + "/1920/1080.jpg";
+            picture.title = "Picsum Photos";
+            picture.credit = "Photo by " + (author.empty() ? std::string("a photographer") : author) + " (Picsum Photos)";
+            pictures->push_back(picture);
+        }
+        good.erase(good.begin() + pick);
+    }
+}
+
+static void ListArtic(std::vector<Picture>* pictures) {
+    std::string json;
+    char page[96];
+    snprintf(page, sizeof(page), "&limit=40&page=%d", 1 + rand() % 20);
+    if (!HttpGet(std::string("https://api.artic.edu/api/v1/artworks/search?q=landscape&query%5Bterm%5D%5Bis_public_domain%5D=true"
+            "&fields=id,title,artist_display,image_id,thumbnail") + page, &json, 30)) return;
+    const std::string today = DateString(time(nullptr), "%Y%m%d");
+    const std::vector<std::string> objects = Objects(json, "{\"_score\":");
+    std::vector<size_t> good;
+    for (size_t i = 0; i < objects.size(); i++) {
+        const long width = JsonNumber(objects[i], "width"), height = JsonNumber(objects[i], "height");
+        if (width >= 2500 && height > 0 && width > height * 13 / 10) good.push_back(i);
+    }
+    for (int count = 0; count < 4 && !good.empty(); count++) {
+        const size_t pick = static_cast<size_t>(rand()) % good.size();
+        std::string image, title, artist;
+        if (JsonString(objects[good[pick]], "image_id", 0, &image)) {
+            JsonString(objects[good[pick]], "title", 0, &title);
+            JsonString(objects[good[pick]], "artist_display", 0, &artist);
+            const size_t newline = artist.find('\n');
+            if (newline != std::string::npos) artist = artist.substr(0, newline);
+            Picture picture;
+            picture.id = "artic-" + today + "-" + image.substr(0, 8);
+            picture.url = "https://www.artic.edu/iiif/2/" + image + "/full/1686,/0/default.jpg";
+            picture.title = title.empty() ? "Art Institute of Chicago" : title;
+            picture.credit = (artist.empty() ? std::string("Unknown artist") : artist) + " - Art Institute of Chicago (public domain)";
+            pictures->push_back(picture);
+        }
+        good.erase(good.begin() + pick);
+    }
+}
+
+static bool LooksLikePicture(const std::string& data) {
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(data.data());
+    if (data.size() < 12) return false;
+    return (b[0] == 0xFF && b[1] == 0xD8) || (b[0] == 0x89 && b[1] == 'P') || (b[0] == 'R' && b[1] == 'I' && b[2] == 'F');
+}
+
+// The picture as a file in the cache (downloaded unless it is there already); empty: it could not be had.
+static std::string Download(const Picture& picture) {
+    const std::string dir = CacheDir();
+    g_mkdir_with_parents(dir.c_str(), 0755);
+    struct stat st;
+    // (the title and credit go in a small file beside the picture)
+    auto describe = [&](const std::string& file) {
+        const std::string note = file + ".txt";
+        if (stat(note.c_str(), &st) == 0 || (picture.title.empty() && picture.credit.empty())) return;
+        if (FILE* f = fopen(note.c_str(), "w")) {
+            fprintf(f, "%s\n%s\n", picture.title.c_str(), picture.credit.c_str());
+            fclose(f);
+        }
+    };
+    for (const char* ext : {".jpg", ".png", ".webp"}) {
+        const std::string cached = dir + "/" + picture.id + ext;
+        if (stat(cached.c_str(), &st) == 0 && st.st_size > 1000) { describe(cached); return cached; }
+    }
+    std::string body;
+    bool ok = HttpGet(picture.url, &body, 120) && LooksLikePicture(body);
+    if (!ok && !picture.fallback.empty()) ok = HttpGet(picture.fallback, &body, 120) && LooksLikePicture(body);
+    if (!ok) return "";
+    // (named by what it is: Plasma and the file chooser go by the name)
+    const unsigned char* magic = reinterpret_cast<const unsigned char*>(body.data());
+    const char* ext = magic[0] == 0x89 ? ".png" : (magic[0] == 'R' ? ".webp" : ".jpg");
+    const std::string file = dir + "/" + picture.id + ext;
+    const std::string part = file + ".part";
+    FILE* f = fopen(part.c_str(), "wb");
+    if (f == nullptr) return "";
+    const bool written = fwrite(body.data(), 1, body.size(), f) == body.size();
+    fclose(f);
+    if (!written || rename(part.c_str(), file.c_str()) != 0) { unlink(part.c_str()); return ""; }
+    describe(file);
+
+    // keep the newest thirty
+    std::vector<std::pair<time_t, std::string>> files;
+    if (GDir* d = g_dir_open(dir.c_str(), 0, nullptr)) {
+        while (const char* name = g_dir_read_name(d)) {
+            const std::string path = dir + "/" + name;
+            if (path.size() > 4 && path.compare(path.size() - 4, 4, ".txt") == 0) continue;
+            if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) files.push_back({st.st_mtime, path});
+        }
+        g_dir_close(d);
+    }
+    if (files.size() > 30) {
+        std::sort(files.begin(), files.end());
+        for (size_t i = 0; i + 30 < files.size(); i++) {
+            unlink(files[i].second.c_str());
+            unlink((files[i].second + ".txt").c_str());
+        }
+    }
+    return file;
+}
+
+// --- folders ---
+static void CollectImages(const std::string& dir, int depth, std::vector<std::string>* out) {
+    GDir* d = g_dir_open(dir.c_str(), 0, nullptr);
+    if (d == nullptr) return;
+    while (const char* name = g_dir_read_name(d)) {
+        if (name[0] == '.') continue;
+        const std::string path = dir + "/" + name;
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (depth < 3) CollectImages(path, depth + 1, out);
+        } else if (S_ISREG(st.st_mode)) {
+            const std::string lower = ToLower(path);
+            for (const char* ext : {".jpg", ".jpeg", ".png", ".webp", ".bmp"}) {
+                const size_t n = strlen(ext);
+                if (lower.size() > n && lower.compare(lower.size() - n, n, ext) == 0) { out->push_back(path); break; }
+            }
+        }
+    }
+    g_dir_close(d);
+}
+
+// --- the credit line ---
+// The picture Plasma shows on the first screen, for when this run has not put one there yet.
+static std::string PlasmaPicture() {
+    std::string group, image;
+    std::map<std::string, std::string> imageOf, screenOf;
+    if (FILE* f = fopen((std::string(g_get_user_config_dir()) + "/plasma-org.kde.plasma.desktop-appletsrc").c_str(), "r")) {
+        char line[2048];
+        while (fgets(line, sizeof(line), f)) {
+            std::string text = line;
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+            if (!text.empty() && text[0] == '[') { group = text; continue; }
+            if (text.compare(0, 6, "Image=") == 0 && group.find("[Wallpaper][org.kde.image][General]") != std::string::npos)
+                imageOf[group.substr(0, group.find(']') + 1)] = text.substr(6);
+            else if (text == "lastScreen=0") screenOf[group.substr(0, group.find(']') + 1)] = "0";
+        }
+        fclose(f);
+    }
+    for (const auto& entry : screenOf) {
+        auto it = imageOf.find(entry.first);
+        if (it != imageOf.end()) { image = it->second; break; }
+    }
+    if (image.compare(0, 7, "file://") == 0) image = image.substr(7);
+    return image;
+}
+
+// What to say about a picture: its title and credit when it came from the internet (saved beside it), else its file and folder.
+static std::string Describe(const std::string& file) {
+    if (file.empty()) return "";
+    std::string title, credit;
+    if (FILE* f = fopen((file + ".txt").c_str(), "r")) {
+        char line[1024];
+        if (fgets(line, sizeof(line), f)) { title = line; while (!title.empty() && title.back() == '\n') title.pop_back(); }
+        if (fgets(line, sizeof(line), f)) { credit = line; while (!credit.empty() && credit.back() == '\n') credit.pop_back(); }
+        fclose(f);
+    }
+    if (!title.empty() || !credit.empty()) return title.empty() ? credit : (credit.empty() ? title : title + " - " + credit);
+    gchar* base = g_path_get_basename(file.c_str());
+    gchar* dir = g_path_get_dirname(file.c_str());
+    std::string text = std::string(base) + "  (" + dir + ")";
+    g_free(base);
+    g_free(dir);
+    return text;
+}
+
+// The credit line for the picture on the desktop: the one put there now, or this workspace's, or what Plasma shows.
+static std::string CurrentDescription() {
+    std::string file = sCurrentFile;
+    if (file.empty() && gSettings.wallpaperPerWorkspace) {
+        auto it = gWallpaperByWorkspace.find(gWorkspaces.ActiveId());
+        if (it != gWallpaperByWorkspace.end()) file = it->second;
+    }
+    if (file.empty()) file = PlasmaPicture();
+    return Describe(file);
+}
+
+// --- Plasma ---
+static void ApplyFile(const std::string& path) {
+    sCurrentFile = path;
+    RebuildConfigPanel();   // (the credit line under the settings is for this picture now)
+    const char* argv[] = {"plasma-apply-wallpaperimage", path.c_str(), nullptr};
+    g_spawn_async(nullptr, const_cast<char**>(argv), nullptr,
+        static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL),
+        nullptr, nullptr, nullptr, nullptr);
+}
+
+// How the picture fills the screen (Plasma keeps it for the pictures that follow).
+static void ApplyFill() {
+    if (!Available()) return;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+    if (bus == nullptr) return;
+    char script[512];
+    snprintf(script, sizeof(script),
+        "var all = desktops(); for (var i = 0; i < all.length; i++) { var d = all[i]; d.wallpaperPlugin = 'org.kde.image'; "
+        "d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; d.writeConfig('FillMode', %d); }",
+        kWallpaperFillModes[std::clamp(gSettings.wallpaperFill, 0, 3)]);
+    g_dbus_connection_call(bus, "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell", "evaluateScript",
+        g_variant_new("(s)", script), nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
+}
+
+// The file of the next picture from one source: the folders, or an online source's (downloaded into the cache).
+static std::string PickFrom(const std::string& source, const std::vector<std::string>& folders, bool random, int index,
+        const std::string& avoid, std::string* id, int* nextIndex, std::string* problem) {
+    std::string file;
+    if (source == "folders") {
+        std::vector<std::string> images;
+        for (const auto& f : folders) CollectImages(f, 0, &images);
+        if (images.empty()) {
+            *problem = folders.empty() ? "Add a folder with pictures first" : "No pictures in the folders";
+        } else {
+            std::sort(images.begin(), images.end());
+            if (random) {
+                file = images[static_cast<size_t>(rand()) % images.size()];
+            } else {
+                file = images[static_cast<size_t>(index) % images.size()];
+                *nextIndex = (index + 1) % static_cast<int>(images.size());
+            }
+        }
+    } else {
+        std::vector<Picture> pictures;
+        if (source == "bing") ListBing(&pictures);
+        else if (source == "wikimedia") ListWikimedia(&pictures);
+        else if (source == "wallhaven") ListWallhaven(&pictures);
+        else if (source == "picsum") ListPicsum(&pictures);
+        else if (source == "artic") ListArtic(&pictures);
+        std::vector<Picture> fresh;
+        for (const auto& p : pictures) if (p.id != avoid) fresh.push_back(p);
+        if (fresh.empty()) fresh = pictures;
+        if (fresh.empty()) {
+            *problem = "Could not reach " + source;
+        } else {
+            const Picture& pick = fresh[static_cast<size_t>(rand()) % fresh.size()];
+            file = Download(pick);
+            if (file.empty()) *problem = "Could not download the picture";
+            else *id = pick.id;
+        }
+    }
+    return file;
+}
+
+// The file of the next picture: from one of the chosen sources, picked at random; when that one has nothing (no network, an empty
+// folder) the others are tried. Empty: `problem` says why.
+static std::string Pick(const std::set<std::string>& sources, const std::vector<std::string>& folders, bool random, int index,
+        const std::string& avoid, std::string* id, int* nextIndex, std::string* problem) {
+    std::vector<std::string> order(sources.begin(), sources.end());
+    for (size_t i = order.size(); i > 1; --i) std::swap(order[i - 1], order[static_cast<size_t>(rand()) % i]);
+    *nextIndex = index;
+    for (const auto& source : order) {
+        std::string why;
+        const std::string file = PickFrom(source, folders, random, index, avoid, id, nextIndex, &why);
+        if (!file.empty()) return file;
+        *problem = why;
+    }
+    if (order.empty()) *problem = "Choose where the pictures come from";
+    return "";
+}
+
+// Picks the next picture (in a thread: it may be a download) and puts it on the desktop. `workspace`: the workspace it is for
+// when every workspace has a picture of its own, else empty.
+static void Next(const std::string& workspace = "") {
+    if (!Available() || sBusy.exchange(true)) return;
+    const std::set<std::string> sources = gSettings.wallpaperSources;
+    const std::vector<std::string> folders = gSettings.wallpaperFolders;
+    const bool random = gSettings.wallpaperRandom;
+    const int index = gSettings.wallpaperIndex;
+    const std::string avoid = sCurrentId;
+    SetStatus("Choosing a picture...");
+
+    std::thread([=]() {
+        std::string id, problem;
+        int nextIndex = index;
+        const std::string file = Pick(sources, folders, random, index, avoid, &id, &nextIndex, &problem);
+        RunLater([=]() {
+            sBusy = false;
+            if (file.empty()) { SetStatus(problem); return; }
+            gSettings.wallpaperIndex = nextIndex;
+            sCurrentId = id;
+            if (!workspace.empty()) { gWallpaperByWorkspace[workspace] = file; SaveConfiguration(); }
+            ApplyFile(file);
+            SetStatus("");
+        });
+    }).detach();
+}
+
+// The timer that changes the picture; started again whenever the settings change.
+static void Schedule() {
+    sLastWorkspace.clear();
+    if (sTimer != 0) { g_source_remove(sTimer); sTimer = 0; }
+    if (!gSettings.wallpaperOn || !Available()) return;
+    const guint seconds = static_cast<guint>(kWallpaperMinutes[std::clamp(gSettings.wallpaperInterval, 0, kWallpaperIntervals - 1)]) * 60;
+    sTimer = g_timeout_add_seconds(seconds, [](gpointer) -> gboolean {
+        Next(gSettings.wallpaperPerWorkspace ? gWorkspaces.ActiveId() : std::string());
+        return G_SOURCE_CONTINUE;
+    }, nullptr);
+}
+
+// A workspace came to the front: with a picture per workspace, it gets its own (found again from the last time, or chosen now).
+// This does not need the timer: the rotation only changes the picture of the workspace you are on.
+static void WorkspaceChanged() {
+    if (!gSettings.wallpaperPerWorkspace || !Available()) return;
+    const std::string id = gWorkspaces.ActiveId();
+    DebugLog("wallpaper: workspace %s (last %s)\n", id.c_str(), sLastWorkspace.c_str());
+    if (id.empty() || id == sLastWorkspace) return;
+    sLastWorkspace = id;
+    auto it = gWallpaperByWorkspace.find(id);
+    if (it != gWallpaperByWorkspace.end() && access(it->second.c_str(), R_OK) == 0) ApplyFile(it->second);
+    else Next(id);
+}
+
+// "Add folder...": the desktop's own folder chooser.
+static void ChooseFolder(std::function<void(std::string)> done) {
+    std::thread([done]() {
+        const char* start = g_get_user_special_dir(G_USER_DIRECTORY_PICTURES);
+        const std::string where = start != nullptr ? start : g_get_home_dir();
+        std::string path;
+        for (int tool = 0; tool < 2 && path.empty(); tool++) {
+            const char* kdialog[] = {"kdialog", "--getexistingdirectory", where.c_str(), nullptr};
+            const char* zenity[] = {"zenity", "--file-selection", "--directory", nullptr};
+            gchar* out = nullptr;
+            gint status = 0;
+            if (g_spawn_sync(nullptr, const_cast<char**>(tool == 0 ? kdialog : zenity), nullptr,
+                    static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL), nullptr, nullptr, &out, nullptr,
+                    &status, nullptr) && out != nullptr && status == 0) {
+                path = out;
+                while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+            }
+            g_free(out);
+        }
+        RunLater([done, path]() { if (!path.empty()) done(path); });
+    }).detach();
+}
+
+}   // namespace Wallpaper
+
+namespace KWinFx {
+
+// What KWin plays when the workspace changes: Slide and Fade Desktop are the two effects of that kind, and only one of them can
+// be on. The values are read from and written to kwinrc, the same file System Settings uses.
+struct State {
+    int effect = 1;                 // 0 none, 1 slide, 2 fade desktop
+    int fadeMs = 250;               // Fade Desktop: how long it takes
+    int gap = 45;                   // Slide: the space between workspaces
+    bool slideBackground = true;    // Slide: the desktop background slides too
+    bool osd = true;                // the name of the workspace shown when it changes
+};
+
+static State sState;
+static bool sDirty = false;
+static bool sLoaded = false;
+
+static bool Available() {
+    static int cached = -1;
+    if (cached < 0) {
+        char* tool = g_find_program_in_path("kwriteconfig6");
+        cached = (OnKdePlasma() && tool != nullptr) ? 1 : 0;
+        g_free(tool);
+    }
+    return cached == 1;
+}
+
+// kwinrc is a KDE config file (GLib's key file reader refuses some of its lines), so the few values are read by hand.
+static State Read() {
+    State st;
+    std::map<std::string, std::string> values;   // "Group/Key" -> value
+    const std::string rc = std::string(g_get_user_config_dir()) + "/kwinrc";
+    if (FILE* f = fopen(rc.c_str(), "r")) {
+        char line[1024];
+        std::string group;
+        while (fgets(line, sizeof(line), f)) {
+            std::string text = line;
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+            if (text.size() > 2 && text.front() == '[') {
+                // ("[Effect-slide]"; a group inside a group is "[A][B]")
+                group = text.substr(1, text.rfind(']') - 1);
+            } else {
+                const size_t eq = text.find('=');
+                if (eq != std::string::npos && eq > 0 && text[0] != '#') values[group + "/" + text.substr(0, eq)] = text.substr(eq + 1);
+            }
+        }
+        fclose(f);
+    }
+    auto flag = [&](const char* key, bool fallback) {
+        auto it = values.find(key);
+        return it == values.end() ? fallback : it->second == "true";
+    };
+    auto number = [&](const char* key, int fallback) {
+        auto it = values.find(key);
+        return it == values.end() || it->second.empty() ? fallback : atoi(it->second.c_str());
+    };
+    const bool slide = flag("Plugins/slideEnabled", true), fade = flag("Plugins/fadedesktopEnabled", false);
+    st.effect = fade ? 2 : (slide ? 1 : 0);
+    st.osd = flag("Plugins/desktopchangeosdEnabled", true);
+    st.fadeMs = std::clamp(number("Effect-fadedesktop/AnimationDuration", 250), 50, 1000);
+    st.gap = std::clamp(number("Effect-slide/HorizontalGap", 45), 0, 200);
+    st.slideBackground = flag("Effect-slide/SlideBackground", true);
+    return st;
+}
+
+static void Load() {
+    if (sLoaded) return;
+    sLoaded = true;
+    sState = Read();
+}
+
+static void Write(const char* group, const char* key, const std::string& value) {
+    const char* argv[] = {"kwriteconfig6", "--file", "kwinrc", "--group", group, "--key", key, value.c_str(), nullptr};
+    g_spawn_sync(nullptr, const_cast<char**>(argv), nullptr,
+        static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL),
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+}
+
+// Writes the choices to kwinrc and tells KWin to read them again (in a thread: it starts a few programs).
+static void Flush() {
+    if (!sDirty || !Available()) return;
+    sDirty = false;
+    const State st = sState;
+    std::thread([st]() {
+        Write("Plugins", "slideEnabled", st.effect == 1 ? "true" : "false");
+        Write("Plugins", "fadedesktopEnabled", st.effect == 2 ? "true" : "false");
+        Write("Plugins", "desktopchangeosdEnabled", st.osd ? "true" : "false");
+        Write("Effect-fadedesktop", "AnimationDuration", std::to_string(st.fadeMs));
+        Write("Effect-slide", "HorizontalGap", std::to_string(st.gap));
+        Write("Effect-slide", "VerticalGap", std::to_string(st.gap));
+        Write("Effect-slide", "SlideBackground", st.slideBackground ? "true" : "false");
+        // (KWin reads the file when it starts; to have it switch now the effects are loaded and unloaded by name, and the one in
+        // use is told to read its settings again)
+        RunLater([st]() {
+            GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+            if (bus == nullptr) return;
+            auto effect = [&](const char* method, const char* name) {
+                g_dbus_connection_call(bus, "org.kde.KWin", "/Effects", "org.kde.kwin.Effects", method,
+                    g_variant_new("(s)", name), nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr, nullptr, nullptr);
+            };
+            effect(st.effect == 1 ? "loadEffect" : "unloadEffect", "slide");
+            effect(st.effect == 2 ? "loadEffect" : "unloadEffect", "fadedesktop");
+            effect(st.osd ? "loadEffect" : "unloadEffect", "desktopchangeosd");
+            if (st.effect == 1) effect("reconfigureEffect", "slide");
+            if (st.effect == 2) effect("reconfigureEffect", "fadedesktop");
+        });
+    }).detach();
+}
+
+}   // namespace KWinFx
+
+// =========================================================================
 // SETTINGS PANEL (ConfigView / HaikuConfigWindow)
 // =========================================================================
 class ConfigPanel : public LayerPanel {
@@ -10370,6 +11154,7 @@ public:
             if (fDragging >= 0) {
                 fDragging = -1;
                 SaveConfiguration();
+                KWinFx::Flush();
             }
             return;
         }
@@ -10385,6 +11170,7 @@ public:
                 if (w.enabled) {
                     w.setBool(!w.getBool());
                     Apply();
+                    if (w.changed) w.changed();
                 }
                 break;
             case Widget::kSegmented: {
@@ -10392,6 +11178,7 @@ public:
                 int s = std::clamp(static_cast<int>((fMouseX - w.rect.left) / (w.rect.Width() / count)), 0, count - 1);
                 w.setInt(s);
                 Apply();
+                if (w.changed) w.changed();
                 break;
             }
             case Widget::kSlider:
@@ -10401,7 +11188,10 @@ public:
             default:
                 break;
         }
-        if (fBuiltPreviews != (gSettings.windowPreviews && gPreviews.Available())) Relayout();
+        if (fBuiltPreviews != (gSettings.windowPreviews && gPreviews.Available()) || fRelayoutPending) {
+            fRelayoutPending = false;
+            Relayout();
+        }
         Redraw();
     }
 
@@ -10436,26 +11226,61 @@ private:
         float trackLeft = 0;       // (and where its track starts)
         std::string help;   // hover text for the [?] badge after a checkbox label
         HRect helpRect;
+        std::function<void()> changed;   // called after a check or a segmented choice changed
     };
 
     static constexpr int kWidth = 560;
 
+    static constexpr float kContentTop = 84;     // under the title and the tab bar
+    static constexpr float kFooterHeight = 46;   // About / Shutdown / Close, on every tab
+    static constexpr int kTabCount = 5;
+
+    static const char* TabName(int tab) {
+        static const char* const names[kTabCount] = {"Dock", "Widgets", "Look", "Wallpaper", "Workspaces"};
+        return names[tab];
+    }
+
     void BuildWidgets() {
-        float y = 44;
-        auto button = [&](const std::string& label, RGBA accent, std::function<void()> fn) {
+        // The panel is as tall as its tallest tab, so that it does not change size when you change tabs: every tab is built
+        // once to measure it, then the one that is shown.
+        float tallest = 0;
+        for (int tab = 0; tab < kTabCount; ++tab) {
+            fWidgets.clear();
+            tallest = std::max(tallest, BuildTab(tab));
+        }
+        fWidgets.clear();
+        fContentHeight = tallest + kFooterHeight;
+
+        {
+            Widget bar;
+            bar.type = Widget::kSegmented;
+            for (int tab = 0; tab < kTabCount; ++tab) bar.options.push_back(TabName(tab));
+            bar.getInt = [this]() { return fTab; };
+            bar.setInt = [this](int v) { if (v != fTab) { fTab = v; fRelayoutPending = true; } };
+            bar.rect = HRect{40, 44, kWidth - 40.0f, 70};
+            fWidgets.push_back(bar);
+        }
+        BuildTab(fTab);
+
+        // the footer: the same three buttons on every tab
+        const float fy = fContentHeight - kFooterHeight + 8;
+        auto footerButton = [&](const std::string& label, RGBA accent, float left, std::function<void()> fn) {
             Widget w;
             w.type = Widget::kButton;
             w.label = label;
             w.accent = accent;
             w.onClick = std::move(fn);
-            w.rect = HRect{kWidth / 2.0f - 100, y, kWidth / 2.0f + 100, y + 26};
+            w.rect = HRect{left, fy, left + 150, fy + 26};
             fWidgets.push_back(w);
-            y += 34;
         };
-        button("Shutdown hDesktop", RGBA{0.86, 0.3, 0.3, 1}, []() { QuitApplication(); });
-        button("About hdesktop", RGBA{0.35, 0.55, 0.86, 1}, []() { ShowAboutAlert(); });
-        y += 10;
+        footerButton("About hdesktop", RGBA{0.35, 0.55, 0.86, 1}, 40, []() { ShowAboutAlert(); });
+        footerButton("Shutdown hDesktop", RGBA{0.86, 0.3, 0.3, 1}, 205, []() { QuitApplication(); });
+        footerButton("Close", RGBA{0.45, 0.47, 0.55, 1}, 370, [this]() { Close(); });
+    }
 
+    // The rows of one tab, starting under the tab bar; returns where they end.
+    float BuildTab(int tab) {
+        float y = kContentTop;
         auto slider = [&](const std::string& label, double min, double max, const char* minL, const char* maxL,
             std::function<double()> get, std::function<void(double)> set) {
             Widget w;
@@ -10472,13 +11297,14 @@ private:
             y += 58;
         };
         auto check = [&](const std::string& label, bool* value, float x = 40, bool newRow = true, bool enabled = true,
-            const char* help = nullptr) {
+            const char* help = nullptr, std::function<void()> changed = nullptr) {
             Widget w;
             w.type = Widget::kCheck;
             w.label = label;
             w.enabled = enabled;
             w.getBool = [value]() { return *value; };
             w.setBool = [value](bool v) { *value = v; };
+            w.changed = std::move(changed);
             double tw;
             MeasureText(label, 12, false, &tw, nullptr);
             w.rect = HRect{x, y, static_cast<float>(x + 26 + tw), y + 20};
@@ -10490,155 +11316,318 @@ private:
             fWidgets.push_back(w);
             if (newRow) y += 24;
         };
-        // Dock widget toggles share the first four rows (right-hand column),
-        // like the Haiku config window.
-        check("Enable Auto-Hide", &gSettings.autoHide, 40, false);
-        check("Show Clock", &gSettings.showClock, 317);
-        check("Enable System Tray", &gSettings.showSystemTray, 40, false);
-        check("Show Volume", &gSettings.showVolume, 317);
-        check("Keep Dock Above Windows", &gSettings.keepAboveWindows, 40, false);
-        check("Show CPU Graph", &gSettings.showCpuGraph, 317);
-        check("Title Overlays: Popup List", &gSettings.titlePopup, 40, false);
-        check("Show Workspace Switcher", &gSettings.workspaceSwitcher, 317, true, gWorkspaces.Available());
-        check("Reserve Screen Space", &gSettings.reserveSpace, 40, false, true, "Windows stop at the dock");
-        check("24-Hour Clock", &gSettings.clock24h, 317);
-        check("Notifications", &gSettings.notificationServer, 40, false, true, "hDesktop shows desktop notifications");
-        check("Check for Updates", &gSettings.checkForUpdates, 317);
-        check("Window Previews", &gSettings.windowPreviews, 40, false, gPreviews.Available(),
-            "Thumbnails when hovering dock icons (KDE Plasma)");
-        check("Snake Trail", &gSettings.snakeTrail, 317, true, true,
-            "Menu highlight stays joined across submenus");
-        check("Flat Selector", &gSettings.snakeFlat, 40, true, true,
-            "Menu highlight in one flat colour (off: light top and dark bottom edges)");
-        fBuiltPreviews = gSettings.windowPreviews && gPreviews.Available();
-        if (fBuiltPreviews) {
-            y += 6;
-            slider("Preview Size", 120, 360, "Small", "Large",
-                []() { return static_cast<double>(gSettings.previewWidth); },
-                [](double v) { gSettings.previewWidth = static_cast<int>(std::lround(v)); });
-            y -= 6;
-        }
-
-        {
+        auto note = [&](const std::string& text, float height = 20) {
             Widget info;
             info.type = Widget::kLabel;
             info.small = true;
-            info.label = std::string("Taskbar: ") + gToplevels.BackendName() + "   ·   Workspaces: " +
-                gWorkspaces.BackendName();
+            info.label = text;
             info.rect = HRect{40, y + 2, kWidth - 40.0f, y + 16};
             fWidgets.push_back(info);
-            y += 28;
-        }
-
-        auto segmented = [&](const std::string& label, std::vector<std::string> options, int* value) {
+            y += height;
+        };
+        // a labelled row of choices; with x0..x1 two of them can share a line (then `newRow` is false for the first)
+        auto choice = [&](const std::string& label, std::vector<std::string> options, std::function<int()> get,
+            std::function<void(int)> set, std::function<void()> changed = nullptr, float x0 = 40, float x1 = kWidth - 40.0f,
+            bool newRow = true) {
             Widget l;
             l.type = Widget::kLabel;
             l.label = label;
-            l.rect = HRect{40, y, kWidth - 40.0f, y + 16};
+            l.rect = HRect{x0, y, x1, y + 16};
             fWidgets.push_back(l);
-            y += 22;
-            Widget s;
-            s.type = Widget::kSegmented;
-            s.options = std::move(options);
-            s.getInt = [value]() { return *value; };
-            s.setInt = [value](int v) { *value = v; };
-            s.rect = HRect{40, y, kWidth - 40.0f, y + 26};
-            fWidgets.push_back(s);
-            y += 38;
+            Widget c;
+            c.type = Widget::kSegmented;
+            c.options = std::move(options);
+            c.getInt = std::move(get);
+            c.setInt = std::move(set);
+            c.changed = std::move(changed);
+            c.rect = HRect{x0, y + 22, x1, y + 48};
+            fWidgets.push_back(c);
+            if (newRow) y += 58;
         };
-        segmented("Dock Location:", {"Bottom", "Top"}, &gSettings.dockLocation);
-        std::vector<std::string> effects(kEffectNames, kEffectNames + kEffectCount);
-        effects[0] = "No Effects";
-        segmented("Open App Effects:", effects, &gSettings.openEffect);
-        segmented("Close App Effects:", effects, &gSettings.closeEffect);
+        auto button = [&](const std::string& label, RGBA accent, float left, float width, std::function<void()> fn,
+            bool newRow = true) {
+            Widget w;
+            w.type = Widget::kButton;
+            w.label = label;
+            w.accent = accent;
+            w.onClick = std::move(fn);
+            w.rect = HRect{left, y, left + width, y + 26};
+            fWidgets.push_back(w);
+            if (newRow) y += 34;
+        };
 
-        {
-            // "Adjust Dock Color: [swatch]" and "Selector Color: [swatch]" -- a swatch opens the color picker
-            static const int kDockDefault[3] = {216, 216, 216};
-            static const int kAccentDefault[3] = {70, 110, 200};
-            auto colorRow = [&](const char* label, const char* title, int* color, const int* defaults) {
-                Widget w;
-                w.type = Widget::kColor;
-                w.label = label;
-                w.color = color;
-                double tw;
-                MeasureText(w.label, 12, true, &tw, nullptr);
-                w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
-                w.onClick = [this, color, title, defaults]() {
-                    ShowColorPanel(layerSurface, width, height, color, title, defaults);
-                };
-                fWidgets.push_back(w);
-                y += 30;
-            };
-            colorRow("Adjust Dock Color:", "Dock Color", gSettings.dockColor, kDockDefault);
-            colorRow("Selector Color:", "Selector Color", gSettings.accentColor, kAccentDefault);
-            {
-                // "Menu & Drawer Color": the panel behind the menus and the drawer. Until it is set it is a light tint of
-                // the Selector Color; the picker starts from that, and "Defaults" in it (or choosing the same color again)
-                // puts it back to following the Selector Color.
-                static int sMenuDefault[3];
-                Widget w;
-                w.type = Widget::kColor;
-                w.label = "Menu & Drawer Color:";
-                w.color = gSettings.menuColor;
-                double tw;
-                MeasureText(w.label, 12, true, &tw, nullptr);
-                w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
-                w.onClick = [this]() {
-                    const RGBA derived = PillGfx::DerivedFill();
-                    sMenuDefault[0] = static_cast<int>(std::lround(derived.r * 255));
-                    sMenuDefault[1] = static_cast<int>(std::lround(derived.g * 255));
-                    sMenuDefault[2] = static_cast<int>(std::lround(derived.b * 255));
-                    if (gSettings.menuColorAuto)
-                        for (int i = 0; i < 3; ++i) gSettings.menuColor[i] = sMenuDefault[i];
-                    gSettings.menuColorAuto = false;
-                    gColorPanelDoneHook = []() {
-                        const RGBA d = PillGfx::DerivedFill();
-                        const int want[3] = {static_cast<int>(std::lround(d.r * 255)), static_cast<int>(std::lround(d.g * 255)),
-                            static_cast<int>(std::lround(d.b * 255))};
-                        bool same = true;
-                        for (int i = 0; i < 3; ++i) same = same && std::abs(gSettings.menuColor[i] - want[i]) <= 1;
-                        if (same) gSettings.menuColorAuto = true;
-                        gColorPanelDoneHook = nullptr;
+        switch (tab) {
+            case 0: {   // Dock
+                choice("Dock Location:", {"Bottom", "Top"}, []() { return gSettings.dockLocation; },
+                    [](int v) { gSettings.dockLocation = v; });
+                check("Enable Auto-Hide", &gSettings.autoHide, 40, false);
+                check("Keep Dock Above Windows", &gSettings.keepAboveWindows, 317);
+                check("Reserve Screen Space", &gSettings.reserveSpace, 40, false, true, "Windows stop at the dock");
+                check("Title Overlays: Popup List", &gSettings.titlePopup, 317);
+                check("Window Previews", &gSettings.windowPreviews, 40, true, gPreviews.Available(),
+                    "Thumbnails when hovering dock icons (KDE Plasma)");
+                fBuiltPreviews = gSettings.windowPreviews && gPreviews.Available();
+                y += 6;
+                if (fBuiltPreviews) {
+                    slider("Preview Size", 120, 360, "Small", "Large",
+                        []() { return static_cast<double>(gSettings.previewWidth); },
+                        [](double v) { gSettings.previewWidth = static_cast<int>(std::lround(v)); });
+                }
+                slider("Dock Transparency", 0, 100, "Transparent", "Opaque",
+                    []() { return gSettings.dockAlpha * 100.0; },
+                    [](double v) { gSettings.dockAlpha = static_cast<float>(v / 100.0); });
+                slider("Icon Size", 32, 72, "Small", "Large",
+                    []() { return static_cast<double>(gSettings.baseIconSize); },
+                    [](double v) { gSettings.baseIconSize = static_cast<float>(std::lround(v)); });
+                slider("Icon Zoom Size (%)", 100, 250, "None", "Large",
+                    []() { return static_cast<double>(std::lround(gSettings.iconZoom * 100.0f)); },
+                    [](double v) { gSettings.iconZoom = static_cast<float>(std::lround(v)) / 100.0f; });
+                note(std::string("Taskbar: ") + gToplevels.BackendName() + "   ·   Workspaces: " + gWorkspaces.BackendName());
+                break;
+            }
+            case 1: {   // Widgets
+                note("What the dock shows", 26);
+                check("Show Clock", &gSettings.showClock, 40, false);
+                check("24-Hour Clock", &gSettings.clock24h, 317);
+                check("Show Volume", &gSettings.showVolume, 40, false);
+                check("Show CPU Graph", &gSettings.showCpuGraph, 317);
+                check("Enable System Tray", &gSettings.showSystemTray, 40, false);
+                check("Show Workspace Switcher", &gSettings.workspaceSwitcher, 317, true, gWorkspaces.Available());
+                y += 12;
+                note("Programs", 26);
+                check("Notifications", &gSettings.notificationServer, 40, false, true, "hDesktop shows desktop notifications");
+                check("Check for Updates", &gSettings.checkForUpdates, 317);
+                break;
+            }
+            case 2: {   // Look
+                // "Adjust Dock Color: [swatch]" and "Selector Color: [swatch]" -- a swatch opens the color picker
+                static const int kDockDefault[3] = {216, 216, 216};
+                static const int kAccentDefault[3] = {70, 110, 200};
+                auto colorRow = [&](const char* label, const char* title, int* color, const int* defaults) {
+                    Widget w;
+                    w.type = Widget::kColor;
+                    w.label = label;
+                    w.color = color;
+                    double tw;
+                    MeasureText(w.label, 12, true, &tw, nullptr);
+                    w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
+                    w.onClick = [this, color, title, defaults]() {
+                        ShowColorPanel(layerSurface, width, height, color, title, defaults);
                     };
-                    ShowColorPanel(layerSurface, width, height, gSettings.menuColor, "Menu & Drawer Color", sMenuDefault);
+                    fWidgets.push_back(w);
+                    y += 30;
                 };
-                fWidgets.push_back(w);
-                // the drawer's transparency, on the same line as the color
-                Widget t;
-                t.type = Widget::kSlider;
-                t.compact = true;
-                t.label = "Transparency";
-                t.min = 0;
-                t.max = 80;
-                t.getDouble = []() { return static_cast<double>(gSettings.drawerTransparency); };
-                t.setDouble = [](double v) { gSettings.drawerTransparency = static_cast<int>(std::lround(v)); };
-                const float left = w.rect.right + 36;
-                double lw = 0;
-                MeasureText("Transparency: 80%", 12, false, &lw, nullptr);
-                t.rect = HRect{left, y, kWidth - 40.0f, y + 18};
-                t.trackLeft = left + static_cast<float>(lw) + 12;
-                fWidgets.push_back(t);
-                y += 30;
+                colorRow("Adjust Dock Color:", "Dock Color", gSettings.dockColor, kDockDefault);
+                colorRow("Selector Color:", "Selector Color", gSettings.accentColor, kAccentDefault);
+                {
+                    // "Menu & Drawer Color": the panel behind the menus and the drawer. Until it is set it is a light tint of
+                    // the Selector Color; the picker starts from that, and "Defaults" in it (or choosing the same color again)
+                    // puts it back to following the Selector Color.
+                    static int sMenuDefault[3];
+                    Widget w;
+                    w.type = Widget::kColor;
+                    w.label = "Menu & Drawer Color:";
+                    w.color = gSettings.menuColor;
+                    double tw;
+                    MeasureText(w.label, 12, true, &tw, nullptr);
+                    w.rect = HRect{40, y, static_cast<float>(40 + tw + 12 + 40), y + 18};
+                    w.onClick = [this]() {
+                        const RGBA derived = PillGfx::DerivedFill();
+                        sMenuDefault[0] = static_cast<int>(std::lround(derived.r * 255));
+                        sMenuDefault[1] = static_cast<int>(std::lround(derived.g * 255));
+                        sMenuDefault[2] = static_cast<int>(std::lround(derived.b * 255));
+                        if (gSettings.menuColorAuto)
+                            for (int i = 0; i < 3; ++i) gSettings.menuColor[i] = sMenuDefault[i];
+                        gSettings.menuColorAuto = false;
+                        gColorPanelDoneHook = []() {
+                            const RGBA d = PillGfx::DerivedFill();
+                            const int want[3] = {static_cast<int>(std::lround(d.r * 255)), static_cast<int>(std::lround(d.g * 255)),
+                                static_cast<int>(std::lround(d.b * 255))};
+                            bool same = true;
+                            for (int i = 0; i < 3; ++i) same = same && std::abs(gSettings.menuColor[i] - want[i]) <= 1;
+                            if (same) gSettings.menuColorAuto = true;
+                            gColorPanelDoneHook = nullptr;
+                        };
+                        ShowColorPanel(layerSurface, width, height, gSettings.menuColor, "Menu & Drawer Color", sMenuDefault);
+                    };
+                    fWidgets.push_back(w);
+                    // the drawer's transparency, on the same line as the color
+                    Widget t;
+                    t.type = Widget::kSlider;
+                    t.compact = true;
+                    t.label = "Transparency";
+                    t.min = 0;
+                    t.max = 80;
+                    t.getDouble = []() { return static_cast<double>(gSettings.drawerTransparency); };
+                    t.setDouble = [](double v) { gSettings.drawerTransparency = static_cast<int>(std::lround(v)); };
+                    const float left = w.rect.right + 36;
+                    double lw = 0;
+                    MeasureText("Transparency: 80%", 12, false, &lw, nullptr);
+                    t.rect = HRect{left, y, kWidth - 40.0f, y + 18};
+                    t.trackLeft = left + static_cast<float>(lw) + 12;
+                    fWidgets.push_back(t);
+                    y += 30;
+                }
+                y += 4;
+                check("Snake Trail", &gSettings.snakeTrail, 40, false, true, "Menu highlight stays joined across submenus");
+                check("Flat Selector", &gSettings.snakeFlat, 317, true, true,
+                    "Menu highlight in one flat colour (off: light top and dark bottom edges)");
+                y += 6;
+                std::vector<std::string> effects(kEffectNames, kEffectNames + kEffectCount);
+                effects[0] = "No Effects";
+                choice("Open App Effects:", effects, []() { return gSettings.openEffect; }, [](int v) { gSettings.openEffect = v; });
+                choice("Close App Effects:", effects, []() { return gSettings.closeEffect; }, [](int v) { gSettings.closeEffect = v; });
+                slider("Effect Speed (ms)", 200, 1500, "Fast", "Slow",
+                    []() { return static_cast<double>(gSettings.effectDurationMs); },
+                    [](double v) { gSettings.effectDurationMs = static_cast<int>(std::lround(v)); });
+                break;
+            }
+            case 3: {   // Wallpaper
+                if (!Wallpaper::Available()) {
+                    note("The wallpaper is changed through KDE Plasma (plasma-apply-wallpaperimage), which was not found here.", 24);
+                    break;
+                }
+                note(Wallpaper::sStatus.empty() ? "Changes the desktop picture by itself" : Wallpaper::sStatus, 24);
+                check("Change the wallpaper automatically", &gSettings.wallpaperOn, 40, true, true, nullptr, [this]() {
+                    Wallpaper::Schedule();
+                    if (gSettings.wallpaperOn) {
+                        Wallpaper::ApplyFill();
+                        Wallpaper::Next(gSettings.wallpaperPerWorkspace ? gWorkspaces.ActiveId() : std::string());
+                    }
+                });
+                y += 4;
+                {
+                    // any number of sources can be on: each time, one of them is picked at random
+                    Widget l;
+                    l.type = Widget::kLabel;
+                    l.label = "Pictures from (any of them):";
+                    l.rect = HRect{40, y, kWidth - 40.0f, y + 16};
+                    fWidgets.push_back(l);
+                    y += 24;
+                    static const char* const kKeys[] = {"folders", "bing", "wikimedia", "wallhaven", "picsum", "artic"};
+                    static const char* const kNames[] = {"Folders", "Bing", "Wikimedia", "Wallhaven", "Picsum", "Art Institute"};
+                    for (int i = 0; i < 6; ++i) {
+                        const std::string key = kKeys[i];
+                        Widget w;
+                        w.type = Widget::kCheck;
+                        w.label = kNames[i];
+                        w.getBool = [key]() { return gSettings.wallpaperSources.count(key) > 0; };
+                        w.setBool = [key](bool on) {
+                            if (on) gSettings.wallpaperSources.insert(key);
+                            else if (gSettings.wallpaperSources.size() > 1) gSettings.wallpaperSources.erase(key);   // (one stays on)
+                        };
+                        w.changed = [this]() { fRelayoutPending = true; Wallpaper::Schedule(); };
+                        const float x = 40 + (i % 3) * 180;
+                        double tw;
+                        MeasureText(w.label, 12, false, &tw, nullptr);
+                        w.rect = HRect{x, y, static_cast<float>(x + 26 + tw), y + 20};
+                        fWidgets.push_back(w);
+                        if (i % 3 == 2) y += 24;
+                    }
+                    y += 4;
+                }
+                if (gSettings.wallpaperSources.count("folders") > 0) {
+                    for (size_t i = 0; i < gSettings.wallpaperFolders.size() && i < 4; ++i) {
+                        Widget l;
+                        l.type = Widget::kLabel;
+                        l.small = true;
+                        l.label = gSettings.wallpaperFolders[i];
+                        l.rect = HRect{40, y + 5, kWidth - 130.0f, y + 19};
+                        fWidgets.push_back(l);
+                        button("Remove", RGBA{0.55, 0.4, 0.4, 1}, kWidth - 110.0f, 70, [this, i]() {
+                            if (i < gSettings.wallpaperFolders.size()) {
+                                gSettings.wallpaperFolders.erase(gSettings.wallpaperFolders.begin() + i);
+                                SaveConfiguration();
+                                Relayout();
+                                Redraw();
+                            }
+                        }, false);
+                        fWidgets.back().rect.bottom = y + 22;
+                        y += 26;
+                    }
+                    if (gSettings.wallpaperFolders.size() < 4)
+                        button("Add folder...", RGBA{0.35, 0.55, 0.86, 1}, 40, 130, [this]() {
+                            Wallpaper::ChooseFolder([](std::string path) {
+                                if (std::find(gSettings.wallpaperFolders.begin(), gSettings.wallpaperFolders.end(), path) ==
+                                        gSettings.wallpaperFolders.end())
+                                    gSettings.wallpaperFolders.push_back(path);
+                                SaveConfiguration();
+                                RebuildConfigPanel();
+                            });
+                        });
+                    y += 4;
+                }
+                choice("Change every:", {"1 min", "5 min", "15 min", "30 min", "1 hour", "6 hours", "1 day"},
+                    []() { return gSettings.wallpaperInterval; }, [](int v) { gSettings.wallpaperInterval = v; },
+                    []() { Wallpaper::Schedule(); });
+                choice("Order:", {"Random", "In order"}, []() { return gSettings.wallpaperRandom ? 0 : 1; },
+                    [](int v) { gSettings.wallpaperRandom = (v == 0); }, nullptr, 40, 200, false);
+                choice("Placement:", {"Fill", "Fit", "Stretch", "Tile"}, []() { return gSettings.wallpaperFill; },
+                    [](int v) { gSettings.wallpaperFill = v; }, []() { Wallpaper::ApplyFill(); }, 220, kWidth - 40.0f);
+                check("A picture of its own on each workspace", &gSettings.wallpaperPerWorkspace, 40, true,
+                    gWorkspaces.Available(), nullptr, []() {
+                        Wallpaper::Schedule();
+                        // (the workspace you are on gets its picture now; the others when you go to them)
+                        if (gSettings.wallpaperPerWorkspace) { Wallpaper::ApplyFill(); Wallpaper::WorkspaceChanged(); }
+                    });
+                y += 6;
+                button("Next picture", RGBA{0.35, 0.55, 0.86, 1}, 40, 150, []() {
+                    Wallpaper::Next(gSettings.wallpaperPerWorkspace ? gWorkspaces.ActiveId() : std::string());
+                });
+                {
+                    // the title and credit of the picture on the desktop (this workspace's, when each has its own), on two lines
+                    std::string text = Wallpaper::CurrentDescription();
+                    for (int line = 0; line < 2 && !text.empty(); ++line) {
+                        std::string shown = text;
+                        double tw;
+                        MeasureText(shown, 10, false, &tw, nullptr);
+                        if (tw > kWidth - 80) {
+                            size_t cut = shown.size();
+                            while (cut > 8) {
+                                cut = shown.rfind(' ', cut - 1);
+                                if (cut == std::string::npos || cut < 8) { cut = std::min<size_t>(shown.size(), 70); break; }
+                                MeasureText(shown.substr(0, cut), 10, false, &tw, nullptr);
+                                if (tw <= kWidth - 80) break;
+                            }
+                            shown = text.substr(0, cut);
+                            text = cut < text.size() ? text.substr(cut + (text[cut] == ' ' ? 1 : 0)) : "";
+                        } else {
+                            text.clear();
+                        }
+                        note(shown, 15);
+                    }
+                }
+                break;
+            }
+            case 4: {   // Workspaces
+                if (!KWinFx::Available()) {
+                    note("The workspace effects are KWin's (KDE Plasma); kwriteconfig6 was not found here.", 24);
+                    break;
+                }
+                KWinFx::Load();
+                note("What KWin plays when you go to another workspace", 26);
+                choice("Effect:", {"None", "Slide", "Fade Desktop"}, []() { return KWinFx::sState.effect; },
+                    [](int v) { KWinFx::sState.effect = v; KWinFx::sDirty = true; }, [this]() { fRelayoutPending = true; });
+                if (KWinFx::sState.effect == 1) {
+                    slider("Gap between workspaces (px)", 0, 200, "None", "Wide",
+                        []() { return static_cast<double>(KWinFx::sState.gap); },
+                        [](double v) { KWinFx::sState.gap = static_cast<int>(std::lround(v)); KWinFx::sDirty = true; });
+                    check("Slide the desktop background too", &KWinFx::sState.slideBackground, 40, true, true, nullptr,
+                        []() { KWinFx::sDirty = true; });
+                } else if (KWinFx::sState.effect == 2) {
+                    slider("Fade time (ms)", 50, 1000, "Fast", "Slow",
+                        []() { return static_cast<double>(KWinFx::sState.fadeMs); },
+                        [](double v) { KWinFx::sState.fadeMs = static_cast<int>(std::lround(v)); KWinFx::sDirty = true; });
+                }
+                check("Show the workspace name when switching", &KWinFx::sState.osd, 40, true, true, nullptr,
+                    []() { KWinFx::sDirty = true; });
+                y += 8;
+                note("These are KWin's own settings (the ones System Settings > Window Management >", 18);
+                note("Desktop Effects changes), so they apply to every program.", 18);
+                break;
             }
         }
-
-        slider("Effect Speed (ms)", 200, 1500, "Fast", "Slow",
-            []() { return static_cast<double>(gSettings.effectDurationMs); },
-            [](double v) { gSettings.effectDurationMs = static_cast<int>(std::lround(v)); });
-        slider("Dock Transparency", 0, 100, "Transparent", "Opaque",
-            []() { return gSettings.dockAlpha * 100.0; },
-            [](double v) { gSettings.dockAlpha = static_cast<float>(v / 100.0); });
-        slider("Icon Size", 32, 72, "Small", "Large",
-            []() { return static_cast<double>(gSettings.baseIconSize); },
-            [](double v) { gSettings.baseIconSize = static_cast<float>(std::lround(v)); });
-        slider("Icon Zoom Size (%)", 100, 250, "None", "Large",
-            []() { return static_cast<double>(std::lround(gSettings.iconZoom * 100.0f)); },
-            [](double v) { gSettings.iconZoom = static_cast<float>(std::lround(v)) / 100.0f; });
-
-        y += 6;
-        button("Close", RGBA{0.45, 0.47, 0.55, 1}, [this]() { Close(); });
-        fContentHeight = y + 8;
+        return y;
     }
 
     int WidgetAt(double x, double y) const {
@@ -10664,12 +11653,18 @@ private:
     void Apply() {
         SaveConfiguration();
         gNotifications.SetEnabled(gSettings.notificationServer);
+        KWinFx::Flush();
         if (gDock) gDock->SettingsChanged();
     }
 
     void Close() {
         if (onDone) onDone();
     }
+
+public:
+    void Rebuild() { Relayout(); Redraw(); }
+
+private:
 
     // The preview-size slider only exists while previews are on: rebuild the
     // rows and resize the panel when that flips.
@@ -10685,8 +11680,10 @@ private:
     }
 
     bool fBuiltPreviews = false;
+    bool fRelayoutPending = false;   // a choice changed which rows there are
+    int fTab = gInitialSettingsTab;
     std::vector<Widget> fWidgets;
-    float fContentHeight = 700;
+    float fContentHeight = 560;
     int fHovered = -1;
     int fHelpHover = -1;
     int fDragging = -1;
@@ -10697,6 +11694,11 @@ static std::unique_ptr<ConfigPanel> gConfig;
 
 static void RedrawConfigPanel() {
     if (gConfig) gConfig->Redraw();
+}
+
+static void RebuildConfigPanel() {
+    // (later: it may be asked for from inside a click handler of the very widgets that are made again)
+    RunLater([]() { if (gConfig) gConfig->Rebuild(); });
 }
 
 static void ShowConfigPanel() {
@@ -10860,6 +11862,15 @@ int main(int argc, char* argv[]) {
             gDebugEnabled = true;
         } else if ((strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) && i + 1 < argc) {
             outputOverride = argv[++i];
+        } else if (strcmp(argv[i], "--fetch-wallpaper") == 0 && i + 1 < argc) {
+            // (for trying the wallpaper sources without the dock: fetches one picture, prints its file and leaves)
+            curl_global_init(CURL_GLOBAL_DEFAULT);
+            srand(static_cast<unsigned>(time(nullptr)));
+            std::string id, problem;
+            int next = 0;
+            const std::string file = Wallpaper::Pick({argv[++i]}, {}, true, 0, "", &id, &next, &problem);
+            printf("%s\n", file.empty() ? ("failed: " + problem).c_str() : file.c_str());
+            return file.empty() ? 1 : 0;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             printf("hdesktop %s (Wayland)\n", APP_LOCAL_VERSION);
             return 0;
@@ -10877,9 +11888,12 @@ int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
     LoadConfiguration();
+    srand(static_cast<unsigned>(time(nullptr)) ^ static_cast<unsigned>(getpid()));
+    Wallpaper::Schedule();
     if (!outputOverride.empty()) gSettings.output = outputOverride;
 
-    if (!AcquireSingleInstance()) {
+    // (HDESKTOP_TEST_INSTANCE=1: a second dock for a test next to the running one)
+    if (!g_getenv("HDESKTOP_TEST_INSTANCE") && !AcquireSingleInstance()) {
         WarnLog("hDesktop is already running.\n");
         return 0;
     }
@@ -10953,6 +11967,11 @@ int main(int argc, char* argv[]) {
     g_unix_signal_add(SIGTERM, [](gpointer) -> gboolean { QuitApplication(); return G_SOURCE_REMOVE; }, nullptr);
 
     StartUpdateChecker();
+    // (for looking at the settings without a click: HDESKTOP_OPEN_SETTINGS=<tab number>)
+    if (const char* open = g_getenv("HDESKTOP_OPEN_SETTINGS")) {
+        gInitialSettingsTab = atoi(open);
+        RunAfter(1500, []() { ShowConfigPanel(); });
+    }
     g_main_loop_run(gMainLoop);
 
     gMenus.CloseAll();
