@@ -1128,6 +1128,8 @@ class WorkspacePreviewWindow;
 extern ThumbnailPreviewWindow* gActiveThumbnailPreview;
 extern TitleListPreviewWindow* gActiveTitleListPreview;
 extern WorkspacePreviewWindow* gActiveWorkspacePreview;
+// The BDirectWindow of the thumbnails' capture (a 4x4 square in the corner of the screen): shown while thumbnails are on
+void SetDirectCaptureWindowVisible(bool visible);
 
 static std::atomic<int> gPillPopupCount(0);
 static BLocker gPillRegistryLock("pill popup registry");
@@ -4515,6 +4517,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
 
             case MSG_THUMBNAILS_TOGGLED: {
                 fShowWindowThumbnails = (fThumbnailsCheckbox->Value() == B_CONTROL_ON);
+                SetDirectCaptureWindowVisible(fShowWindowThumbnails);
                 if (fShowWindowThumbnails) {
                     fAdvancedCheckbox->Show();
                 } else {
@@ -6349,14 +6352,14 @@ DirectCaptureWindow* gDirectCaptureWindow = nullptr;
 // satisfied differently there (it constructs its own BApplication first).
 // Constructed and Show()n on this same thread, so there's no cross-thread
 // BWindow-lock hazard to work around either.
-static void SetupDirectCaptureIfNeeded() {
+static bool SetupDirectCaptureVerify() {
     BRect frame(0, 0, 3, 3); // tiny, borderless, pinned to the corner
     gDirectCaptureWindow = new DirectCaptureWindow(frame);
 
     if (!gDirectCaptureWindow->SupportsWindowMode()) {
         std::cout << "[i] hDesktop: this video driver doesn't support BDirectWindow's "
             "windowed mode; window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
 
     gDirectCaptureWindow->Show();
@@ -6364,25 +6367,25 @@ static void SetupDirectCaptureIfNeeded() {
     if (!gDirectCaptureWindow->WaitForConnect(5000000)) {
         std::cout << "[i] hDesktop: never got a DirectWindow connection within 5s; "
             "window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
 
     direct_buffer_info info = gDirectCaptureWindow->Snapshot();
     if (info.bits == nullptr || info.bytes_per_row == 0) {
         std::cout << "[i] hDesktop: connected, but got no usable buffer pointer; "
             "window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
     if (info.pixel_format != B_RGB32 && info.pixel_format != B_RGBA32) {
         std::cout << "[i] hDesktop: screen isn't in a 32-bit-per-pixel color mode; "
             "window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
     int bytesPerPixel = info.bits_per_pixel / 8;
     if (bytesPerPixel != 4) {
         std::cout << "[i] hDesktop: unexpected bits_per_pixel (" << info.bits_per_pixel
             << "); window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
 
     const uint8* desktopOrigin = (const uint8*)info.bits
@@ -6401,7 +6404,7 @@ static void SetupDirectCaptureIfNeeded() {
     if (screen.ReadBitmap(&refBitmap, false, &probeRect) != B_OK) {
         std::cout << "[i] hDesktop: couldn't get a reference read for the safety check; "
             "window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
 
     const uint8* probePtr = desktopOrigin
@@ -6433,20 +6436,41 @@ static void SetupDirectCaptureIfNeeded() {
         std::cout << "[i] hDesktop: reading outside this window's own region crashed "
             "(caught safely) on this video driver; window thumbnails will use BScreen "
             "tile reads." << std::endl;
-        return;
+        return false;
     }
 
     uint8* refBytes = (uint8*)refBitmap.Bits();
     if (memcmp(probeBytes, refBytes, 4) != 0) {
         std::cout << "[i] hDesktop: the direct-pointer read didn't match a real screen "
             "read at the same point; window thumbnails will use BScreen tile reads." << std::endl;
-        return;
+        return false;
     }
 
     gDirectCaptureHardwareSafe.store(true, std::memory_order_relaxed);
     UpdateDirectCaptureGeometry(info, info.buffer_state & B_DIRECT_MODE_MASK);
     std::cout << "[i] hDesktop: BDirectWindow verified safe on this video driver -- "
         "window thumbnails will read the framebuffer directly." << std::endl;
+    return true;
+}
+
+// The window shows only while thumbnails are on: it is a tiny square in the corner of the screen, so it is hidden when the
+// thumbnails are turned off, and when the setup found no use for it. (Show() and Hide() of a window nest: the state is
+// checked, not just set. A program that records, like hrecord, ends the process that has its window; this one keeps running.)
+void SetDirectCaptureWindowVisible(bool visible) {
+    if (gDirectCaptureWindow == nullptr) return;
+    // (before the setup has verified the driver the window is shown by the setup itself, and when it failed there is no use for it)
+    if (visible && !gDirectCaptureHardwareSafe.load(std::memory_order_relaxed)) return;
+    if (!gDirectCaptureWindow->Lock()) return;
+    if (visible && gDirectCaptureWindow->IsHidden())
+        gDirectCaptureWindow->Show();
+    else if (!visible && !gDirectCaptureWindow->IsHidden())
+        gDirectCaptureWindow->Hide();
+    gDirectCaptureWindow->Unlock();
+}
+
+static void SetupDirectCaptureIfNeeded() {
+    if (!SetupDirectCaptureVerify())
+        SetDirectCaptureWindowVisible(false);
 }
 
 // Args for the one-shot background thread that captures a single preview
