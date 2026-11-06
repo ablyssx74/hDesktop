@@ -14084,19 +14084,25 @@ static int32 BackgroundUpdateChecker(void* data) {
         return B_OK;
     }
 
+    // The first number of the form X.Y.Z in a text: "Haiku v1.0.4 (x)", "v1.0.4" and a plain "1.0.4" all work. (The old
+    // pattern needed a letter in front of the number, so a version file holding "1.0.4" was read as 0.0.0.)
+    auto parseVersion = [](const char* text, int32& major, int32& minor, int32& revision) {
+        for (const char* p = text; *p != '\0'; p++) {
+            if (*p < '0' || *p > '9') continue;
+            int a = 0, b = 0, c = 0;
+            if (sscanf(p, "%d.%d.%d", &a, &b, &c) == 3) {
+                major = a; minor = b; revision = c;
+                return;
+            }
+            while (p[1] >= '0' && p[1] <= '9') p++;
+        }
+    };
     int32 curMajor = 0, curMinor = 0, curRevision = 0;
     int32 remMajor = 0, remMinor = 0, remRevision = 0;
 
-    // --- Bulletproof sscanf Pattern Matching ---
-    // Looks for a 'v' immediately followed by a number, so surrounding words don't matter.
-    if (sscanf(APP_LOCAL_VERSION, "%*[^v]v%d.%d.%d", &curMajor, &curMinor, &curRevision) != 3) {
-        // Fallback: search for raw dot-separated numbers anywhere if 'v' isn't found
-        sscanf(APP_LOCAL_VERSION, "%*[^0-9]%d.%d.%d", &curMajor, &curMinor, &curRevision);
-    }
+    parseVersion(APP_LOCAL_VERSION, curMajor, curMinor, curRevision);
 
-    if (sscanf(remoteVersionStr.String(), "%*[^v]v%d.%d.%d", &remMajor, &remMinor, &remRevision) != 3) {
-        sscanf(remoteVersionStr.String(), "%*[^0-9]%d.%d.%d", &remMajor, &remMinor, &remRevision);
-    }
+    parseVersion(remoteVersionStr.String(), remMajor, remMinor, remRevision);
 
     int32 currentFlattened = (curMajor * 10000) + (curMinor * 100) + curRevision;
     int32 remoteFlattened  = (remMajor * 10000) + (remMinor * 100) + remRevision;
