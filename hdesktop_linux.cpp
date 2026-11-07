@@ -2968,6 +2968,9 @@ private:
     static constexpr double kPadX = 12.0;
     static constexpr double kPadY = 4.0;
     static constexpr double kPillR = (kRowH - 2.0) / 2.0;   // the pill's round ends, and the radius of the trail's bends
+    // a row of a level that is this much off its parent's row (px) is taken as level with it: a step that small can't hold the rounded
+    // corner and the fillet of a real one, which then show as a thorn at the join
+    static constexpr float kStep = 3.0f;
     static constexpr double kOverlap = 20.0;                // a level opens this far over its parent, covering its arrows
     double BodyW() const { return width; }
     static constexpr double kLeftColumn = 34.0;
@@ -3216,7 +3219,7 @@ private:
             bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft);
             bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft);
             float x0 = leftFlush ? 0.0f : 3.0f, x1 = rightFlush ? static_cast<float>(w) : static_cast<float>(w) - 3.0f;
-            bool expTop = onTrail && top < pTop - 0.5f, expBottom = onTrail && bottom > pBottom + 0.5f;
+            bool expTop = onTrail && top < pTop - kStep, expBottom = onTrail && bottom > pBottom + kStep;
             float tl = cutTop ? 0.0f : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
             float tr = cutTop ? 0.0f : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
             float br = cutBottom ? 0.0f : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
@@ -3258,7 +3261,7 @@ private:
             if (bottom > top) {
                 // Where the bar runs past the parent's row its free end (the corner on the parent's side) is round like a
                 // pill's end; otherwise the corner beside the lit row is.
-                const bool extTop = top < pTop - 0.5f, extBottom = bottom > pBottom + 0.5f;
+                const bool extTop = top < pTop - kStep, extBottom = bottom > pBottom + kStep;
                 const float outerT = extTop ? kR : 0.0f, innerT = extTop ? 0.0f : kR;
                 const float outerB = extBottom ? kR : 0.0f, innerB = extBottom ? 0.0f : kR;
                 if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, outerT, innerT, innerB, outerB});
@@ -3270,8 +3273,8 @@ private:
                 if (hasOwn && ownBottom > ownTop) {
                     float ex = parentOnLeft ? kBarW : static_cast<float>(w) - kBarW;
                     int dx = parentOnLeft ? 1 : -1;
-                    if (top < ownTop - 0.5f) fillets.push_back({ex, ownTop, dx, -1});
-                    if (bottom > ownBottom + 0.5f) fillets.push_back({ex, ownBottom, dx, 1});
+                    if (top < ownTop - kStep) fillets.push_back({ex, ownTop, dx, -1});
+                    if (bottom > ownBottom + kStep) fillets.push_back({ex, ownBottom, dx, 1});
                 }
             }
         }
