@@ -412,6 +412,14 @@ struct HaikuTexture {
     int height = 0;
 };
 
+// What is behind a piece of the dock's text (the clock, the date over it): read back from the picture the dock has just drawn
+// there (the wallpaper of this workspace, the plate over it), a few times a second, to choose light or dark text.
+struct BackdropSample {
+    bool valid = false;
+    bool lightText = false;   // the text over this is light (the backdrop is dark)
+    bigtime_t when = 0;
+};
+
 // Mirrors BPrivate::BackgroundImage::Mode (tracker/BackgroundImage.h) -- the numeric
 // values are what Tracker actually writes into the "be:bgndimginfomode" attribute.
 enum HaikuWallpaperMode {
@@ -605,6 +613,39 @@ team_id FrontmostUserWindowTeam() {
     }
     free(tokens);
     return front;
+}
+
+// Whether, at a point of the screen, the frontmost real window belongs to another program than this one (a full-screen game
+// in Wine, any window placed over the dock): then the dock is not what the user sees there, and the popups that open over
+// its icons are not for him. Windows are looked at front to back on the current workspace, skipping the ones that are
+// hidden or minimized, and the Desktop, menus and the like (a feel of 1024 and up); the first one that holds the point
+// decides. The dock's own popups belong to this program, so the pointer over one of them is not "covered".
+bool OtherProgramWindowInFrontAt(BPoint where) {
+    team_id ownTeam = (be_app != nullptr) ? be_app->Team() : -1;
+    const int32 workspace = current_workspace();
+    int32* tokens = nullptr;
+    int32 count = 0;
+    if (BPrivate::get_window_order(workspace, &tokens, &count) != B_OK || tokens == nullptr)
+        return false;
+    bool covered = false;
+    for (int32 i = 0; i < count; ++i) { // frontmost first
+        client_window_info* info = get_window_info(tokens[i]);
+        if (info == nullptr) continue;
+        const bool real = (int32)info->feel < 1024 && info->show_hide_level == 0 && !info->is_mini
+            && (info->workspaces & (1 << workspace)) != 0;
+        bool decided = false;
+        if (real) {
+            BRect frame(info->window_left, info->window_top, info->window_right, info->window_bottom);
+            if (frame.Contains(where)) {
+                covered = info->team != ownTeam;
+                decided = true;
+            }
+        }
+        free(info);
+        if (decided) break;
+    }
+    free(tokens);
+    return covered;
 }
 
 bool IsThumbnailCandidateOccluded(int32* windowTokens, int32 candidateIndex, BRect candidateFrame,
@@ -8402,6 +8443,90 @@ public:
         return (gDockLocation == kDockLocationTop) ? insetFromEdge : (fHeight - insetFromEdge);
     }
 
+    // Whether the text drawn over rect r (dock coordinates, which are the screen's) should be light, because what is behind it
+    // is dark: the picture the dock has drawn there so far this frame is read back (a few pixels), so it follows the wallpaper
+    // of the workspace shown now, a change of it, the plate and its transparency, and the clock's capsule, with nothing else to
+    // keep up with. Read at most three times a second; the previous answer stands in between, and a small dead band keeps the
+    // text from flickering on a backdrop of middling brightness. Until the first reading, the old rule (a plate that is
+    // nearly transparent: light text) is used.
+    bool BackdropWantsLightText(const HaikuRect& r, BackdropSample& sample) {
+        const bigtime_t now = system_time();
+        if (sample.valid && now - sample.when < 300000)
+            return sample.lightText;
+
+        GLdouble modelview[16], projection[16];
+        GLint viewport[4];
+        glGetDoublev(GL_MODELVIEW_MATRIX, modelview);
+        glGetDoublev(GL_PROJECTION_MATRIX, projection);
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        GLdouble ax, ay, az, bx, by, bz;
+        if (gluProject(r.left, r.top, 0.0, modelview, projection, viewport, &ax, &ay, &az) != GL_TRUE
+            || gluProject(r.right, r.bottom, 0.0, modelview, projection, viewport, &bx, &by, &bz) != GL_TRUE) {
+            return sample.valid ? sample.lightText : (fDockAlpha < 0.35f);
+        }
+        int left = (int)std::floor(std::min(ax, bx)), right = (int)std::ceil(std::max(ax, bx));
+        int bottom = (int)std::floor(std::min(ay, by)), top = (int)std::ceil(std::max(ay, by));
+        left = std::max(left, viewport[0]);
+        bottom = std::max(bottom, viewport[1]);
+        right = std::min(right, viewport[0] + viewport[2]);
+        top = std::min(top, viewport[1] + viewport[3]);
+        // (the middle of it, at most 64 x 32: a few thousand pixels are plenty for an average)
+        if (right - left > 64) { const int mid = (left + right) / 2; left = mid - 32; right = mid + 32; }
+        if (top - bottom > 32) { const int mid = (bottom + top) / 2; bottom = mid - 16; top = mid + 16; }
+        const int w = right - left, h = top - bottom;
+        if (w < 2 || h < 2)
+            return sample.valid ? sample.lightText : (fDockAlpha < 0.35f);
+
+        std::vector<unsigned char> pixels((size_t)w * h * 3);
+        GLint oldAlign = 4;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &oldAlign);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(left, bottom, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+        glPixelStorei(GL_PACK_ALIGNMENT, oldAlign);
+
+        double sum[3] = { 0.0, 0.0, 0.0 };
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            sum[0] += pixels[i * 3];
+            sum[1] += pixels[i * 3 + 1];
+            sum[2] += pixels[i * 3 + 2];
+        }
+        double linear[3];
+        for (int c = 0; c < 3; ++c) {
+            const double v = (sum[c] / ((double)w * h)) / 255.0;
+            linear[c] = v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+        }
+        // relative luminance (0 black, 1 white); dark text and light text read equally well at about 0.18
+        const double luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+        bool light = sample.valid ? sample.lightText : (luminance < 0.18);
+        if (sample.valid) {
+            if (light && luminance > 0.24) light = false;
+            else if (!light && luminance < 0.14) light = true;
+        }
+        sample.valid = true;
+        sample.lightText = light;
+        sample.when = now;
+        return light;
+    }
+
+    // Whether a window of another program lies over the dock where the pointer is. Looked at ten times a second at most, and
+    // only with the pointer in the strip of the screen the dock stands in (the popups above the icons are outside it, and a
+    // window of this program, such as one of those, is never "another program").
+    bool DockCoveredAtPointer() {
+        const float band = DockWindowHeightFor(fBaseIconSize) + 8.0f;
+        const bool inStrip = (gDockLocation == kDockLocationTop)
+            ? (fMouseY <= band) : (fMouseY >= fHeight - band);
+        if (!inStrip) {
+            fDockCovered = false;
+            return false;
+        }
+        const bigtime_t now = system_time();
+        if (now - fDockCoverCheckUs < 100000)
+            return fDockCovered;
+        fDockCoverCheckUs = now;
+        fDockCovered = OtherProgramWindowInFrontAt(BPoint((float)fMouseX, (float)fMouseY));
+        return fDockCovered;
+    }
+
     // The old and the new wallpaper at this moment of a change, the same picture SnakeTracker draws on the desktop
     // (SnakeFade.cpp: its numbers are kept in step with these). Wipe and slide move with an easing, the soft edge of
     // the wipe is a tenth of the width and that of the circle 6%.
@@ -10984,8 +11109,9 @@ void SyncDockWithRunningDeskbarApps() {
 	    UpdateLiveClockTexture();
 	    UpdateGlobalCpuLoadTracker();
 
-	    // A menu is open: no hover popup may stay (or appear) next to it.
-	    if (MenuPopupOpen()) {
+	    // A menu is open: no hover popup may stay (or appear) next to it. Neither when a window of another program lies over the
+	    // dock where the pointer is (a game running full screen): the user does not see the dock then.
+	    if (MenuPopupOpen() || DockCoveredAtPointer()) {
 	        if (gActiveTitleListPreview != nullptr) {
 	            if (gActiveTitleListPreview->Lock()) gActiveTitleListPreview->Quit();
 	            gActiveTitleListPreview = nullptr;
@@ -12083,7 +12209,7 @@ void SyncDockWithRunningDeskbarApps() {
 		  // Suppressed while the Tracker right-click popup is open, so navigating its
 		  // folder submenus near the icon doesn't also trigger the hover title overlay's
 		  // restore-minimized-window behavior.
-		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL || fShowWindowThumbnails) && !MenuPopupOpen()) {
+		  if ((fShowTitleOverlaysHaiku || fShowTitleOverlaysSDL || fShowWindowThumbnails) && !MenuPopupOpen() && !fDockCovered) {
 			bool cursorNearIcon = (gDockLocation == kDockLocationTop)
 			    ? (fMouseY >= iconBounds.top && fMouseY <= (iconBounds.bottom + 40.0f))
 			    : (fMouseY >= (iconBounds.top - 40.0f) && fMouseY <= iconBounds.bottom);
@@ -12499,6 +12625,9 @@ void SyncDockWithRunningDeskbarApps() {
                 std::floor(clockY + dynamicClockH + 0.5f)
             };
 
+            // Light text over a dark wallpaper, dark text over a light one: read from what is behind the clock.
+            const bool clockLight = BackdropWantsLightText(clockB, fClockBackdrop);
+
             // Hover date detection boundaries scale automatically too!
             bool isMouseHoveringClock = (fMouseX >= clockB.left && fMouseX <= clockB.right &&
                                          fMouseY >= clockB.top  && fMouseY <= clockB.bottom);
@@ -12519,13 +12648,17 @@ void SyncDockWithRunningDeskbarApps() {
                 BString dateStr;
                 dateStr << dateBuffer << day << suffix << " " << (timeInfo->tm_year + 1900);
 
-                if (fDockAlpha < 0.35f) {
+                float textCenterX = clockB.left + (dynamicClockW / 2.0f);
+                // (the date floats above the clock, or below it for a top dock: its backdrop is read there)
+                const float dateY = (gDockLocation == kDockLocationTop)
+                    ? clockB.bottom + (16.0f * sizeRatio) : clockY - (16.0f * sizeRatio);
+                const HaikuRect dateRect = { textCenterX - 40.0f, dateY - 8.0f, textCenterX + 40.0f, dateY + 8.0f };
+                if (BackdropWantsLightText(dateRect, fDateBackdrop)) {
                     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
                 } else {
                     glColor4f(0.0f, 0.0f, 0.0f, 1.0f);
                 }
 
-                float textCenterX = clockB.left + (dynamicClockW / 2.0f);
                 // Offset the floating date height proportionally to stay clear of the larger text.
                 // Bottom-anchored dock: float the date above the clock. Top-anchored dock:
                 // there's no room above, so drop it below the clock instead.
@@ -12539,7 +12672,7 @@ void SyncDockWithRunningDeskbarApps() {
             // Draw standard time texture matching your high-contrast logic
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, fClockTexture.id);
 
-            if (fDockAlpha < 0.35f) {
+            if (clockLight) {
                 glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
                 glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
                 glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PRIMARY_COLOR);
@@ -13451,6 +13584,11 @@ private:
 
     int fMouseX;
     int fMouseY;
+
+    BackdropSample fClockBackdrop;   // what is behind the clock (see BackdropWantsLightText())
+    BackdropSample fDateBackdrop;    // and behind the date that shows over it
+    bool           fDockCovered = false;
+    bigtime_t      fDockCoverCheckUs = 0;
 
     HaikuTexture fClockTexture;
     int          fClockWidth = 0;
