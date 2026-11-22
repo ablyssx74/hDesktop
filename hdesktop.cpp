@@ -5,6 +5,7 @@
 
 #include <Alert.h>
 #include <strings.h>
+#include <unistd.h>
 #include <Region.h>
 #include <functional>
 #include <algorithm>
@@ -8228,6 +8229,65 @@ void SyncDockWithRunningDeskbarApps() {
 	    float popupCenterY; // icon's own vertical center in screen space, so the popup opens over the icon
 	};
 
+
+	// --- SnakeTracker rounded popup menus (same hand-over Cricket does) ---
+	// With SnakeTracker's look in all programs on, a popup menu is a pill with rounded corners, which needs the screen behind it taken
+	// just before it opens. SnakeControlLook keeps the pictures; it is found by name in this program's images. Not there: nothing happens.
+	struct SnakeMenuTiles {
+	    static inline bool sLooked = false;
+	    static inline void (*sBeginChain)(bool (*)(BMenu*)) = nullptr;
+	    static inline void (*sAddTile)(BBitmap*, BRect) = nullptr;
+	    static inline bool (*sWantsTile)(BMenu*) = nullptr;
+	    static bool AnyMenu(BMenu*) { return true; }
+	    static bool UsingSnakeLibtracker() {
+	        image_info info; int32 cookie = 0;
+	        while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK)
+	            if (strstr(info.name, "SnakeTracker/lib/libtracker.so") != nullptr) return true;
+	        return false;
+	    }
+	    static void Find() {
+	        if (sLooked) return;
+	        sLooked = true;
+	        image_info info; int32 cookie = 0;
+	        while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
+	            if (strstr(info.name, "SnakeControlLook") == nullptr) continue;
+	            get_image_symbol(info.id, "snake_begin_menu_chain", B_SYMBOL_TYPE_TEXT, (void**)&sBeginChain);
+	            get_image_symbol(info.id, "snake_add_menu_tile", B_SYMBOL_TYPE_TEXT, (void**)&sAddTile);
+	            get_image_symbol(info.id, "snake_wants_tile", B_SYMBOL_TYPE_TEXT, (void**)&sWantsTile);
+	        }
+	    }
+	    static void Tile(BRect region) {
+	        BScreen screen(B_MAIN_SCREEN_ID);
+	        if (!screen.IsValid()) return;
+	        BRect r(floorf(region.left), floorf(region.top), ceilf(region.right), ceilf(region.bottom));
+	        r = r & screen.Frame();
+	        if (!r.IsValid()) return;
+	        BBitmap* bm = nullptr;
+	        if (screen.GetBitmap(&bm, false, &r) != B_OK || bm == nullptr) return;
+	        sAddTile(bm, r);   // takes the picture
+	    }
+	    // menu is about to open with its top left at where: begin a chain, take the screen behind it and a strip to its right (submenus)
+	    static void Begin(BMenu* menu, BPoint where) {
+	        Find();
+	        if (sBeginChain == nullptr || sAddTile == nullptr || sWantsTile == nullptr) return;
+	        sBeginChain(AnyMenu);
+	        if (!sWantsTile(menu)) return;
+	        // The submenus are Haiku's own BNavMenu (they cannot be hooked as they open), so the whole screen is taken: whichever
+	        // level opens wherever, the picture behind it is there.
+	        // With SnakeTracker's libtracker the submenus take their own pictures as they open, and the root's is just its place.
+	        if (UsingSnakeLibtracker()) {
+	            float width = 250, height = 300;
+	            menu->GetPreferredSize(&width, &height);
+	            const BRect f = BScreen(B_MAIN_SCREEN_ID).Frame();
+	            float left = std::max(std::min(where.x, f.right + 1 - width), f.left);
+	            float top = std::max(std::min(where.y, f.bottom + 1 - height), f.top);
+	            Tile(BRect(left - 8, top - 8, left + width + 48, top + height + 48));
+	        } else {
+	            Tile(BScreen(B_MAIN_SCREEN_ID).Frame());
+	        }
+	    }
+	};
+
 	// 2. UPDATED BACKGROUND THREAD FUNCTION
 	static int32 SpawnTrackerMenuThread(void* cookie) {
 	    TrackerMenuArgs* args = static_cast<TrackerMenuArgs*>(cookie);
@@ -8272,6 +8332,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 
 	    // BLOCKING CALL (Inside background thread only): Freezes safely until user chooses or clicks away
+		SnakeMenuTiles::Begin(navMenuWrapper, screenClickPoint);
 		BMenuItem* chosenAction = navMenuWrapper->Go(screenClickPoint, false, false);
 
 		args->engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
@@ -13321,6 +13382,26 @@ static int32 BackgroundUpdateChecker(void* data) {
 // MAIN SDL2 SYSTEM WRAPPER CONTAINER PIPELINE ENTRYPOINT
 // =========================================================================
 int main(int argc, char* argv[]) {
+    // With SnakeTracker installed, the Tracker icon's menu is drawn by SnakeTracker's own libtracker (the menu items then have its
+    // colours and text, its rounded corners and its snake trail). A program takes its libraries as it starts, so it starts once more
+    // with that library's folder first in the search path; without SnakeTracker (or if that does not start) it is as before.
+    {
+        static const char* const kSnakeLibDir = "/boot/system/apps/SnakeTracker/lib";
+        static const char* const kSnakeLib = "/boot/system/apps/SnakeTracker/lib/libtracker.so";
+        if (getenv("HDESKTOP_NO_SNAKE_LIBTRACKER") == nullptr && getenv("HDESKTOP_SNAKE_LIBTRACKER") == nullptr
+                && access(kSnakeLib, R_OK) == 0) {
+            const char* old = getenv("LIBRARY_PATH");
+            std::string path = kSnakeLibDir;
+            if (old != nullptr && *old != '\0')
+                path += std::string(":") + old;
+            else
+                path += ":%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib";
+            setenv("LIBRARY_PATH", path.c_str(), 1);
+            setenv("HDESKTOP_SNAKE_LIBTRACKER", "1", 1);
+            execv(argv[0], argv);   // (returns only if it could not)
+            unsetenv("HDESKTOP_SNAKE_LIBTRACKER");
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0) {
             gDebugEnabled = true;
