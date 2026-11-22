@@ -6420,6 +6420,7 @@ private:
     int32 fDragBoxIndex;
     BPoint fDragCurrentPoint;
     int32 fDropTargetWorkspace;
+    bigtime_t fLastDragUpdate = 0;
     // The box's real frame and workspace at the moment the drag started --
     // needed both to restore it exactly if the drag is released outside
     // every cell, and to know whether MouseUp's final workspace differs from
@@ -6763,6 +6764,22 @@ public:
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) {
         if (!fDragging) return;
 
+        // About 40 updates a second are plenty for a drag (the pointer reports far more, each one a message to the window's
+        // program and a repaint that the compositor puts on the screen); MouseUp works from the point where the button is let go.
+        const bigtime_t now = system_time();
+        if (now - fLastDragUpdate < 25000) return;
+        fLastDragUpdate = now;
+
+        // (what was shown before, to repaint only what changes: the whole popup is a transparent window, and painting all of it at
+        // every pointer move flickers on a composited desktop)
+        const int32 previousTarget = fDropTargetWorkspace;
+        BRect previousFrame(0, 0, -1, -1);
+        int32 previousBoxWorkspace = -1;
+        if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
+            previousFrame = fBoxes[fDragBoxIndex].windowFrame;
+            previousBoxWorkspace = fBoxes[fDragBoxIndex].workspaceIndex;
+        }
+
         fDragCurrentPoint = point;
         fDropTargetWorkspace = -1;
         for (size_t ws = 0; ws < fMiniDesktopRects.size(); ++ws) {
@@ -6824,12 +6841,48 @@ public:
             fBoxes[fDragBoxIndex].workspaceIndex = fDropTargetWorkspace;
         }
 
-        Invalidate();
+        // Only the cells that changed are painted again: the one the box was in and the one it is in now (and the one that
+        // was the drop target and the one that is). Nothing, when nothing changed.
+        BRect dirty(0, 0, -1, -1);
+        bool changed = (previousTarget != fDropTargetWorkspace);
+        if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
+            if (previousFrame != fBoxes[fDragBoxIndex].windowFrame
+                    || previousBoxWorkspace != fBoxes[fDragBoxIndex].workspaceIndex)
+                changed = true;
+        }
+        if (changed) {
+            const int32 cells[3] = { previousTarget, fDropTargetWorkspace, previousBoxWorkspace };
+            for (int i = 0; i < 3; ++i) {
+                const int32 ws = cells[i];
+                if (ws >= 0 && ws < static_cast<int32>(fCellRects.size())) {
+                    if (dirty.IsValid()) dirty = dirty | fCellRects[ws];
+                    else dirty = fCellRects[ws];
+                }
+            }
+            if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
+                const int32 ws = fBoxes[fDragBoxIndex].workspaceIndex;
+                if (ws >= 0 && ws < static_cast<int32>(fCellRects.size())) {
+                    if (dirty.IsValid()) dirty = dirty | fCellRects[ws];
+                    else dirty = fCellRects[ws];
+                }
+            }
+            if (dirty.IsValid()) Invalidate(dirty.InsetByCopy(-2.0f, -2.0f));
+            else Invalidate();
+        }
     }
 
     virtual void MouseUp(BPoint point) {
         if (!fDragging) return;
         fDragging = false;
+
+        // (the last pointer moves may have been skipped, see MouseMoved: the cell is the one under the pointer now)
+        fDropTargetWorkspace = -1;
+        for (size_t ws = 0; ws < fMiniDesktopRects.size(); ++ws) {
+            if (fMiniDesktopRects[ws].Contains(point)) {
+                fDropTargetWorkspace = static_cast<int32>(ws);
+                break;
+            }
+        }
 
         if (fDragBoxIndex >= 0 && fDragBoxIndex < static_cast<int32>(fBoxes.size())) {
             if (fDropTargetWorkspace >= 0) {
