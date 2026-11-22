@@ -13381,27 +13381,56 @@ static int32 BackgroundUpdateChecker(void* data) {
 // =========================================================================
 // MAIN SDL2 SYSTEM WRAPPER CONTAINER PIPELINE ENTRYPOINT
 // =========================================================================
-int main(int argc, char* argv[]) {
-    // With SnakeTracker installed, the Tracker icon's menu is drawn by SnakeTracker's own libtracker (the menu items then have its
-    // colours and text, its rounded corners and its snake trail). A program takes its libraries as it starts, so it starts once more
-    // with that library's folder first in the search path; without SnakeTracker (or if that does not start) it is as before.
-    {
-        static const char* const kSnakeLibDir = "/boot/system/apps/SnakeTracker/lib";
-        static const char* const kSnakeLib = "/boot/system/apps/SnakeTracker/lib/libtracker.so";
-        if (getenv("HDESKTOP_NO_SNAKE_LIBTRACKER") == nullptr && getenv("HDESKTOP_SNAKE_LIBTRACKER") == nullptr
-                && access(kSnakeLib, R_OK) == 0) {
-            const char* old = getenv("LIBRARY_PATH");
-            std::string path = kSnakeLibDir;
-            if (old != nullptr && *old != '\0')
-                path += std::string(":") + old;
-            else
-                path += ":%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib";
-            setenv("LIBRARY_PATH", path.c_str(), 1);
-            setenv("HDESKTOP_SNAKE_LIBTRACKER", "1", 1);
-            execv(argv[0], argv);   // (returns only if it could not)
-            unsetenv("HDESKTOP_SNAKE_LIBTRACKER");
+// With SnakeTracker's Snake control look not chosen in Appearance, hDesktop loads it for its own menus (the Tracker icon's menu, the
+// CPU graph's menus, the dock's popups), the way SnakeTracker's Tracker and Deskbar do. Nothing is loaded when it is chosen already,
+// when SnakeTracker's "Raised Snake look for Tracker and Deskbar" is off, or when the look is not installed. Needs the BApplication.
+static void InstallSnakeControlLook()
+{
+    image_info info;
+    int32 cookie = 0;
+    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
+        if (strstr(info.name, "SnakeControlLook") != nullptr)
+            return;
+    }
+    BPath settingsPath;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settingsPath) == B_OK && settingsPath.Append("Tracker/SnakeSettings") == B_OK) {
+        FILE* file = fopen(settingsPath.Path(), "r");
+        if (file != nullptr) {
+            char line[256];
+            while (fgets(line, sizeof(line), file) != nullptr) {
+                if (strncmp(line, "SnakeLook ", 10) == 0
+                        && (strncmp(line + 10, "off", 3) == 0 || strncmp(line + 10, "0", 1) == 0 || strncmp(line + 10, "false", 5) == 0)) {
+                    fclose(file);
+                    return;
+                }
+            }
+            fclose(file);
         }
     }
+    static const directory_which kDirectories[] = { B_USER_NONPACKAGED_ADDONS_DIRECTORY, B_USER_ADDONS_DIRECTORY,
+        B_SYSTEM_NONPACKAGED_ADDONS_DIRECTORY, B_SYSTEM_ADDONS_DIRECTORY };
+    for (size_t i = 0; i < sizeof(kDirectories) / sizeof(kDirectories[0]); i++) {
+        BPath path;
+        if (find_directory(kDirectories[i], &path) != B_OK || path.Append("control_look/SnakeControlLook") != B_OK
+                || !BEntry(path.Path()).Exists())
+            continue;
+        image_id image = load_add_on(path.Path());
+        if (image < 0)
+            continue;
+        BControlLook* (*instantiate)(image_id) = nullptr;
+        if (get_image_symbol(image, "instantiate_control_look", B_SYMBOL_TYPE_TEXT, (void**)&instantiate) == B_OK
+                && instantiate != nullptr) {
+            BControlLook* look = instantiate(image);
+            if (look != nullptr) {
+                be_control_look = look;
+                return;
+            }
+        }
+        unload_add_on(image);
+    }
+}
+
+int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0) {
             gDebugEnabled = true;
@@ -13429,6 +13458,7 @@ int main(int argc, char* argv[]) {
         gCompositor = (isComposited != nullptr && isComposited() && getenv("HDESKTOP_FAKE_TRANSPARENCY") == nullptr);
         DebugLog("[hdesktop] composited desktop: %s\n", gCompositor ? "yes (real transparency)" : "no (transparency is faked)");
     }
+    InstallSnakeControlLook();
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);

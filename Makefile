@@ -25,6 +25,9 @@ else
     CXX = g++
     ARCH = x86_64
     INCLUDE = -L/boot/system/lib
+    # SnakeTracker's own libtracker (it draws the Tracker icon's menu in its look) is taken when that folder exists; a missing
+    # folder is skipped, and the system's libtracker is used. (Not for 32-bit: SnakeTracker's is gcc 2 there, hDesktop is not.)
+    SNAKE_RPATH = -Wl,-rpath,/boot/system/apps/SnakeTracker/lib
 endif
 
 DEFINES := $(DEFINES)
@@ -45,7 +48,7 @@ LIBS = -L./lib -lbe -lgame -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -ll
 
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
-LDFLAGS = $(INCLUDE) -Wl,--gc-sections -s
+LDFLAGS = $(INCLUDE) -Wl,--gc-sections -s $(SNAKE_RPATH)
 
 # Master target execution rule
 all: $(GUI_TARGET) 
