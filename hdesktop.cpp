@@ -1783,7 +1783,7 @@ class BLiveMemoryMenu : public BMenu {
 public:
     BLiveMemoryMenu(const char* title) : BMenu(title) {
         SetFlags(Flags() | B_PULSE_NEEDED);
-        SetFont(be_plain_font);
+        BView::SetFont(be_plain_font);   // (BView's: a newer BMenu names its own SetFont, which an older libbe does not have)
         // filled before it is first shown, so that the window is the right size from the start
         AddItem(new BSystemMemoryRowItem());
         Refresh(false);
