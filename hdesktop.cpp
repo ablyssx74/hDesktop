@@ -67,7 +67,40 @@
 #include <signal.h> // sigaction/raise -- SetupDirectCaptureIfNeeded()'s SIGSEGV/SIGBUS safety net
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
+
+// ===========================================================================================================
+// COMPOSITED DESKTOP (RenkuOS): when app_server composites the desktop, a window can be truly transparent
+// (B_TRANSPARENT_WINDOW), so the dock does not paint the wallpaper behind itself to fake it. The dock is then
+// drawn offscreen with an alpha channel and shown in a native transparent window. Haiku without a compositor
+// keeps the old way: this is decided at run time (is_composited_desktop() is looked up by name).
+// ===========================================================================================================
+#ifndef B_TRANSPARENT_WINDOW
+#define B_TRANSPARENT_WINDOW 0x80000000   // RenkuOS only; on Haiku the flag does not exist (and the compositor path never runs)
+#endif
+static bool gCompositor = false;
+static PFNGLBLENDFUNCSEPARATEPROC gHdBlendFuncSeparate = nullptr;
+
+// Alpha written by blending must stay "over" alpha: with the usual (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) the colour channels are
+// then premultiplied by alpha (the offscreen buffer starts as transparent black), and alpha accumulates correctly.
+static inline void hdBlendFunc(GLenum sfactor, GLenum dfactor) {
+    if (gCompositor && gHdBlendFuncSeparate != nullptr && sfactor == GL_SRC_ALPHA && dfactor == GL_ONE_MINUS_SRC_ALPHA)
+        gHdBlendFuncSeparate(sfactor, dfactor, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    else
+        glBlendFunc(sfactor, dfactor);
+}
+#define glBlendFunc(s, d) hdBlendFunc((s), (d))
+
+// On a transparent window a shape drawn "over" the clear background has to keep its own alpha (B_ALPHA_COMPOSITE); the usual
+// B_ALPHA_OVERLAY is for drawing over an opaque background and would leave the clear pixels clear.
+static inline alpha_function hdAlphaOverlay() {
+    static const bool legacy = (getenv("HDESKTOP_LEGACY_ALPHA") != nullptr);   // (for comparing: popups look wrong with it)
+    return (gCompositor && !legacy) ? B_ALPHA_COMPOSITE : B_ALPHA_OVERLAY;
+}
+#define B_ALPHA_OVERLAY hdAlphaOverlay()
+// The flag for the popups that used to paint a capture of the screen behind them to fake their round corners.
+static inline uint32 hdTransparentPopupFlag() { return gCompositor ? (uint32)B_TRANSPARENT_WINDOW : 0u; }
 #include <SDL2/SDL_syswm.h>
+#include <dlfcn.h>
 #include <set>
 #include <Shape.h>
 #include <stdio.h>
@@ -159,18 +192,6 @@ static void AvoidDeskbarEdge() {
 bool fShowWindowThumbnails = false;
 bool fShowAdvancedOptions = false;
 
-// The Tracker icon's right-click menu (NavMenuWindow): whether its selector keeps one unbroken
-// "snake trail" through the open submenus (Settings > Snake Trail), and the selector's accent colour
-// (Settings > Selector Color). The bevel's light and dark edges are worked out from it.
-bool gNavSnakeTrail = true;
-// Raised look: the Tracker menu in the pill look, with its raised, shaded selector. Off, it is the older rectangular menu with its
-// beveled selector (the Flat setting below belongs to that one). It starts from Snake Tracker's preference of the same name
-// when hDesktop has no choice of its own saved ("nav_raised_look").
-bool gNavRaisedLook = true;
-// Flat selector: one colour inside the outline. Off brings back the light top / dark bottom edges
-// (Settings > Flat). Shared with Tracker's menus through the "nav_snake_flat" setting. Only the look without the raised
-// selector has these edges; the raised look shades the selector itself.
-bool gNavSnakeFlat = true;
 rgb_color gNavAccent = {70, 110, 200, 255};
 // Settings > Use System Colors (Selector Color): the dock's menus take Haiku's own menu colours (Appearance preferences)
 // in place of the Selector Color. Settings > Drawer Color: the drawer's panel colour (until it is set, a light tint of
@@ -290,8 +311,6 @@ enum {
     MSG_ADVANCED_TOGGLED = 'advt',
     MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
     MSG_THUMBNAIL_SIZE_SLIDER_CHANGED = 'tsiz',
-    MSG_SNAKETRAIL_TOGGLED = 'sntg',
-    MSG_SNAKEFLAT_TOGGLED = 'snfl',
     MSG_SELECTOR_COLOR_OPEN = 'slco',
     MSG_SELECTOR_COLOR_CHANGED = 'slcc',
     MSG_SELECTOR_COLOR_DEFAULT = 'slcd',
@@ -300,7 +319,6 @@ enum {
     MSG_DRAWER_COLOR_UPDATED = 'drcu',
     MSG_NAV_SYSTEM_COLORS_TOGGLED = 'nvsc',
     MSG_ROUNDED_EDGES_TOGGLED = 'rdge',
-    MSG_RAISED_LOOK_TOGGLED = 'rsdl',
     MSG_DRAWER_SYSTEM_COLORS_TOGGLED = 'drsc',   // sent to the settings view so its swatch repaints
     MSG_WORKSPACESWITCHER_TOGGLED = 'wstg',
     MSG_CLOCK_TOGGLED = 'cktg',
@@ -857,50 +875,10 @@ public:
 // =========================================================================
 // CUSTOM TRACKER NAVIGATION MENU (looks like the Linux build's menus)
 // =========================================================================
-// Replaces Tracker's own BNavMenu for the Tracker icon's right-click menu: a
-// rounded dark popup per folder level, a beveled rounded selector in an accent
-// colour, and the "snake trail" -- the selector runs unbroken from the root
-// menu along the path of open submenus.
-//
-// Every level is its own small BWindow (like the dock's other popups), so no
-// single window can draw the whole trail. Each window draws its own piece and
-// the pieces meet at the shared edge, exactly as in the Linux build. The
-// selector is not drawn with BView calls but rasterized into a bitmap by
-// NavMenuView::RenderBackdrop(): rounded rectangles (each corner with its own
-// radius), the elbow bar and its fillets are unioned in a coverage map, and the
-// light top edge / dark bottom edge fall out of comparing that map with copies
-// of itself shifted a pixel down and up. That keeps the shape identical no
-// matter what the native drawing API can do, and anti-aliased.
-// The Tracker menu in the pill look (see NavMenuWindow); false gives the old rectangular menu with its beveled selector. It
-// follows the Snake Tracker preference "Snake look for Tracker and Deskbar" (SnakeLook in Tracker's settings file): it is read
-// when a menu opens, and its measures (the next block) follow it.
-static bool kNavPillLook = true;
+// The colours of the pill look, shared by the dock's pop-ups and the app drawer. (The Tracker icon's menu is Tracker's own
+// BNavMenu again; the menu drawn by hdesktop itself, with its snake trail, is gone: Snake Tracker draws that now.)
 
 namespace NavUI {
-
-const float kRowH = 24.0f;      // a row's pill is kRowH - 2 high, with 2 pixels between pills
-const float kSepH = 9.0f;
-float kPadX = 12.0f;
-const float kPadY = 4.0f;
-float kLeftColumn = 34.0f;
-const float kArrowH = 16.0f;
-const float kScreenMargin = 24.0f;
-const float kFontSize = 12.0f;
-float kBarW = (kRowH - 2.0f) / 2.0f;   // the elbow bar down a submenu's edge (pill look: as wide as the pill's radius)
-const float kSelR = 4.0f;       // corner radius of a lone selector row (the old look)
-const float kPillR = (kRowH - 2.0f) / 2.0f;   // the pill look: round ends
-float kOverlap = 22.0f;   // a level opens this far over its parent, covering the parent's arrows (chevron at the right)
-float kFilletR = (kRowH - 2.0f) / 2.0f;   // the pill look: the trail's bends have the pill's radius
-
-// Takes the look (the pill look or the old one) and the measures that go with it.
-inline void ApplyNavLook(bool pill) {
-    kNavPillLook = pill;
-    kPadX = pill ? 12.0f : 8.0f;
-    kLeftColumn = pill ? 34.0f : 30.0f;
-    kBarW = pill ? (kRowH - 2.0f) / 2.0f : 7.0f;
-    kOverlap = pill ? 22.0f : 0.0f;
-    kFilletR = pill ? (kRowH - 2.0f) / 2.0f : 3.0f;
-}
 
 // Whether Snake Tracker's look is on, from its preferences (Tracker > Windows); on when it cannot be told.
 inline bool SnakeLookPreference() {
@@ -917,28 +895,12 @@ inline bool SnakeLookPreference() {
     fclose(file);
     return look;
 }
-const bigtime_t kSubmenuDelay = 180000;
-
-// The accent colour (Linux: Settings > Selector Color) and the shades worked out from it.
-struct Rgb { float r, g, b; };
-inline Rgb Accent() { const rgb_color a = NavAccentColor(); return Rgb{static_cast<float>(a.red), static_cast<float>(a.green), static_cast<float>(a.blue)}; }
-inline Rgb Light(Rgb c) { return Rgb{c.r + (255 - c.r) * 0.35f, c.g + (255 - c.g) * 0.35f, c.b + (255 - c.b) * 0.35f}; }
-inline Rgb Dark(Rgb c) { return Rgb{c.r * 0.62f, c.g * 0.62f, c.b * 0.62f}; }
-// The one pixel dark outline round the selector, and the tab ("bulge") of it that sticks out of the menu.
-inline Rgb OutlineRgb(Rgb c) { return Rgb{c.r * 0.28f, c.g * 0.28f, c.b * 0.28f}; }
-const int kBulgeW = 3;
-const int kVBulgeW = 4;   // the vertical part's bulge into the parent menu, with the parent's border column
-inline rgb_color AccentText() {   // white on dark accents, near-black on light ones
-    Rgb c = Accent();
-    float lum = (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) / 255.0f;
-    return lum > 0.62f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
-}
 
 inline float Clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
 
 // The menu's own colours come from Haiku's current colour scheme (Appearance preferences), so a
 // light theme gives a light menu and a dark one a dark menu -- it matches Tracker's and every
-// other menu. Only the selector and its snake trail have a colour of their own (see Accent()).
+// other menu. Only the selector (the Selector Color, see NavAccentColor()) has a colour of its own.
 struct Palette {
     rgb_color bg, text, border, disabled;
 };
@@ -953,30 +915,6 @@ inline Palette CurrentPalette() {
     p.border = tint_color(p.bg, B_DARKEN_2_TINT);
     p.disabled = MixColor(p.text, p.bg, 0.55f);
     return p;
-}
-
-// Coverage (0..1, anti-aliased) of a rounded rectangle at a pixel centre; each corner has its own radius.
-inline float RoundRectCoverage(float px, float py, float x, float y, float w, float h,
-    float tl, float tr, float br, float bl) {
-    float hx = w / 2, hy = h / 2;
-    float lx = px - (x + hx), ly = py - (y + hy);
-    float r = (lx > 0) ? ((ly > 0) ? br : tr) : ((ly > 0) ? bl : tl);
-    float qx = std::fabs(lx) - hx + r, qy = std::fabs(ly) - hy + r;
-    float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
-    float d = std::min(std::max(qx, qy), 0.0f) + outside - r;
-    return Clamp01(0.5f - d);
-}
-
-// The concave "fillet" where the elbow bar meets a row: a square at the corner point (cx, cy),
-// extending toward (dx, dy), minus the circle that rounds it.
-inline float FilletCoverage(float px, float py, float cx, float cy, int dx, int dy, float r) {
-    float centreX = cx + dx * r, centreY = cy + dy * r;
-    float lx = px - (cx + dx * r / 2), ly = py - (cy + dy * r / 2);
-    float qx = std::fabs(lx) - r / 2, qy = std::fabs(ly) - r / 2;
-    float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
-    float dSquare = std::min(std::max(qx, qy), 0.0f) + outside;
-    float dCircle = r - std::sqrt((px - centreX) * (px - centreX) + (py - centreY) * (py - centreY));
-    return Clamp01(0.5f - std::max(dSquare, dCircle));
 }
 
 // The pill look (shared with the title popup and the dock's menus): each row a pill in the Selector Color's light tint,
@@ -995,80 +933,6 @@ inline rgb_color PillText(rgb_color fill) {
     return Luminance(fill) > 140.0f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255};
 }
 
-// Raises the lit trail like a round bar (a quarter circle across its width, lit from the top left), for a touch of depth.
-// `lit` is the coverage of the lit shapes (0..1); the result at each pixel is how much lighter (+) or darker (-) than flat
-// it is, about -0.3..0.3.
-inline void RaisedShade(const std::vector<float>& lit, int w, int h, std::vector<float>& out) {
-    out.assign(static_cast<size_t>(w) * h, 0.0f);
-    // distance from each lit pixel to the nearest edge of the lit shape (the window's own edges are not edges)
-    const size_t n = (size_t)w * h;
-    std::vector<float> d(n, 0.0f);
-    const float big = 1e4f;
-    for (size_t k = 0; k < n; ++k)
-        d[k] = lit[k] > 0.5f ? big : 0.0f;
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            float& v = d[(size_t)y * w + x];
-            if (v == 0.0f) continue;
-            if (x > 0) v = std::min(v, d[(size_t)y * w + x - 1] + 1.0f);
-            if (y > 0) v = std::min(v, d[(size_t)(y - 1) * w + x] + 1.0f);
-            if (x > 0 && y > 0) v = std::min(v, d[(size_t)(y - 1) * w + x - 1] + 1.4142f);
-            if (x + 1 < w && y > 0) v = std::min(v, d[(size_t)(y - 1) * w + x + 1] + 1.4142f);
-        }
-    for (int y = h - 1; y >= 0; --y)
-        for (int x = w - 1; x >= 0; --x) {
-            float& v = d[(size_t)y * w + x];
-            if (v == 0.0f) continue;
-            if (x + 1 < w) v = std::min(v, d[(size_t)y * w + x + 1] + 1.0f);
-            if (y + 1 < h) v = std::min(v, d[(size_t)(y + 1) * w + x] + 1.0f);
-            if (x + 1 < w && y + 1 < h) v = std::min(v, d[(size_t)(y + 1) * w + x + 1] + 1.4142f);
-            if (x > 0 && y + 1 < h) v = std::min(v, d[(size_t)(y + 1) * w + x - 1] + 1.4142f);
-        }
-    // the height of a round bar: a quarter circle of radius R from the edge in
-    const float R = 7.0f;
-    std::vector<float> hgt(n, 0.0f);
-    for (size_t k = 0; k < n; ++k) {
-        if (d[k] <= 0.0f) continue;
-        float t = std::min(1.0f, (d[k] - 0.5f) / R);
-        if (t < 0.0f) t = 0.0f;
-        hgt[k] = R * sqrtf(std::max(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
-    }
-    std::vector<float> sm(n, 0.0f);   // a light blur takes the angles out of the distance map
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            float sum = 0.0f;
-            int cnt = 0;
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dx = -1; dx <= 1; ++dx) {
-                    int xx = x + dx, yy = y + dy;
-                    if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-                    sum += hgt[(size_t)yy * w + xx];
-                    ++cnt;
-                }
-            sm[(size_t)y * w + x] = sum / cnt;
-        }
-    // light from the top left; the result is how much lighter (+) or darker (-) than flat each pixel is
-    const float lx = -0.45f, ly = -0.75f, lz = 0.55f;
-    const float ln = sqrtf(lx * lx + ly * ly + lz * lz);
-    const float strength = 0.55f;
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            size_t k = (size_t)y * w + x;
-            if (lit[k] <= 0.0f) continue;
-            auto H = [&](int xx, int yy) {
-                xx = std::max(0, std::min(w - 1, xx));
-                yy = std::max(0, std::min(h - 1, yy));
-                return sm[(size_t)yy * w + xx];
-            };
-            float gx = (H(x + 1, y) - H(x - 1, y)) * 0.5f, gy = (H(x, y + 1) - H(x, y - 1)) * 0.5f;
-            float nn = sqrtf(gx * gx + gy * gy + 1.0f);
-            float dot = (-gx * lx - gy * ly + lz) / (nn * ln);
-            out[k] = (dot - lz / ln) * strength * lit[k];
-        }
-}
-
-struct Piece { float x, y, w, h, tl, tr, br, bl; };
-struct Fillet { float x, y; int dx, dy; };
 
 }  // namespace NavUI
 
@@ -1242,10 +1106,10 @@ public:
     virtual void Draw(BRect) {
         BRect bounds = Bounds();
         const rgb_color fill = NavUI::PillFill(), hot = NavUI::PillHot();
-        const bool rounded = gNavRoundedEdges && fBackdrop != nullptr && fBackdrop->IsValid();
+        const bool rounded = gNavRoundedEdges && (gCompositor || (fBackdrop != nullptr && fBackdrop->IsValid()));
         SetDrawingMode(B_OP_COPY);
         if (rounded) {
-            DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+            if (!gCompositor) DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);   // (a transparent window has nothing behind to paint)
             SetDrawingMode(B_OP_ALPHA);
             SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
             SetHighColor(fill);
@@ -1321,7 +1185,7 @@ class PillPopupWindow : public BWindow {
 public:
     PillPopupWindow(BPoint where, const std::vector<PillRow>& rows, float minWidth, PillDoneFn onDone, bool upward = false)
         : BWindow(BRect(0, 0, 10, 10), "Popup", B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
-                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS | (gNavRoundedEdges ? hdTransparentPopupFlag() : 0u)),
           fView(nullptr), fTicker(nullptr), fOpenedAt(system_time()) {
         // From now the dock opens no hover popups; close another pill popup, and wait (briefly) until the others are
         // gone, so the screen captured below holds none of them.
@@ -1373,7 +1237,7 @@ public:
 
         fView = new PillPopupView(Bounds(), rows, rects, onDone);
         AddChild(fView);
-        if (gNavRoundedEdges) fView->SetBackdrop(CaptureScreenBehind(Frame()));   // the screen behind, taken now: not shown yet
+        if (gNavRoundedEdges && !gCompositor) fView->SetBackdrop(CaptureScreenBehind(Frame()));   // the screen behind, taken now: not shown yet
         {
             BAutolock lock(gPillRegistryLock);
             gActivePillMessenger = BMessenger(this);
@@ -1550,1008 +1414,6 @@ static void PillDockAnchor(PillPopupMenu* menu, float iconCenterY, BPoint* where
 
 
 
-struct NavItem {
-    BString label;
-    entry_ref ref;
-    bool isFolder = false;
-    bool enabled = true;
-    BBitmap* icon = nullptr;
-    bool iconTried = false;
-};
-
-// Lists a folder the way the Linux build's BuildNavMenu does: folders first, then files,
-// each group case-insensitively sorted, dot-files hidden, capped at 1000 rows.
-//
-// Symbolic links (/etc, /bin, /tmp, ... are links into /boot/system) are followed: the row shows
-// the target's icon and opens the target, and a link that leads nowhere is left out instead of
-// showing as a broken link. /dev is never listed: it is the device tree, and asking its entries
-// for icons talks to the drivers (hovering it was enough to corrupt the screen on the VM).
-static std::vector<NavItem> ListNavFolder(const entry_ref& dirRef) {
-    std::vector<NavItem> items;
-    BDirectory dir(&dirRef);
-    if (dir.InitCheck() != B_OK) {
-        NavItem n; n.label = "Can't read this folder"; n.enabled = false;
-        items.push_back(n);
-        return items;
-    }
-    BPath dirPath(&dirRef);
-    const bool atRoot = dirPath.InitCheck() == B_OK && strcmp(dirPath.Path(), "/") == 0;
-    std::vector<NavItem> all;
-    entry_ref ref;
-    while (dir.GetNextRef(&ref) == B_OK) {
-        if (ref.name[0] == '.') continue;
-        if (atRoot && strcmp(ref.name, "dev") == 0) continue;
-        BEntry entry(&ref, true);   // follow symlinks
-        if (entry.InitCheck() != B_OK || !entry.Exists()) continue;   // a link to nowhere
-        entry_ref target;
-        if (entry.GetRef(&target) != B_OK) continue;
-        BPath targetPath(&target);
-        if (targetPath.InitCheck() == B_OK && strncmp(targetPath.Path(), "/dev", 4) == 0 &&
-            (targetPath.Path()[4] == '\0' || targetPath.Path()[4] == '/')) continue;   // anything that resolves into /dev
-        NavItem n;
-        n.label = ref.name;     // the name as listed...
-        n.ref = target;         // ...but its icon, contents and "open" are the target's
-        n.isFolder = entry.IsDirectory();
-        all.push_back(n);
-    }
-    std::stable_sort(all.begin(), all.end(), [](const NavItem& a, const NavItem& b) {
-        if (a.isFolder != b.isFolder) return a.isFolder;
-        return strcasecmp(a.label.String(), b.label.String()) < 0;
-    });
-    const size_t kMax = 1000;
-    for (size_t i = 0; i < all.size() && i < kMax; ++i) items.push_back(all[i]);
-    if (all.size() > kMax) {
-        NavItem more;
-        more.label << "Open folder to see " << static_cast<int32>(all.size() - kMax) << " more\xE2\x80\xA6";
-        more.ref = dirRef;   // opens the folder itself
-        items.push_back(more);
-    }
-    if (items.empty()) {
-        NavItem n; n.label = "(empty)"; n.enabled = false;
-        items.push_back(n);
-    }
-    return items;
-}
-
-class NavMenuWindow;
-
-// One open menu chain at a time (a click on the Tracker icon opens it, a click elsewhere or on
-// an item closes it). The chain's frames are kept here so the root's poll can tell whether a
-// click landed on any level.
-struct NavMenuState {
-    BLocker lock{"hdesktop nav menu"};
-    std::vector<BMessenger> windows;
-    std::vector<BRect> frames;
-    std::function<void(const entry_ref&)> onChoose;   // an item was clicked
-    std::function<void()> onClosed;                   // the last window of the chain went away
-    bool anyOpen = false;
-    bool acted = false;   // an item was already chosen (the release can arrive twice, see Release())
-};
-static NavMenuState gNavMenu;
-
-// The pill look of the Tracker menu: each level is a window, and a window is a rectangle, so the pills' round ends and
-// the gaps between them would show square corners. Like the dock's pill popups, the screen behind is captured just
-// before it opens and each window draws that as its background. Each level captures only the part of the screen it will
-// cover (a whole-screen capture takes a second on slow graphics hardware), and deletes it when it closes.
-
-// The selected row's bulge: a small borderless window just outside the menu's outer edge, so the
-// row seems to stick out of the menu. A window can't have see-through corners, so the tab is square.
-class NavBulgeView : public BView {
-public:
-    NavBulgeView(BRect frame) : BView(frame, "NavBulgeView", B_FOLLOW_ALL, B_WILL_DRAW) {
-        SetViewColor(B_TRANSPARENT_COLOR);
-    }
-    void Set(rgb_color accent, bool right, bool edgeTop, bool edgeBottom, int skipFrom, int skipTo, bool rounded) {
-        fAccent = accent;
-        fRight = right;
-        fEdgeTop = edgeTop;
-        fEdgeBottom = edgeBottom;
-        fSkipFrom = skipFrom;
-        fSkipTo = skipTo;
-        fRounded = rounded;
-        Invalidate();
-    }
-    virtual void Draw(BRect) {
-        BRect b = Bounds();
-        const int w = static_cast<int>(b.Width()) + 1, h = static_cast<int>(b.Height()) + 1;
-        SetHighColor(fAccent);
-        FillRect(b);
-        NavUI::Rgb o = NavUI::OutlineRgb(NavUI::Accent());
-        const rgb_color edge = {static_cast<uint8>(o.r), static_cast<uint8>(o.g), static_cast<uint8>(o.b), 255};
-        SetHighColor(edge);
-        if (fEdgeTop) StrokeLine(b.LeftTop(), b.RightTop());
-        if (fEdgeBottom) StrokeLine(b.LeftBottom(), b.RightBottom());
-        // the side away from the menu it hangs on, except where it runs along a lit row
-        const float far = fRight ? b.right : b.left;
-        int from = 0;
-        if (fSkipFrom >= 0 && fSkipTo >= fSkipFrom) {
-            if (fSkipFrom > 0) StrokeLine(BPoint(far, 0), BPoint(far, fSkipFrom - 1));
-            from = fSkipTo + 1;
-        }
-        if (from < h) StrokeLine(BPoint(far, from), BPoint(far, h - 1));
-
-        // Rounded corners at the free ends. This tab hangs over the body of a menu, whose colour is known,
-        // so the pixels outside the curve are painted in it (a window can't be see-through).
-        if (fRounded) {
-            const rgb_color back = NavUI::CurrentPalette().bg;
-            for (int end = 0; end < 2; end++) {
-                if (end == 0 ? !fEdgeTop : !fEdgeBottom) continue;
-                for (int u = 0; u < 3; u++) {
-                    for (int v = 0; v < 3; v++) {
-                        float dx = u + 0.5f - 3.0f, dy = v + 0.5f - 3.0f;
-                        float d = std::sqrt(dx * dx + dy * dy);
-                        float outer = std::min(1.0f, std::max(0.0f, 3.0f - d + 0.5f));
-                        float inner = std::min(1.0f, std::max(0.0f, 2.0f - d + 0.5f));
-                        float r = back.red + (edge.red + (fAccent.red - edge.red) * inner - back.red) * outer;
-                        float g = back.green + (edge.green + (fAccent.green - edge.green) * inner - back.green) * outer;
-                        float bl = back.blue + (edge.blue + (fAccent.blue - edge.blue) * inner - back.blue) * outer;
-                        int x = fRight ? w - 1 - u : u;
-                        int y = end == 0 ? v : h - 1 - v;
-                        SetHighColor(static_cast<uint8>(r), static_cast<uint8>(g), static_cast<uint8>(bl));
-                        FillRect(BRect(x, y, x, y));
-                    }
-                }
-            }
-        }
-    }
-private:
-    rgb_color fAccent = {0, 0, 0, 255};
-    bool fRight = true, fEdgeTop = true, fEdgeBottom = true, fRounded = false;
-    int fSkipFrom = -1, fSkipTo = -1;
-};
-
-class NavBulgeWindow : public BWindow {
-public:
-    NavBulgeWindow(int width = NavUI::kBulgeW)
-        : BWindow(BRect(0, 0, width - 1, 9), "Tracker Menu Tab", B_NO_BORDER_WINDOW_LOOK,
-              B_FLOATING_ALL_WINDOW_FEEL,
-              B_NOT_MOVABLE | B_NOT_CLOSABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_NOT_RESIZABLE | B_AVOID_FOCUS) {
-        SetSizeLimits(0, width - 1, 0, 4000);
-        fView = new NavBulgeView(Bounds());
-        AddChild(fView);
-    }
-
-    // From the menu's thread. Nothing is touched unless the tab moved or changed (a needless resize
-    // or redraw flickers); if this window is busy, the next redraw of the menu places it.
-    void Place(BRect screenRect, bool right, rgb_color accent, bool edgeTop = true, bool edgeBottom = true,
-        int skipFrom = -1, int skipTo = -1, bool rounded = false) {
-        if (LockWithTimeout(20000) != B_OK) return;
-        bool same = !IsHidden() && screenRect == fRect && right == fRight && accent.red == fAccent.red &&
-            accent.green == fAccent.green && accent.blue == fAccent.blue && edgeTop == fEdgeTop &&
-            edgeBottom == fEdgeBottom && skipFrom == fSkipFrom && skipTo == fSkipTo && rounded == fRounded;
-        if (!same) {
-            fRect = screenRect;
-            fRight = right;
-            fAccent = accent;
-            fEdgeTop = edgeTop;
-            fEdgeBottom = edgeBottom;
-            fSkipFrom = skipFrom;
-            fSkipTo = skipTo;
-            fRounded = rounded;
-            ResizeTo(screenRect.Width(), screenRect.Height());
-            MoveTo(screenRect.left, screenRect.top);
-            fView->Set(accent, right, edgeTop, edgeBottom, skipFrom, skipTo, rounded);
-            if (IsHidden()) Show();
-        }
-        Unlock();
-    }
-
-    void Away() {
-        if (LockWithTimeout(20000) != B_OK) return;
-        if (!IsHidden()) Hide();
-        fRect = BRect();
-        Unlock();
-    }
-
-private:
-    NavBulgeView* fView;
-    BRect fRect;
-    bool fRight = true, fEdgeTop = true, fEdgeBottom = true, fRounded = false;
-    int fSkipFrom = -1, fSkipTo = -1;
-    rgb_color fAccent = {0, 0, 0, 255};
-};
-
-class NavMenuView : public BView {
-public:
-    NavMenuView(BRect frame, NavMenuWindow* owner);
-    ~NavMenuView() { delete fBackdrop; delete fBase; }
-    virtual void Draw(BRect updateRect);
-    virtual void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage);
-    virtual void MouseUp(BPoint where);
-    void StateChanged() { fBackdropDirty = true; Invalidate(); }
-
-private:
-    friend class NavMenuWindow;
-    void RenderBackdrop();
-    NavMenuWindow* fOwner;
-    BBitmap* fBackdrop = nullptr;
-    BBitmap* fBase = nullptr;   // the screen behind and the pill, without the lit shapes (pill look)
-    bool fBackdropDirty = true;
-};
-
-class NavMenuWindow : public BWindow {
-public:
-    // Where this window sits next to its parent: the parent's selected row in screen coordinates,
-    // and which side of this window the parent is on.
-    struct Link {
-        bool valid = false;
-        bool parentOnLeft = true;
-        float parentRowTop = 0, parentRowBottom = 0;   // screen coordinates
-        float parentTop = 0, parentBottom = 0;          // the parent window's extent, screen coordinates
-    };
-
-    // `parentFrame` is empty for the root. `anchor` is where the root's bottom (bottom dock) or
-    // top (top dock) edge should be, centred on x.
-    NavMenuWindow(std::vector<NavItem> items, NavMenuWindow* parent, const BRect& parentFrame,
-        float parentRowTop, BPoint rootAnchor, bool rootBelow)
-        : BWindow(BRect(0, 0, 10, 10), "Tracker Menu", B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
-              B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS | B_NOT_MINIMIZABLE),
-          fItems(std::move(items)), fParent(parent), fTicker(nullptr) {
-        BScreen screen(this);
-        BRect sf = screen.Frame();
-        fScreen = sf;
-
-        // (the look is chosen once for a menu and its submenus: a level takes what its root had)
-        if (parent == nullptr) NavUI::ApplyNavLook(gNavRaisedLook);
-
-        if (kNavPillLook && parent == nullptr) {
-            // Another pill popup or the dock's hover popups still on screen would be frozen into the capture: close
-            // them and wait (briefly) until they are gone, then take the screen.
-            ClosePillPopup();
-            bool waited = false;
-            for (int i = 0; i < 40; ++i) {
-                bool others = PillPopupOpen() || gActiveTitleListPreview != nullptr
-                    || gActiveThumbnailPreview != nullptr || gActiveWorkspacePreview != nullptr;
-                if (!others) break;
-                waited = true;
-                snooze(5000);
-            }
-            if (waited) snooze(30000);
-        }
-
-        // Width: widest label, clamped like the Linux build's menus.
-        BFont font(be_plain_font);
-        font.SetSize(NavUI::kFontSize);
-        float widest = 0;
-        for (const NavItem& it : fItems) widest = std::max(widest, font.StringWidth(it.label.String()));
-        float w = std::min(420.0f, std::max(150.0f, NavUI::kLeftColumn + widest + NavUI::kPadX + 22.0f));
-        fContentH = NavUI::kPadY * 2 + fItems.size() * NavUI::kRowH;
-        float maxH = std::max(NavUI::kRowH * 6, sf.Height() + 1 - NavUI::kScreenMargin * 2);
-        float h = std::min(fContentH, maxH);
-        fWidth = std::ceil(w);
-        fHeight = std::ceil(h);
-
-        float left, top;
-        if (parent == nullptr) {
-            left = rootAnchor.x - fWidth / 2;
-            top = rootBelow ? rootAnchor.y : rootAnchor.y - fHeight;
-        } else {
-            // First row level with the parent's row, to its right (or left when there is no room).
-            top = parentRowTop - NavUI::kPadY;
-            bool right = parentFrame.right + 1 + fWidth <= sf.right + 1;
-            left = right ? parentFrame.right + 1 - NavUI::kOverlap : parentFrame.left - fWidth + NavUI::kOverlap;
-            fLink.valid = true;
-            fLink.parentOnLeft = right;
-            fLink.parentRowTop = parentRowTop;
-            fLink.parentRowBottom = parentRowTop + NavUI::kRowH;
-            fLink.parentTop = parentFrame.top;
-            fLink.parentBottom = parentFrame.bottom;
-        }
-        left = std::max(sf.left + 4, std::min(left, sf.right + 1 - fWidth - 4));
-        top = std::max(sf.top + NavUI::kScreenMargin, std::min(top, sf.bottom + 1 - NavUI::kScreenMargin - fHeight));
-        MoveTo(left, top);
-        ResizeTo(fWidth - 1, fHeight - 1);
-        fView = new NavMenuView(Bounds(), this);
-        AddChild(fView);
-        fFrame = BRect(left, top, left + fWidth - 1, top + fHeight - 1);
-        // The screen behind this level, taken now (the window is not shown yet) and only where this level will be: a
-        // full-screen capture costs a second on slow graphics hardware, a menu's own size a fraction of that.
-        fShotRect = fFrame & sf;
-        fShot = (kNavPillLook && gNavRoundedEdges) ? CaptureScreenBehind(fFrame) : nullptr;
-        BMessage tickMessage('nmtk');
-        fTicker = new BMessageRunner(BMessenger(this), &tickMessage, 33000);
-
-        BAutolock lock(gNavMenu.lock);
-        gNavMenu.windows.push_back(BMessenger(this));
-        gNavMenu.frames.push_back(fFrame);
-        gNavMenu.anyOpen = true;
-    }
-
-    virtual ~NavMenuWindow() {
-        delete fTicker;
-        for (NavItem& it : fItems) delete it.icon;
-        std::function<void()> closed;
-        {
-            BAutolock lock(gNavMenu.lock);
-            for (size_t i = 0; i < gNavMenu.windows.size(); ++i) {
-                if (gNavMenu.windows[i] == BMessenger(this)) {
-                    gNavMenu.windows.erase(gNavMenu.windows.begin() + i);
-                    gNavMenu.frames.erase(gNavMenu.frames.begin() + i);
-                    break;
-                }
-            }
-            if (gNavMenu.windows.empty() && gNavMenu.anyOpen) {
-                gNavMenu.anyOpen = false;
-                closed = gNavMenu.onClosed;
-            }
-        }
-        delete fShot;
-        if (closed) closed();
-    }
-
-    virtual bool QuitRequested() {
-        CloseChild(false);
-        if (fBulge != nullptr) {
-            NavBulgeWindow* bulge = fBulge;
-            fBulge = nullptr;
-            if (bulge->Lock()) bulge->Quit();
-        }
-        if (fVBulge != nullptr) {
-            NavBulgeWindow* bulge = fVBulge;
-            fVBulge = nullptr;
-            if (bulge->Lock()) bulge->Quit();
-        }
-        return true;
-    }
-
-    // The selected row's tab outside the menu's outer edge (row < 0: none).
-    void UpdateBulge(float rowTop, bool right) {
-        if (rowTop < 0) {
-            if (fBulge != nullptr) fBulge->Away();
-            return;
-        }
-        if (fBulge == nullptr) fBulge = new NavBulgeWindow();
-        float x = right ? fFrame.right + 1 : fFrame.left - NavUI::kBulgeW;
-        float top = fFrame.top + rowTop;   // the selector's outline rows included: it is outlined all round
-        fBulge->Place(BRect(x, top, x + NavUI::kBulgeW - 1, top + NavUI::kRowH - 1), right,
-            rgb_color{static_cast<uint8>(NavAccentColor().red), static_cast<uint8>(NavAccentColor().green),
-                static_cast<uint8>(NavAccentColor().blue), 255});
-    }
-
-    // The vertical part of the trail, between the parent's row and this menu's row, hangs into the parent menu
-    // (top > bottom: none). Window coordinates; `skip` is the part of it beside the parent's own lit row.
-    void UpdateVBulge(float top, float bottom, bool parentOnLeft, bool edgeTop, bool edgeBottom, float rowTop,
-        float rowBottom) {
-        if (bottom <= top) {
-            if (fVBulge != nullptr) fVBulge->Away();
-            return;
-        }
-        if (fVBulge == nullptr) fVBulge = new NavBulgeWindow(NavUI::kVBulgeW);
-        float x = parentOnLeft ? fFrame.left - NavUI::kVBulgeW : fFrame.right + 1;
-        float sy0 = fFrame.top + top, sy1 = fFrame.top + bottom - 1;
-        // the free end is rounded only where it hangs over the parent's body, not over the desktop
-        bool overParent = edgeTop ? sy0 >= fLink.parentTop : sy1 <= fLink.parentBottom;
-        fVBulge->Place(BRect(x, sy0, x + NavUI::kVBulgeW - 1, sy1), !parentOnLeft,
-            rgb_color{static_cast<uint8>(NavAccentColor().red), static_cast<uint8>(NavAccentColor().green),
-                static_cast<uint8>(NavAccentColor().blue), 255},
-            edgeTop, edgeBottom, static_cast<int>(rowTop - top), static_cast<int>(rowBottom - top) - 1, overParent);
-    }
-
-    // ---- geometry shared with the view ----
-    float Scrollable() const { return fContentH > fHeight + 0.5f; }
-    float ViewTop() const { return Scrollable() ? NavUI::kArrowH : 0.0f; }
-    float ViewBottom() const { return Scrollable() ? fHeight - NavUI::kArrowH : fHeight; }
-    float MaxScroll() const { return std::max(0.0f, fContentH - (ViewBottom() - ViewTop())); }
-    float RowTopRaw(int row) const { return ViewTop() + NavUI::kPadY - fScroll + row * NavUI::kRowH; }
-    int RowAt(float y) const {
-        if (y < ViewTop() || y >= ViewBottom()) return -1;
-        int row = static_cast<int>(std::floor((y - ViewTop() + fScroll - NavUI::kPadY) / NavUI::kRowH));
-        return (row >= 0 && row < static_cast<int>(fItems.size())) ? row : -1;
-    }
-    bool Selectable(int row) const { return row >= 0 && row < static_cast<int>(fItems.size()) && fItems[row].enabled; }
-
-    // ---- input, called by the view ----
-    void PointerMoved(BPoint where, bool inside) {
-        float y = where.y;
-        int dir = 0;
-        if (inside && Scrollable()) {
-            if (y < ViewTop()) dir = -1;
-            else if (y >= ViewBottom()) dir = 1;
-        }
-        fScrollDir = dir;
-        int row = inside ? RowAt(y) : (fChildRow >= 0 ? fHovered : -1);
-        if (row != fHovered) {
-            fHovered = row;
-            ScheduleSubmenu();
-            if (fChildRow >= 0) NotifyLink(row == fChildRow || row < 0);
-            fView->StateChanged();
-        }
-    }
-
-    // Acts on button release, like the Linux build's menus and Haiku's own: letting go over a file
-    // opens it, letting go over a folder opens that folder in Tracker (hovering is what opens a
-    // folder's submenu). Letting go outside every menu does nothing -- the click that opened the
-    // menu is usually still down over the dock icon.
-    //
-    // The release reaches us two ways: as an ordinary mouse-up, and from the root window's poll
-    // of the real button state (the menu opens on the press over the dock, and Haiku can keep
-    // sending that gesture's mouse events to the dock window until the button is let go).
-    void Release(BPoint where) {
-        int row = RowAt(where.y);
-        if (!Selectable(row)) return;
-        std::function<void(const entry_ref&)> choose;
-        {
-            BAutolock lock(gNavMenu.lock);
-            if (gNavMenu.acted) return;
-            gNavMenu.acted = true;
-            choose = gNavMenu.onChoose;
-        }
-        entry_ref ref = fItems[row].ref;
-        CloseAll();
-        if (choose) choose(ref);
-    }
-
-    static void CloseAll() {
-        std::vector<BMessenger> all;
-        {
-            BAutolock lock(gNavMenu.lock);
-            all = gNavMenu.windows;
-        }
-        for (BMessenger& m : all) m.SendMessage(B_QUIT_REQUESTED);
-    }
-
-    virtual void MessageReceived(BMessage* message) {
-        switch (message->what) {
-            case 'nmtk': Tick(); break;
-            case 'nmrl': {   // the root saw a button release at this screen point, over this window
-                BPoint screenPoint;
-                if (message->FindPoint("screen", &screenPoint) == B_OK) {
-                    Release(BPoint(screenPoint.x - fFrame.left, screenPoint.y - fFrame.top));
-                }
-                break;
-            }
-            case 'nmlk': {   // parent says the trail to this window is on or off
-                bool on = true;
-                message->FindBool("on", &on);
-                if (fLinkActive != on) { fLinkActive = on; fView->StateChanged(); }
-                break;
-            }
-            case B_MOUSE_WHEEL_CHANGED: {
-                float dy = 0;
-                if (message->FindFloat("be:wheel_delta_y", &dy) == B_OK && Scrollable()) {
-                    ScrollBy(dy * NavUI::kRowH * 3);
-                }
-                break;
-            }
-            default: BWindow::MessageReceived(message); break;
-        }
-    }
-
-    // ---- state read by the view ----
-    std::vector<NavItem> fItems;
-    NavMenuWindow* fParent;
-    Link fLink;
-    bool fLinkActive = true;
-    float fWidth = 150, fHeight = 100, fContentH = 0, fScroll = 0;
-    int fHovered = -1;
-    int fChildRow = -1;
-    bool fChildOnRight = true;
-    int fScrollDir = 0;
-    NavBulgeWindow* fBulge = nullptr;
-    NavBulgeWindow* fVBulge = nullptr;
-
-    void ScrollBy(float delta) {
-        float before = fScroll;
-        fScroll = std::max(0.0f, std::min(fScroll + delta, MaxScroll()));
-        if (fScroll == before) return;
-        CloseChild();   // its anchor row just moved
-        if (fView) {
-            BPoint p; uint32 buttons;
-            fView->GetMouse(&p, &buttons, false);
-            fHovered = BRect(0, 0, fWidth - 1, fHeight - 1).Contains(p) ? RowAt(p.y) : -1;
-            ScheduleSubmenu();
-        }
-        fView->StateChanged();
-    }
-
-    void LoadIcon(NavItem& it) {
-        if (it.iconTried) return;
-        it.iconTried = true;
-        BBitmap* bmp = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32);
-        if (bmp->InitCheck() == B_OK && BNodeInfo::GetTrackerIcon(&it.ref, bmp, B_MINI_ICON) == B_OK) it.icon = bmp;
-        else delete bmp;
-    }
-
-private:
-    friend class NavMenuView;
-
-    // After the pointer settles on a row: close the submenu open from some other row (whether the
-    // new row is a folder or a file) and open the new folder's. Without the close for file rows a
-    // stale submenu stayed open, with its own piece of the trail and a second highlight.
-    void ScheduleSubmenu() {
-        bool needClose = fChildRow >= 0 && fChildRow != fHovered;
-        bool needOpen = Selectable(fHovered) && fItems[fHovered].isFolder && fChildRow != fHovered;
-        fSubmenuDue = (needClose || needOpen) ? system_time() + NavUI::kSubmenuDelay : 0;
-    }
-
-    void NotifyLink(bool on) {
-        if (fChild.IsValid()) {
-            BMessage m('nmlk');
-            m.AddBool("on", on);
-            fChild.SendMessage(&m);
-        }
-    }
-
-    // `redraw` is false when this window is itself going away. Otherwise the menu must repaint:
-    // a submenu's own row stays lit as part of the trail for as long as a child is open, so
-    // without this the row stayed lit after the child closed, next to the newly hovered one.
-    void CloseChild(bool redraw = true) {
-        bool hadChild = fChildRow >= 0;
-        if (fChild.IsValid()) fChild.SendMessage(B_QUIT_REQUESTED);
-        fChild = BMessenger();
-        fChildRow = -1;
-        fSubmenuDue = 0;
-        if (redraw && hadChild && fView) fView->StateChanged();
-    }
-
-    void OpenChild(int row) {
-        if (fChildRow == row) { NotifyLink(true); return; }
-        CloseChild();
-        std::vector<NavItem> sub = ListNavFolder(fItems[row].ref);
-        float rowTopScreen = fFrame.top + RowTopRaw(row);
-        NavMenuWindow* child = new NavMenuWindow(std::move(sub), this, fFrame, rowTopScreen, BPoint(0, 0), false);
-        fChildOnRight = child->fLink.parentOnLeft;
-        fChild = BMessenger(child);
-        fChildRow = row;
-        child->Show();
-        fView->StateChanged();
-    }
-
-    void Tick() {
-        if (IsHidden()) return;
-        // Auto-scroll while the pointer rests on a scroll arrow.
-        if (fScrollDir != 0 && Scrollable()) ScrollBy(fScrollDir * 8.0f);
-        // Open the hovered folder's submenu after a short delay, close another row's.
-        if (fSubmenuDue != 0 && system_time() >= fSubmenuDue) {
-            fSubmenuDue = 0;
-            if (fChildRow >= 0 && fChildRow != fHovered) CloseChild();
-            if (Selectable(fHovered) && fItems[fHovered].isFolder && fChildRow < 0) OpenChild(fHovered);
-        }
-        // Root only: a click anywhere outside every level dismisses the menu. Only a fresh press
-        // counts: the menu opens on the very click that summoned it, with that button still
-        // down over the dock (outside the menu), and that must not close it.
-        if (fParent == nullptr) {
-            BPoint p; uint32 buttons;
-            fView->GetMouse(&p, &buttons, false);
-            bool freshPress = (fPrevButtons == 0 && buttons != 0);
-            bool released = (fPrevButtons != 0 && buttons == 0);
-            fPrevButtons = buttons;
-            if (released) {
-                // Hand the release to whichever level the pointer is over; it acts on that row.
-                BPoint screenPoint = fView->ConvertToScreen(p);
-                BMessenger target;
-                {
-                    BAutolock lock(gNavMenu.lock);
-                    for (size_t i = 0; i < gNavMenu.frames.size(); ++i)
-                        if (gNavMenu.frames[i].Contains(screenPoint)) target = gNavMenu.windows[i];
-                }
-                if (target.IsValid()) {
-                    BMessage release('nmrl');
-                    release.AddPoint("screen", screenPoint);
-                    target.SendMessage(&release);
-                }
-            }
-            if (freshPress) {
-                BPoint screenPoint = fView->ConvertToScreen(p);
-                bool inside = false;
-                {
-                    BAutolock lock(gNavMenu.lock);
-                    for (const BRect& f : gNavMenu.frames) if (f.Contains(screenPoint)) inside = true;
-                }
-                if (!inside) CloseAll();
-            }
-        }
-    }
-
-    NavMenuView* fView = nullptr;
-    BMessageRunner* fTicker;
-    BMessenger fChild;
-    BRect fFrame, fScreen;
-    BRect fShotRect;   // where the screen behind this level was captured (fShot), clipped to the screen
-    BBitmap* fShot = nullptr;
-    bigtime_t fSubmenuDue = 0;
-    uint32 fPrevButtons = 1;   // nonzero until a release has been seen, so the opening click can't dismiss
-};
-
-NavMenuView::NavMenuView(BRect frame, NavMenuWindow* owner)
-    : BView(frame, "NavMenuView", B_FOLLOW_ALL, B_WILL_DRAW), fOwner(owner) {
-    // Opaque, like the dock's other popups (a transparent view colour can leave unpainted areas
-    // behind when a window goes away). The backdrop bitmap covers the whole view anyway.
-    SetViewColor(ui_color(B_MENU_BACKGROUND_COLOR));
-}
-
-void NavMenuView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
-    fOwner->PointerMoved(where, transit != B_EXITED_VIEW && transit != B_OUTSIDE_VIEW);
-}
-
-void NavMenuView::MouseUp(BPoint where) {
-    fOwner->Release(where);
-}
-
-// Rasterizes the menu's background, border and selector into a bitmap.
-void NavMenuView::RenderBackdrop() {
-    const int w = static_cast<int>(fOwner->fWidth), h = static_cast<int>(fOwner->fHeight);
-    if (fBackdrop == nullptr || fBackdrop->Bounds().IntegerWidth() + 1 != w || fBackdrop->Bounds().IntegerHeight() + 1 != h) {
-        delete fBackdrop;
-        fBackdrop = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGB32);
-    }
-    NavMenuWindow* o = fOwner;
-    using namespace NavUI;
-
-    // ---- the selector: pieces, as the Linux build's DrawHighlight() lays them out ----
-    std::vector<Piece> pieces;
-    std::vector<Fillet> fillets;
-    const bool parentLink = gNavSnakeTrail && o->fLink.valid && o->fLinkActive;
-    const bool parentOnLeft = o->fLink.parentOnLeft;
-    const float frameTop = o->fFrame.top;
-    float pTop = 0, pBottom = 0;
-    if (parentLink) {
-        pTop = o->fLink.parentRowTop - frameTop + 1;
-        pBottom = o->fLink.parentRowBottom - frameTop - 1;
-    }
-    auto cornerR = [&](bool flush, bool exposed) {
-        if (kNavPillLook) return (!flush || exposed) ? kPillR : 0.0f;   // pills: round free ends and bends
-        return (!flush || exposed) ? kSelR : 0.0f;
-    };
-    int own = o->fChildRow >= 0 ? o->fChildRow : o->fHovered;
-    int arrowDir = 0;
-    if (o->Scrollable()) {
-        if (o->fScrollDir < 0 && o->fScroll > 0.5f) arrowDir = -1;
-        else if (o->fScrollDir > 0 && o->fScroll < o->MaxScroll() - 0.5f) arrowDir = 1;
-    }
-    // The side the selected row's tab sticks out of: away from the neighbouring menu.
-    const bool bulgeRight = o->fLink.valid ? o->fLink.parentOnLeft : (o->fChildRow >= 0 ? !o->fChildOnRight : true);
-    float tabRowTop = -1;
-    auto addPiece = [&](float top, float bottom, bool childEdge, bool childOnRight, bool onTrail, bool arrow, bool tab) {
-        float vt = arrow ? 0.0f : o->ViewTop(), vb = arrow ? static_cast<float>(h) : o->ViewBottom();
-        bool cutTop = top < vt, cutBottom = bottom > vb;
-        float t = std::max(top, vt), b = std::min(bottom, vb);
-        if (b <= t) return;
-        bool leftFlush = (childEdge && !childOnRight) || (onTrail && parentOnLeft) || (tab && !bulgeRight);
-        bool rightFlush = (childEdge && childOnRight) || (onTrail && !parentOnLeft) || (tab && bulgeRight);
-        float x0 = leftFlush ? 0.0f : 3.0f, x1 = rightFlush ? static_cast<float>(w) : w - 3.0f;
-        bool expTop = onTrail && top < pTop - 0.5f, expBottom = onTrail && bottom > pBottom + 0.5f;
-        float tl = cutTop ? 0.0f : cornerR(leftFlush, onTrail && parentOnLeft && expTop);
-        float tr = cutTop ? 0.0f : cornerR(rightFlush, onTrail && !parentOnLeft && expTop);
-        float br = cutBottom ? 0.0f : cornerR(rightFlush, onTrail && !parentOnLeft && expBottom);
-        float bl = cutBottom ? 0.0f : cornerR(leftFlush, onTrail && parentOnLeft && expBottom);
-        pieces.push_back({x0, t, x1 - x0, b - t, tl, tr, br, bl});
-    };
-    float ownTop = 0, ownBottom = 0;
-    bool hasOwn = false;
-    for (int i = 0; i < static_cast<int>(o->fItems.size()); ++i) {
-        float y = o->RowTopRaw(i);
-        bool hovered = (i == o->fHovered) && o->fItems[i].enabled;
-        bool open = (o->fChildRow == i) && (o->fHovered < 0 || o->fHovered == o->fChildRow);
-        bool parentRow = parentLink && i == own && !arrowDir;
-        if (parentRow) { ownTop = y + 1; ownBottom = y + kRowH - 1; hasOwn = true; }
-        if ((hovered || open || parentRow) && y + kRowH > o->ViewTop() && y < o->ViewBottom()) {
-            bool childOnRight = open && o->fChildOnRight;
-            // the selected row (the open or hovered one, as the trail sees it) carries the tab
-            bool tab = !kNavPillLook && !arrowDir && i == own && y + 1 >= o->ViewTop() && y + kRowH - 1 <= o->ViewBottom();
-            if (tab) tabRowTop = y;
-            addPiece(y + 1, y + kRowH - 1, open && gNavSnakeTrail, childOnRight, parentRow, false, tab);
-        }
-    }
-    if (arrowDir) {
-        ownTop = arrowDir < 0 ? 2.0f : h - kArrowH + 1;
-        ownBottom = arrowDir < 0 ? kArrowH - 1 : h - 2.0f;
-        hasOwn = true;
-        addPiece(ownTop, ownBottom, false, false, parentLink, true, false);
-    }
-    if (parentLink) {
-        float top = pTop, bottom = pBottom;
-        if (hasOwn && ownBottom > ownTop) { top = std::min(top, ownTop); bottom = std::max(bottom, ownBottom); }
-        top = std::max(top, 0.0f);
-        bottom = std::min(bottom, static_cast<float>(h));
-        if (bottom > top) {
-            const float r = kNavPillLook ? kPillR : 3.0f;
-            // (the strip hanging into the parent menu carries the curve at the free end of the vertical part)
-            const float rt = 0.0f, rb = 0.0f;
-            if (kNavPillLook) {
-                // Where the bar runs past the parent's row, its free end (the corner on the parent's side) is round
-                // like a pill's end; otherwise the corner beside the lit row is.
-                const bool extTop = top < pTop - 0.5f, extBottom = bottom > pBottom + 0.5f;
-                const float outerT = extTop ? r : 0.0f, innerT = extTop ? 0.0f : r;
-                const float outerB = extBottom ? r : 0.0f, innerB = extBottom ? 0.0f : r;
-                if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, outerT, innerT, innerB, outerB});
-                else pieces.push_back({static_cast<float>(w) - kBarW, top, kBarW, bottom - top, innerT, outerT, outerB, innerB});
-            } else if (parentOnLeft) pieces.push_back({0, top, kBarW, bottom - top, rt, r, r, rb});
-            else pieces.push_back({static_cast<float>(w) - kBarW, top, kBarW, bottom - top, r, rt, rb, r});
-            if (hasOwn && ownBottom > ownTop) {
-                float ex = parentOnLeft ? kBarW : w - kBarW;
-                int dx = parentOnLeft ? 1 : -1;
-                if (top < ownTop - 0.5f) fillets.push_back({ex, ownTop, dx, -1});
-                if (bottom > ownBottom + 0.5f) fillets.push_back({ex, ownBottom, dx, 1});
-            }
-        }
-    }
-
-    o->UpdateBulge(kNavPillLook ? -1.0f : tabRowTop, bulgeRight);   // (the pill look has no tab sticking out)
-
-    // the vertical part also hangs into the parent menu, where it runs past the parent's row
-    {
-        float vTop = 0, vBottom = -1;
-        if (!kNavPillLook && parentLink && hasOwn && ownBottom > ownTop && (ownTop < pTop - 0.5f || ownBottom > pBottom + 0.5f)) {
-            vTop = std::max(0.0f, std::min(ownTop, pTop));
-            vBottom = std::min(static_cast<float>(h), std::max(ownBottom, pBottom));
-        }
-        o->UpdateVBulge(vTop, vBottom, parentOnLeft, ownTop < pTop - 0.5f, ownBottom > pBottom + 0.5f, pTop, pBottom);
-    }
-
-    // Union coverage map of the selector.
-    std::vector<float> cover(static_cast<size_t>(w) * h, 0.0f);
-    for (const Piece& p : pieces) {
-        int x0 = std::max(0, static_cast<int>(std::floor(p.x)) - 1), x1 = std::min(w - 1, static_cast<int>(std::ceil(p.x + p.w)) + 1);
-        int y0 = std::max(0, static_cast<int>(std::floor(p.y)) - 1), y1 = std::min(h - 1, static_cast<int>(std::ceil(p.y + p.h)) + 1);
-        for (int y = y0; y <= y1; ++y)
-            for (int x = x0; x <= x1; ++x) {
-                float c = RoundRectCoverage(x + 0.5f, y + 0.5f, p.x, p.y, p.w, p.h, p.tl, p.tr, p.br, p.bl);
-                float& dst = cover[static_cast<size_t>(y) * w + x];
-                dst = std::max(dst, c);
-            }
-    }
-    for (const Fillet& f : fillets) {
-        int x0 = std::max(0, static_cast<int>(std::floor(std::min(f.x, f.x + f.dx * kFilletR))) - 1);
-        int x1 = std::min(w - 1, static_cast<int>(std::ceil(std::max(f.x, f.x + f.dx * kFilletR))) + 1);
-        int y0 = std::max(0, static_cast<int>(std::floor(std::min(f.y, f.y + f.dy * kFilletR))) - 1);
-        int y1 = std::min(h - 1, static_cast<int>(std::ceil(std::max(f.y, f.y + f.dy * kFilletR))) + 1);
-        for (int y = y0; y <= y1; ++y)
-            for (int x = x0; x <= x1; ++x) {
-                float c = FilletCoverage(x + 0.5f, y + 0.5f, f.x, f.y, f.dx, f.dy, kFilletR);
-                float& dst = cover[static_cast<size_t>(y) * w + x];
-                dst = std::max(dst, c);
-            }
-    }
-
-    if (kNavPillLook) {
-        // ---- the pill look: the captured screen, one solid pill for the level, the lit row and the trail in the
-        // Selector Color on top ----
-        const Palette pal = CurrentPalette();
-        const rgb_color fill = PillFill(), hot = PillHot();
-        const float panelR = gNavRoundedEdges ? std::min(kPillR, std::min(w, h) / 2.0f) : 0.0f;   // (square: no round corners)
-        // The corner next to the parent is square (it lies over the parent's panel, where a round one would show the picture
-        // of the empty desktop), and so is the one at the bottom when this level ends within its parent's height.
-        const bool overParent = o->fLink.valid && kOverlap > 0.0f;
-        const bool squareBottom = overParent && o->fFrame.bottom <= o->fLink.parentBottom;
-        const float tlR = (overParent && o->fLink.parentOnLeft) ? 0.0f : panelR;
-        const float trR = (overParent && !o->fLink.parentOnLeft) ? 0.0f : panelR;
-        const float blR = (squareBottom && o->fLink.parentOnLeft) ? 0.0f : panelR;
-        const float brR = (squareBottom && !o->fLink.parentOnLeft) ? 0.0f : panelR;
-        const int cornerSize = static_cast<int>(std::ceil(panelR)) + 1;
-        auto panelAt = [&](int x, int y) -> float {   // the pill's coverage: all of it away from the corners
-            if ((y >= cornerSize && y < h - cornerSize) || (x >= cornerSize && x < w - cornerSize)) return 1.0f;
-            return RoundRectCoverage(x + 0.5f, y + 0.5f, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), tlR, trR, brR, blR);
-        };
-
-        // The screen behind and the pill, without the lit shapes, is worked out once for the level (it does not change as
-        // the pointer moves); each redraw copies it and puts the lit shapes over it, only where they are.
-        if (fBase == nullptr || fBase->Bounds().IntegerWidth() + 1 != w || fBase->Bounds().IntegerHeight() + 1 != h) {
-            delete fBase;
-            fBase = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGB32);
-            const BBitmap* shot = o->fShot;
-            const uint8* sbits = (shot != nullptr && shot->IsValid()) ? static_cast<const uint8*>(shot->Bits()) : nullptr;
-            const int32 sbpr = sbits != nullptr ? shot->BytesPerRow() : 0;
-            const int sw = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerWidth()) + 1 : 0;
-            const int sh = sbits != nullptr ? static_cast<int>(shot->Bounds().IntegerHeight()) + 1 : 0;
-            // (the capture starts where the level's frame meets the screen)
-            const int ox = static_cast<int>(std::floor(o->fFrame.left)) - static_cast<int>(std::floor(o->fShotRect.left));
-            const int oy = static_cast<int>(std::floor(o->fFrame.top)) - static_cast<int>(std::floor(o->fShotRect.top));
-            uint8* bbits = static_cast<uint8*>(fBase->Bits());
-            const int32 bbpr = fBase->BytesPerRow();
-            for (int y = 0; y < h; ++y) {
-                uint8* row = bbits + y * bbpr;
-                for (int x = 0; x < w; ++x) {
-                    float cr = pal.bg.red, cg = pal.bg.green, cb = pal.bg.blue;
-                    int sx = ox + x, sy = oy + y;
-                    if (sbits != nullptr && sx >= 0 && sy >= 0 && sx < sw && sy < sh) {
-                        const uint8* sp = sbits + sy * sbpr + sx * 4;
-                        cb = sp[0]; cg = sp[1]; cr = sp[2];
-                    }
-                    const float a = panelAt(x, y);
-                    if (a > 0.0f) { cr += (fill.red - cr) * a; cg += (fill.green - cg) * a; cb += (fill.blue - cb) * a; }
-                    uint8* px = row + x * 4;
-                    px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
-                    px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
-                    px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
-                    px[3] = 255;
-                }
-            }
-        }
-        std::memcpy(fBackdrop->Bits(), fBase->Bits(), static_cast<size_t>(fBase->BytesPerRow()) * h);
-
-        // the box round the lit shapes, and the margin that the shading reaches
-        float fx0 = static_cast<float>(w), fy0 = static_cast<float>(h), fx1 = 0, fy1 = 0;
-        for (const Piece& p : pieces) {
-            fx0 = std::min(fx0, p.x); fy0 = std::min(fy0, p.y);
-            fx1 = std::max(fx1, p.x + p.w); fy1 = std::max(fy1, p.y + p.h);
-        }
-        for (const Fillet& f : fillets) {
-            fx0 = std::min(fx0, std::min(f.x, f.x + f.dx * kFilletR)); fy0 = std::min(fy0, std::min(f.y, f.y + f.dy * kFilletR));
-            fx1 = std::max(fx1, std::max(f.x, f.x + f.dx * kFilletR)); fy1 = std::max(fy1, std::max(f.y, f.y + f.dy * kFilletR));
-        }
-        const int margin = 10;
-        const int bx0 = std::max(0, static_cast<int>(std::floor(fx0)) - margin), by0 = std::max(0, static_cast<int>(std::floor(fy0)) - margin);
-        const int bx1 = std::min(w - 1, static_cast<int>(std::ceil(fx1)) + margin), by1 = std::min(h - 1, static_cast<int>(std::ceil(fy1)) + margin);
-        if (bx1 >= bx0 && by1 >= by0) {
-            const int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
-            std::vector<float> litShapes(static_cast<size_t>(bw) * bh), shadow;
-            for (int y = 0; y < bh; ++y)
-                for (int x = 0; x < bw; ++x) {
-                    const size_t k = static_cast<size_t>(by0 + y) * w + (bx0 + x);
-                    litShapes[static_cast<size_t>(y) * bw + x] = cover[k] * panelAt(bx0 + x, by0 + y);   // (stay inside the corners)
-                }
-            RaisedShade(litShapes, bw, bh, shadow);
-            uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
-            const int32 bpr = fBackdrop->BytesPerRow();
-            for (int y = 0; y < bh; ++y) {
-                uint8* row = bits + (by0 + y) * bpr + bx0 * 4;
-                for (int x = 0; x < bw; ++x) {
-                    const size_t k = static_cast<size_t>(y) * bw + x;
-                    const float a = litShapes[k];
-                    if (a <= 0.0f) continue;
-                    uint8* px = row + x * 4;
-                    float cb = px[0], cg = px[1], cr = px[2];
-                    cr += (hot.red - cr) * a; cg += (hot.green - cg) * a; cb += (hot.blue - cb) * a;
-                    const float rs = shadow[k];
-                    if (rs > 0.0f) { cr += (255.0f - cr) * rs; cg += (255.0f - cg) * rs; cb += (255.0f - cb) * rs; }
-                    else if (rs < 0.0f) { cr *= 1.0f + rs; cg *= 1.0f + rs; cb *= 1.0f + rs; }
-                    px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
-                    px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
-                    px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
-                }
-            }
-        }
-        fBackdropDirty = false;
-        return;
-    }
-
-    // ---- composite: background, border, selector with bevel ----
-    const Rgb base = Accent(), light = gNavSnakeFlat ? base : Light(base), dark = gNavSnakeFlat ? base : Dark(base);
-    const Rgb outline = OutlineRgb(base);
-    const Palette pal = CurrentPalette();
-    uint8* bits = static_cast<uint8*>(fBackdrop->Bits());
-    const int32 bpr = fBackdrop->BytesPerRow();
-    auto at = [&](int x, int y) -> float {   // union coverage, 0 outside the map
-        return (x < 0 || y < 0 || x >= w || y >= h) ? 0.0f : cover[static_cast<size_t>(y) * w + x];
-    };
-    for (int y = 0; y < h; ++y) {
-        uint8* row = bits + y * bpr;
-        for (int x = 0; x < w; ++x) {
-            // Popup background and its 1px border (rounded corners are filled with the background:
-            // a window can't be see-through).
-            float cr = pal.bg.red, cg = pal.bg.green, cb = pal.bg.blue;
-            float outer = RoundRectCoverage(x + 0.5f, y + 0.5f, 0, 0, static_cast<float>(w), static_cast<float>(h), 6.5f, 6.5f, 6.5f, 6.5f);
-            float inner = RoundRectCoverage(x + 0.5f, y + 0.5f, 1, 1, w - 2.0f, h - 2.0f, 5.5f, 5.5f, 5.5f, 5.5f);
-            float ring = Clamp01(outer - inner);   // the 1px border; the corners outside it stay background
-            cr += (pal.border.red - cr) * ring; cg += (pal.border.green - cg) * ring; cb += (pal.border.blue - cb) * ring;
-            float c0 = at(x, y);
-            if (c0 < 1.0f) {   // the one pixel dark outline just outside the selector
-                float ol = std::max(std::max(at(x - 1, y), at(x + 1, y)), std::max(at(x, y - 1), at(x, y + 1))) * (1.0f - c0);
-                if (ol > 0.0f) {
-                    cr += (outline.r - cr) * ol; cg += (outline.g - cg) * ol; cb += (outline.b - cb) * ol;
-                }
-            }
-            if (c0 > 0.0f) {
-                float a1 = c0, a2 = c0 * at(x, y - 1), a3 = a2 * at(x, y + 1);
-                cr += (light.r - cr) * a1; cg += (light.g - cg) * a1; cb += (light.b - cb) * a1;
-                cr += (dark.r - cr) * a2;  cg += (dark.g - cg) * a2;  cb += (dark.b - cb) * a2;
-                cr += (base.r - cr) * a3;  cg += (base.g - cg) * a3;  cb += (base.b - cb) * a3;
-            }
-            uint8* px = row + x * 4;
-            px[0] = static_cast<uint8>(std::lround(std::min(255.0f, cb)));
-            px[1] = static_cast<uint8>(std::lround(std::min(255.0f, cg)));
-            px[2] = static_cast<uint8>(std::lround(std::min(255.0f, cr)));
-            px[3] = 255;
-        }
-    }
-    fBackdropDirty = false;
-}
-
-void NavMenuView::Draw(BRect updateRect) {
-    using namespace NavUI;
-    NavMenuWindow* o = fOwner;
-    if (fBackdropDirty || fBackdrop == nullptr) RenderBackdrop();
-    SetDrawingMode(B_OP_COPY);
-    DrawBitmap(fBackdrop, BPoint(0, 0));
-
-    BFont font(be_plain_font);
-    font.SetSize(kFontSize);
-    SetFont(&font);
-    font_height fh;
-    font.GetHeight(&fh);
-    const float textHeight = fh.ascent + fh.descent;
-    const float w = o->fWidth;
-    const Palette pal = CurrentPalette();
-    const rgb_color normal = pal.text, disabled = pal.disabled;
-
-    // Keep the rows out of the scroll-arrow strips.
-    BRegion clip;
-    clip.Set(BRect(1, o->ViewTop(), w - 2, o->ViewBottom() - 1));
-    ConstrainClippingRegion(&clip);
-    for (int i = 0; i < static_cast<int>(o->fItems.size()); ++i) {
-        float y = o->RowTopRaw(i);
-        if (y + kRowH <= o->ViewTop() || y >= o->ViewBottom()) continue;
-        NavItem& it = o->fItems[i];
-        bool hovered = (i == o->fHovered) && it.enabled;
-        bool open = (o->fChildRow == i) && (o->fHovered < 0 || o->fHovered == o->fChildRow);
-        bool lit = hovered || open;
-        // Is this row the one carrying the parent's trail into this menu?
-        bool trailRow = gNavSnakeTrail && o->fLink.valid && o->fLinkActive && i == (o->fChildRow >= 0 ? o->fChildRow : o->fHovered);
-        rgb_color textColor = !it.enabled ? disabled : ((lit || trailRow) ? AccentText() : normal);
-        if (kNavPillLook) {
-            if (lit || trailRow) textColor = PillText(PillHot());
-            else if (!it.enabled) textColor = MixColor(PillText(PillFill()), PillFill(), 0.45f);
-            else textColor = PillText(PillFill());
-        }
-
-        o->LoadIcon(it);
-        if (it.icon) {
-            SetDrawingMode(B_OP_ALPHA);
-            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-            DrawBitmap(it.icon, BPoint(kPadX, y + (kRowH - 16) / 2));
-            SetDrawingMode(B_OP_COPY);
-        }
-        BString label = it.label;
-        font.TruncateString(&label, B_TRUNCATE_END, w - kLeftColumn - kPadX - (it.isFolder ? 14 : 0));
-        SetHighColor(textColor);
-        DrawString(label.String(), BPoint(kLeftColumn, y + (kRowH - textHeight) / 2 + fh.ascent));
-        if (it.isFolder) {   // submenu chevron
-            float ax = w - kPadX - 4, ay = y + kRowH / 2;
-            SetPenSize(1.5f);
-            StrokeLine(BPoint(ax - 4, ay - 4), BPoint(ax, ay));
-            StrokeLine(BPoint(ax, ay), BPoint(ax - 4, ay + 4));
-            SetPenSize(1.0f);
-        }
-    }
-    ConstrainClippingRegion(NULL);
-
-    if (o->Scrollable()) {   // scroll arrows
-        for (int dir = -1; dir <= 1; dir += 2) {
-            bool active = dir < 0 ? o->fScroll > 0.5f : o->fScroll < o->MaxScroll() - 0.5f;
-            bool hot = active && o->fScrollDir == dir;
-            rgb_color c = hot ? AccentText() : rgb_color{pal.text.red, pal.text.green, pal.text.blue, static_cast<uint8>(active ? 230 : 64)};
-            float cx = w / 2, cy = dir < 0 ? kArrowH / 2 : o->fHeight - kArrowH / 2;
-            SetDrawingMode(B_OP_ALPHA);
-            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-            SetHighColor(c.red, c.green, c.blue, c.alpha);
-            float base = cy - 2.5f * dir, apex = cy + 2.5f * dir;   // the arrow points the way it scrolls
-            FillTriangle(BPoint(cx - 5, base), BPoint(cx, apex), BPoint(cx + 5, base));
-            SetDrawingMode(B_OP_COPY);
-        }
-    }
-}
-
-// Opens the menu: a "/" row and a "Home" row, each a folder that opens as a submenu.
-// `anchor` is the point above (below, for a top dock) the Tracker icon.
-static bool ShowTrackerNavMenu(BPoint anchor, bool below, std::function<void(const entry_ref&)> onChoose,
-    std::function<void()> onClosed) {
-    {
-        BAutolock lock(gNavMenu.lock);
-        if (gNavMenu.anyOpen) return false;
-        gNavMenu.onChoose = std::move(onChoose);
-        gNavMenu.onClosed = std::move(onClosed);
-        gNavMenu.acted = false;
-    }
-    std::vector<NavItem> root;
-    NavItem slash;
-    slash.label = "/";
-    slash.isFolder = true;
-    BEntry("/").GetRef(&slash.ref);
-    root.push_back(slash);
-    NavItem home;
-    home.label = "Home";
-    home.isFolder = true;
-    BPath homePath;
-    if (find_directory(B_USER_DIRECTORY, &homePath) == B_OK) BEntry(homePath.Path()).GetRef(&home.ref);
-    root.push_back(home);
-    NavMenuWindow* menu = new NavMenuWindow(std::move(root), nullptr, BRect(), 0, anchor, below);
-    menu->Show();
-    return true;
-}
-
-// Set to false to fall back to Tracker's own BNavMenu for the Tracker icon's right-click menu.
-static const bool kUseCustomTrackerMenu = true;
 
 // =========================================================================
 // MEMORY USAGE ROWS, THE WAY PROCESSCONTROLLER'S MEMORY USAGE MENU HAS THEM
@@ -3869,14 +2731,12 @@ private:
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
+    int32 fHoverButton = -1;   // which of the three buttons the pointer is over (see MouseMoved())
     BCheckBox* fSystemTrayCheckbox;
     BCheckBox* fAutoRaiseCheckbox;
     BCheckBox* fTextOverlaysCheckbox;    // Haiku mode
     BCheckBox* fTextOverlaysSDLCheckbox; // SDL mode -- mutually exclusive with the above
-    BCheckBox* fSnakeTrailCheckbox;
-    BCheckBox* fSnakeFlatCheckbox;
     BCheckBox* fRoundedEdgesCheckbox;
-    BCheckBox* fRaisedLookCheckbox;
     BButton*   fSelectorColorButton;
     BButton*   fDrawerColorButton;
     BCheckBox* fNavSystemColorsCheckbox;
@@ -3979,36 +2839,12 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fWorkspaceSwitcherCheckbox->SetValue(fShowWorkspaceSwitcher ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fWorkspaceSwitcherCheckbox);
 
-        // Row 5: the Tracker menu's snake trail (left) and the colour of its selector (right).
-        // Sits in the row the retired SDL title-label checkbox used to occupy.
-        BRect snakeTrailRect(35.0f, 202.0f, 55.0f, 218.0f);
-        fSnakeTrailCheckbox = new BCheckBox(snakeTrailRect, "snake_trail_cb", nullptr,
-            new BMessage(MSG_SNAKETRAIL_TOGGLED));
-        fSnakeTrailCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
-        fSnakeTrailCheckbox->SetValue(gNavSnakeTrail ? B_CONTROL_ON : B_CONTROL_OFF);
-        AddChild(fSnakeTrailCheckbox);
-        // "Flat": the selector without its light top / dark bottom edge. Beside the trail checkbox
-        // so nothing below has to be reflowed.
-        BRect snakeFlatRect(290.0f, 202.0f, 310.0f, 218.0f);
-        fSnakeFlatCheckbox = new BCheckBox(snakeFlatRect, "snake_flat_cb", nullptr,
-            new BMessage(MSG_SNAKEFLAT_TOGGLED));
-        fSnakeFlatCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
-        fSnakeFlatCheckbox->SetValue(gNavSnakeFlat ? B_CONTROL_ON : B_CONTROL_OFF);
-        AddChild(fSnakeFlatCheckbox);
         // "Rounded Edges": round corners on the popups and the dock's small tiles (off: square), in the row's free right half
         fRoundedEdgesCheckbox = new BCheckBox(BRect(35.0f, 222.0f, 55.0f, 238.0f), "rounded_edges_cb", nullptr,
             new BMessage(MSG_ROUNDED_EDGES_TOGGLED));
         fRoundedEdgesCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fRoundedEdgesCheckbox->SetValue(gNavRoundedEdges ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fRoundedEdgesCheckbox);
-        // "Raised Look": the Tracker menu with its raised, shaded selector (off: the older rectangular menu, which has the Flat
-        // choice). In the row's free right half.
-        fRaisedLookCheckbox = new BCheckBox(BRect(290.0f, 222.0f, 310.0f, 238.0f), "raised_look_cb", nullptr,
-            new BMessage(MSG_RAISED_LOOK_TOGGLED));
-        fRaisedLookCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
-        fRaisedLookCheckbox->SetValue(gNavRaisedLook ? B_CONTROL_ON : B_CONTROL_OFF);
-        AddChild(fRaisedLookCheckbox);
-        fSnakeFlatCheckbox->SetEnabled(!gNavRaisedLook);
         // The two colours, a row each: a swatch that shows the colour in use (it follows the colour as it is chosen), the button
         // that opens the colour control, and Use System Colors (Haiku's own menu colours instead).
         fDrawerColorButton = new BButton(BRect(76.0f, 264.0f, 216.0f, 288.0f), "drawer_color_btn",
@@ -4034,14 +2870,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // The [?] marks (their explanations show as tool tips)
         BFont plain12(be_plain_font);
         plain12.SetSize(12.0f);
-        AddChild(new HelpMark(BPoint(317.0f + plain12.StringWidth("Flat") + 6.0f, 202.0f),
-            "The selector is drawn flat: one color, without its light top edge and dark bottom edge.\n"
-            "Only the look without the raised selector has these edges, so this is off while Raised Look is on."));
-        AddChild(new HelpMark(BPoint(317.0f + plain12.StringWidth("Raised Look") + 6.0f, 222.0f),
-            "The Tracker menu's selector is raised and shaded, in the pill look, as in Snake Tracker.\n"
-            "Off, the menu is the older rectangular one with a beveled selector (which can be flat)."));
         AddChild(new HelpMark(BPoint(62.0f + plain12.StringWidth("Rounded Edges") + 6.0f, 222.0f),
-            "Round corners on the popups the dock opens (the Tracker menu, the title list, the tray and other menus) and on its small tiles\n"
+            "Round corners on the popups the dock opens (the title list, the tray and other menus) and on its small tiles\n"
             "(the CPU graph, the workspace switcher, the clock). Off, they are square."));
         AddChild(new HelpMark(BPoint(256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 268.0f),
             "The drawer takes the colors of Haiku's Appearance preferences\n(the menu background and the menu selection) in place of "
@@ -4338,11 +3168,6 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         DrawString("Show CPU Graph", BPoint(317.0f, 174.0f));
         DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
         DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
-        DrawString("Snake Trail (Tracker menu)", BPoint(62.0f, 214.0f));
-        SetHighColor(gNavRaisedLook ? rgb_color{110, 115, 130, 255} : rgb_color{220, 225, 235, 255});   // (dimmed while the raised look has no use for it)
-        DrawString("Flat", BPoint(317.0f, 214.0f));
-        SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Raised Look", BPoint(317.0f, 234.0f));
         DrawString("Rounded Edges", BPoint(62.0f, 234.0f));
         {   // the two colours in use, beside their buttons (they follow a colour as it is chosen)
             const rgb_color rim = rgb_color{110, 115, 130, 255};
@@ -4423,8 +3248,23 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
     }
 
 
+    // Only the three buttons look different with the pointer over them (see Draw()), so only a change of which one it is over is
+    // drawn, and only those buttons: repainting the whole window at every movement made it flash on a composited desktop.
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
-        Invalidate();
+        const float w = Bounds().Width(), h = Bounds().Height();
+        const BRect buttons[3] = {
+            BRect(25.0f, 50.0f, w - 25.0f, 74.0f),                                   // Shutdown hDesktop
+            BRect(25.0f, 82.0f, w - 25.0f, 106.0f),                                  // About hdesktop
+            BRect((w - 100.0f) / 2.0f, h - 45.0f, (w + 100.0f) / 2.0f, h - 18.0f)    // Close
+        };
+        int32 now = -1;
+        if (transit != B_EXITED_VIEW && transit != B_OUTSIDE_VIEW)
+            for (int32 i = 0; i < 3; ++i)
+                if (buttons[i].Contains(point)) { now = i; break; }
+        if (now == fHoverButton) return;
+        if (fHoverButton >= 0) Invalidate(buttons[fHoverButton].InsetByCopy(-3.0f, -3.0f));
+        if (now >= 0) Invalidate(buttons[now].InsetByCopy(-3.0f, -3.0f));
+        fHoverButton = now;
     }
 
     // Grow/shrink the settings window to fit the preview controls now showing
@@ -4490,10 +3330,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fThumbnailFpsSlider->SetTarget(this);
         fThumbnailSizeSlider->SetTarget(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
-        fSnakeTrailCheckbox->SetTarget(this);
-        fSnakeFlatCheckbox->SetTarget(this);
         fRoundedEdgesCheckbox->SetTarget(this);
-        fRaisedLookCheckbox->SetTarget(this);
         fSelectorColorButton->SetTarget(this);
         fDrawerColorButton->SetTarget(this);
         fNavSystemColorsCheckbox->SetTarget(this);
@@ -4628,28 +3465,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 break;
             }
 
-            case MSG_SNAKEFLAT_TOGGLED: {
-                gNavSnakeFlat = (fSnakeFlatCheckbox->Value() == B_CONTROL_ON);
-                SaveConfiguration();
-                break;
-            }
-
-            case MSG_RAISED_LOOK_TOGGLED: {
-                gNavRaisedLook = (fRaisedLookCheckbox->Value() == B_CONTROL_ON);
-                fSnakeFlatCheckbox->SetEnabled(!gNavRaisedLook);   // (the flat selector is the other look's)
-                Invalidate();
-                SaveConfiguration();
-                break;
-            }
-
             case MSG_ROUNDED_EDGES_TOGGLED: {
                 gNavRoundedEdges = (fRoundedEdgesCheckbox->Value() == B_CONTROL_ON);
-                SaveConfiguration();
-                break;
-            }
-
-            case MSG_SNAKETRAIL_TOGGLED: {
-                gNavSnakeTrail = (fSnakeTrailCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 break;
             }
@@ -5118,6 +3935,8 @@ public:
     // tint, with raised pills for the buttons, the title, the section tabs and the hovered app.
     bool fSnake;
     std::map<uint64_t, BBitmap*> fPillCache;
+    std::vector<BRect> fHitRects;    // the buttons and cells as the last drawing placed them (see MouseMoved())
+    int32 fHoverIdx = -1;            // the one of them that drawing showed lit
 
     DrawerView(BRect frame) : BView(frame, "DrawerView", B_FOLLOW_ALL, B_WILL_DRAW), fSnake(NavUI::SnakeLookPreference()) {
         if (fSnake)
@@ -5254,6 +4073,18 @@ public:
         SetFont(be_bold_font);
         SetFontSize(12.0f);
         const BRect shutdown = ShutdownRect(), reboot = RebootRect();
+        fHitRects.clear();                      // (what the pointer can be over, as laid out now: see MouseMoved())
+        fHitRects.push_back(shutdown);
+        fHitRects.push_back(reboot);
+        // fHoverIdx is the button or cell that is painted lit in the window now. Only what this drawing reaches (the update
+        // rectangle) changes it: the rest of the picture is the one already there, scrolled or not.
+        auto noteLit = [&](int32 idx, const BRect& r, bool hovered) {
+            if (!updateRect.Intersects(r)) return;
+            if (hovered) fHoverIdx = idx;
+            else if (fHoverIdx == idx) fHoverIdx = -1;
+        };
+        noteLit(0, shutdown, shutdown.Contains(cursorPoint));
+        noteLit(1, reboot, reboot.Contains(cursorPoint));
         DrawRaisedPill(shutdown, 16, shutdown.Contains(cursorPoint) ? lit : raised);
         DrawShadowed("Power off", shutdown, rgb_color{200, 28, 28, 255});
         DrawRaisedPill(reboot, 16, reboot.Contains(cursorPoint) ? lit : raised);
@@ -5301,9 +4132,11 @@ public:
                 const float x = startX + (c * (itemW + spacingX));
                 const float y = currentY + (r * (itemH + spacingY));
                 const BRect itemBounds(x, y, x + itemW, y + itemH);
+                fHitRects.push_back(itemBounds);
                 if (y + itemH < updateRect.top - 4.0f || y > updateRect.bottom + 4.0f) continue;   // (not in view)
 
                 const bool hovered = itemBounds.Contains(cursorPoint);
+                noteLit(static_cast<int32>(fHitRects.size()) - 1, itemBounds, hovered);
                 if (hovered) DrawRaisedPill(itemBounds, 16, lit);
                 DrawerItem* item = list[i];
                 if (item->icon) {
@@ -5320,11 +4153,31 @@ public:
                 DrawGroove(startX, canvasWidth - startX, currentY - 5.0f);
             } else {
                 const float targetVirtualHeight = currentY + (rows * (itemH + spacingY)) + 40.0f;
-                if (Bounds().Height() != targetVirtualHeight)
+                if (std::fabs(Bounds().Height() - targetVirtualHeight) > 0.5f)
                     ResizeTo(Bounds().Width(), targetVirtualHeight);
                 UpdateScrollRange(targetVirtualHeight);
             }
         }
+    }
+
+    // Scrolling carries the painted picture (the lit cell with it) to a new place under the pointer, which has not moved: the
+    // cell the pointer is over now has to light, and the one that was lit, unlight.
+    virtual void ScrollTo(BPoint where) {
+        BView::ScrollTo(where);
+        if (!fSnake || fHitRects.empty()) return;
+        BPoint at; uint32 buttons = 0;
+        GetMouse(&at, &buttons, false);
+        const int32 now = HitIndexAt(at);
+        if (now == fHoverIdx) return;
+        if (fHoverIdx >= 0 && fHoverIdx < (int32)fHitRects.size()) Invalidate(fHitRects[fHoverIdx].InsetByCopy(-3.0f, -3.0f));
+        if (now >= 0) Invalidate(fHitRects[now].InsetByCopy(-3.0f, -3.0f));
+    }
+
+    // Which button or cell of the last picture a point is over (-1: none).
+    int32 HitIndexAt(BPoint point) const {
+        for (size_t i = 0; i < fHitRects.size(); ++i)
+            if (fHitRects[i].Contains(point)) return static_cast<int32>(i);
+        return -1;
     }
 
     ~DrawerView() {
@@ -5343,8 +4196,14 @@ public:
         // Leaving the window no longer closes it here: HaikuAppDrawerWindow's own
         // 100ms poll does that after a short grace period, so a brief slip past
         // the edge doesn't lose the drawer.
-        // Force the app cell grid canvas to instantly refresh as your cursor glides across choices
-        Invalidate();
+        // The picture only changes when another button or cell becomes the lit one: drawing the whole grid at every
+        // movement of the pointer made the drawer flash on a composited desktop (it repainted about fifty times a second).
+        if (!fSnake || fHitRects.empty()) { Invalidate(); return; }
+        const int32 now = (transit == B_EXITED_VIEW || transit == B_OUTSIDE_VIEW) ? -1 : HitIndexAt(point);
+        if (now == fHoverIdx) return;
+        if (fHoverIdx >= 0 && fHoverIdx < (int32)fHitRects.size()) Invalidate(fHitRects[fHoverIdx].InsetByCopy(-3.0f, -3.0f));
+        if (now >= 0) Invalidate(fHitRects[now].InsetByCopy(-3.0f, -3.0f));
+        // (fHoverIdx changes when the drawing happens, see DrawSnake())
     }
 
 
@@ -5502,6 +4361,11 @@ public:
 
 
     virtual void Draw(BRect updateRect) {
+        if (getenv("HDESKTOP_DEBUG_DRAW") != nullptr) {      // how often the drawer redraws (and which part)
+            static bigtime_t lastDraw = 0; const bigtime_t now = system_time();
+            fprintf(stderr, "[drawer draw] +%lld ms rect %.0f,%.0f-%.0f,%.0f\n", (long long)((now - lastDraw) / 1000), updateRect.left, updateRect.top, updateRect.right, updateRect.bottom);
+            lastDraw = now;
+        }
         if (fSnake) {
             DrawSnake(updateRect);
             return;
@@ -6907,7 +5771,9 @@ public:
         // Background: the screen as it was behind the popup, so the corners beside the pills' round ends look
         // transparent. Without a capture fall back to the menu colour (square corners, as before).
         SetDrawingMode(B_OP_COPY);
-        if (fBackdrop != nullptr && fBackdrop->IsValid()) {
+        if (gCompositor && gNavRoundedEdges) {
+            // a transparent window: only the pills are drawn, what is around them shows the screen
+        } else if (fBackdrop != nullptr && fBackdrop->IsValid()) {
             DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
         } else {
             SetHighColor(pal.bg);
@@ -7040,7 +5906,7 @@ public:
         team_id team, const std::vector<TrackedWindowInfo>& entries, float stackOffset = 0.0f)
         : BWindow(BRect(0, 0, 10, 10), "Window Titles",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
-                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS | (gNavRoundedEdges ? hdTransparentPopupFlag() : 0u)),
           fTicker(nullptr), fView(nullptr), fAnchorIconRect(anchorIconRect),
           fAnchorScreenPoint(anchorScreenPoint), fTeam(team), fRowHeight(0.0f),
           fStackOffset(stackOffset) {
@@ -7142,7 +6008,7 @@ public:
     // closed, or the thumbnail popup appeared) and short.
     void UpdateBackdrop() {
         if (fView == nullptr) return;
-        if (!gNavRoundedEdges) {          // square corners: no picture of the screen is needed
+        if (!gNavRoundedEdges || gCompositor) {          // square corners, or a transparent window: no picture of the screen is needed
             fBackdropTried = false;
             fView->SetBackdrop(nullptr);
             return;
@@ -7695,10 +6561,10 @@ public:
 
     virtual void Draw(BRect updateRect) {
         BRect bounds = Bounds();
-        if (gNavRoundedEdges && fBackdrop != nullptr && fBackdrop->IsValid()) {
-            // round corners: the screen as it was behind the popup, and the panel over it
+        if (gNavRoundedEdges && (gCompositor || (fBackdrop != nullptr && fBackdrop->IsValid()))) {
+            // round corners: the screen as it was behind the popup, and the panel over it (a transparent window needs no capture)
             SetDrawingMode(B_OP_COPY);
-            DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+            if (!gCompositor) DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
             SetDrawingMode(B_OP_ALPHA);
             SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
             SetHighColor(rgb_color{24, 24, 28, 255});
@@ -8177,7 +7043,7 @@ public:
     WorkspacePreviewWindow(BPoint anchorScreenPoint)
         : BWindow(BRect(0, 0, 100, 100), "Workspace Preview",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
-                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE),
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE | (gNavRoundedEdges ? hdTransparentPopupFlag() : 0u)),
           fHoverTicker(nullptr), fMouseHasEntered(false), fView(nullptr) {
 
         int32 wsCount = static_cast<int32>(count_workspaces());
@@ -8224,7 +7090,7 @@ public:
         fView = new WorkspacePreviewView(Bounds());
         AddChild(fView);
         // (the picture of the screen behind it, for the round corners: taken now, before the popup is shown)
-        if (gNavRoundedEdges) fView->SetBackdrop(CaptureScreenBehind(Frame()));
+        if (gNavRoundedEdges && !gCompositor) fView->SetBackdrop(CaptureScreenBehind(Frame()));
 
         BMessage tickMessage('tick');
         fHoverTicker = new BMessageRunner(BMessenger(this), &tickMessage, 100000);
@@ -8368,6 +7234,221 @@ HaikuWallpaperInfo GetActiveHaikuWallpaperInfo() {
 // =========================================================================
 // THE HAIKU DESKTOP DRAW ENGINE RENDERING INTERFACE CLASS
 // =========================================================================
+// ---------------------------------------------------------------------------------------------------------
+// The dock's native window on a composited desktop. It shows the picture the engine draws offscreen, and hands the
+// pointer to the existing SDL event handling (the hidden SDL window gets none).
+// ---------------------------------------------------------------------------------------------------------
+static volatile int32 gCompMouseX = 0, gCompMouseY = 0;
+static volatile uint32 gCompButtons = 0;      // SDL_BUTTON_LMASK / MMASK / RMASK
+
+static uint32 HdSdlButtonMask(uint32 haikuButtons) {
+    uint32 mask = 0;
+    if (haikuButtons & B_PRIMARY_MOUSE_BUTTON) mask |= SDL_BUTTON_LMASK;
+    if (haikuButtons & B_SECONDARY_MOUSE_BUTTON) mask |= SDL_BUTTON_RMASK;
+    if (haikuButtons & B_TERTIARY_MOUSE_BUTTON) mask |= SDL_BUTTON_MMASK;
+    return mask;
+}
+
+static void HdPushMouseMotion(int x, int y) {
+    SDL_Event e; SDL_zero(e);
+    e.type = SDL_MOUSEMOTION; e.motion.x = x; e.motion.y = y; e.motion.state = gCompButtons;
+    SDL_PushEvent(&e);
+}
+
+static void HdPushMouseButton(bool down, uint32 sdlMask, int x, int y) {
+    SDL_Event e; SDL_zero(e);
+    e.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+    e.button.button = (sdlMask == SDL_BUTTON_LMASK) ? SDL_BUTTON_LEFT : (sdlMask == SDL_BUTTON_RMASK) ? SDL_BUTTON_RIGHT : SDL_BUTTON_MIDDLE;
+    e.button.state = down ? SDL_PRESSED : SDL_RELEASED; e.button.x = x; e.button.y = y; e.button.clicks = 1;
+    SDL_PushEvent(&e);
+}
+
+class DockBitmapView : public BView {
+public:
+    DockBitmapView(BRect frame) : BView(frame, "hdesktop_dock_view", B_FOLLOW_ALL, B_WILL_DRAW), fBitmap(nullptr) {
+        SetViewColor(B_TRANSPARENT_COLOR);
+    }
+    ~DockBitmapView() { delete fBitmap; }
+
+    // bgra: width * height pixels, top row first, NOT premultiplied (what the compositor expects). Call with the window locked.
+    void SetPixels(int width, int height, const uint8* bgra) {
+        if (fBitmap == nullptr || fBitmap->Bounds().IntegerWidth() + 1 != width || fBitmap->Bounds().IntegerHeight() + 1 != height) {
+            delete fBitmap;
+            fBitmap = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGBA32);
+        }
+        if (fBitmap == nullptr || !fBitmap->IsValid()) return;
+        const int32 bpr = fBitmap->BytesPerRow();
+        uint8* dst = static_cast<uint8*>(fBitmap->Bits());
+        for (int y = 0; y < height; ++y)
+            memcpy(dst + (size_t)y * bpr, bgra + (size_t)y * width * 4, (size_t)width * 4);
+        Invalidate();
+    }
+
+    void Draw(BRect) override {
+        if (fBitmap == nullptr) return;
+        SetDrawingMode(B_OP_COPY);
+        DrawBitmap(fBitmap, BPoint(0, 0));
+    }
+
+    void MouseMoved(BPoint where, uint32, const BMessage*) override {
+        gCompMouseX = (int32)where.x; gCompMouseY = (int32)where.y;
+        HdPushMouseMotion((int)where.x, (int)where.y);
+    }
+
+    void MouseDown(BPoint where) override {
+        int32 buttons = 0;
+        if (Window() != nullptr && Window()->CurrentMessage() != nullptr) Window()->CurrentMessage()->FindInt32("buttons", &buttons);
+        const uint32 now = HdSdlButtonMask((uint32)buttons);
+        const uint32 added = now & ~gCompButtons;
+        gCompMouseX = (int32)where.x; gCompMouseY = (int32)where.y;
+        gCompButtons = now;
+        for (uint32 bit : { (uint32)SDL_BUTTON_LMASK, (uint32)SDL_BUTTON_MMASK, (uint32)SDL_BUTTON_RMASK })
+            if (added & bit) HdPushMouseButton(true, bit, (int)where.x, (int)where.y);
+    }
+
+    void MouseUp(BPoint where) override {
+        BPoint at; uint32 buttons = 0;
+        GetMouse(&at, &buttons, false);
+        const uint32 now = HdSdlButtonMask(buttons);
+        const uint32 removed = gCompButtons & ~now;
+        gCompMouseX = (int32)where.x; gCompMouseY = (int32)where.y;
+        gCompButtons = now;
+        for (uint32 bit : { (uint32)SDL_BUTTON_LMASK, (uint32)SDL_BUTTON_MMASK, (uint32)SDL_BUTTON_RMASK })
+            if (removed & bit) HdPushMouseButton(false, bit, (int)where.x, (int)where.y);
+    }
+
+    void MessageReceived(BMessage* message) override {
+        if (message->what == B_MOUSE_WHEEL_CHANGED) {
+            float dy = 0;
+            if (message->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0) {
+                SDL_Event e; SDL_zero(e);
+                e.type = SDL_MOUSEWHEEL; e.wheel.y = (dy < 0) ? 1 : -1;     // SDL: positive is away from the user, Haiku: negative
+                SDL_PushEvent(&e);
+            }
+            return;
+        }
+        BView::MessageReceived(message);
+    }
+
+private:
+    BBitmap* fBitmap;
+};
+
+class DockNativeWindow : public BWindow {
+public:
+    DockNativeWindow(BRect frame)
+        : BWindow(frame, "hdesktop dock", B_NO_BORDER_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_NOT_CLOSABLE | B_NOT_MINIMIZABLE | B_AVOID_FRONT | B_AVOID_FOCUS
+                  | B_TRANSPARENT_WINDOW, B_ALL_WORKSPACES) {
+        fView = new DockBitmapView(Bounds());
+        AddChild(fView);
+    }
+    bool QuitRequested() override { return false; }
+    DockBitmapView* DockView() { return fView; }
+private:
+    DockBitmapView* fView;
+};
+
+static DockNativeWindow* gDockNativeWindow = nullptr;
+
+// The window the dock lives in: its own native window on a composited desktop, SDL's otherwise (the first one).
+static BWindow* DockNativeWindowHandle() {
+    if (gDockNativeWindow != nullptr) return gDockNativeWindow;
+    return (be_app != nullptr) ? be_app->WindowAt(0) : nullptr;
+}
+
+// The offscreen buffer the engine draws into on a composited desktop (an RGBA texture, with a stencil for the reveal effect).
+struct DockOffscreen {
+    GLuint fbo = 0, tex = 0, rbo = 0;
+    int width = 0, height = 0;
+    bool ok = false;
+    PFNGLGENFRAMEBUFFERSPROC genFramebuffers = nullptr;
+    PFNGLBINDFRAMEBUFFERPROC bindFramebuffer = nullptr;
+    PFNGLFRAMEBUFFERTEXTURE2DPROC framebufferTexture2D = nullptr;
+    PFNGLGENRENDERBUFFERSPROC genRenderbuffers = nullptr;
+    PFNGLBINDRENDERBUFFERPROC bindRenderbuffer = nullptr;
+    PFNGLRENDERBUFFERSTORAGEPROC renderbufferStorage = nullptr;
+    PFNGLFRAMEBUFFERRENDERBUFFERPROC framebufferRenderbuffer = nullptr;
+    PFNGLCHECKFRAMEBUFFERSTATUSPROC checkFramebufferStatus = nullptr;
+    std::vector<uint8> readBuffer, outBuffer;
+
+    bool Create(int w, int h) {
+        genFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)SDL_GL_GetProcAddress("glGenFramebuffers");
+        bindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)SDL_GL_GetProcAddress("glBindFramebuffer");
+        framebufferTexture2D = (PFNGLFRAMEBUFFERTEXTURE2DPROC)SDL_GL_GetProcAddress("glFramebufferTexture2D");
+        genRenderbuffers = (PFNGLGENRENDERBUFFERSPROC)SDL_GL_GetProcAddress("glGenRenderbuffers");
+        bindRenderbuffer = (PFNGLBINDRENDERBUFFERPROC)SDL_GL_GetProcAddress("glBindRenderbuffer");
+        renderbufferStorage = (PFNGLRENDERBUFFERSTORAGEPROC)SDL_GL_GetProcAddress("glRenderbufferStorage");
+        framebufferRenderbuffer = (PFNGLFRAMEBUFFERRENDERBUFFERPROC)SDL_GL_GetProcAddress("glFramebufferRenderbuffer");
+        checkFramebufferStatus = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)SDL_GL_GetProcAddress("glCheckFramebufferStatus");
+        gHdBlendFuncSeparate = (PFNGLBLENDFUNCSEPARATEPROC)SDL_GL_GetProcAddress("glBlendFuncSeparate");
+        if (!genFramebuffers || !bindFramebuffer || !framebufferTexture2D || !genRenderbuffers || !bindRenderbuffer
+            || !renderbufferStorage || !framebufferRenderbuffer || !checkFramebufferStatus || !gHdBlendFuncSeparate)
+            return false;
+        width = w; height = h;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        genRenderbuffers(1, &rbo);
+        bindRenderbuffer(GL_RENDERBUFFER, rbo);
+        renderbufferStorage(GL_RENDERBUFFER, 0x88F0 /* GL_DEPTH24_STENCIL8 */, w, h);
+        bindRenderbuffer(GL_RENDERBUFFER, 0);
+        genFramebuffers(1, &fbo);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        framebufferRenderbuffer(GL_FRAMEBUFFER, 0x821A /* GL_DEPTH_STENCIL_ATTACHMENT */, GL_RENDERBUFFER, rbo);
+        ok = (checkFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        return ok;
+    }
+    void Bind() { bindFramebuffer(GL_FRAMEBUFFER, fbo); }
+    void Unbind() { bindFramebuffer(GL_FRAMEBUFFER, 0); }
+
+    // Reads the w x h picture at the bottom left of the (bound) buffer and gives it to the dock window: top row first, colours
+    // divided by alpha (the compositor expects them not premultiplied).
+    void Present(int w, int h) {
+        if (gDockNativeWindow == nullptr || w <= 0 || h <= 0) return;
+        readBuffer.resize((size_t)w * h * 4);
+        outBuffer.resize((size_t)w * h * 4);
+        GLint oldAlign = 4;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &oldAlign);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, readBuffer.data());
+        glPixelStorei(GL_PACK_ALIGNMENT, oldAlign);
+        for (int y = 0; y < h; ++y) {
+            const uint8* src = readBuffer.data() + (size_t)(h - 1 - y) * w * 4;
+            uint8* dst = outBuffer.data() + (size_t)y * w * 4;
+            for (int x = 0; x < w; ++x, src += 4, dst += 4) {
+                const unsigned a = src[3];
+                if (a == 255) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 255; }
+                else if (a == 0) { dst[0] = dst[1] = dst[2] = dst[3] = 0; }
+                else {
+                    dst[0] = (uint8)std::min(255u, (src[0] * 255u + a / 2) / a);
+                    dst[1] = (uint8)std::min(255u, (src[1] * 255u + a / 2) / a);
+                    dst[2] = (uint8)std::min(255u, (src[2] * 255u + a / 2) / a);
+                    dst[3] = (uint8)a;
+                }
+            }
+        }
+        if (getenv("HDESKTOP_DEBUG_PIXEL") != nullptr) {     // what the first pixel of the strip looks like, before and after the conversion
+            static int count = 0;
+            if ((count++ % 120) == 0) {
+                const uint8* r = readBuffer.data() + (size_t)(h - 1) * w * 4;      // top left of the picture, as read (BGRA)
+                const uint8* o = outBuffer.data();                                // the same pixel as sent to the window
+                fprintf(stderr, "[present] %dx%d top-left read B%d G%d R%d A%d -> sent B%d G%d R%d A%d\n", w, h, r[0], r[1], r[2], r[3], o[0], o[1], o[2], o[3]);
+            }
+        }
+        if (gDockNativeWindow->LockWithTimeout(30000) == B_OK) {
+            gDockNativeWindow->DockView()->SetPixels(w, h, outBuffer.data());
+            gDockNativeWindow->Unlock();
+        }
+    }
+};
+static DockOffscreen gDockOffscreen;
+
 class HaikuGlDesktopEngine {
 private:
 	bool fShouldDrawList = false;
@@ -8453,6 +7534,10 @@ public:
         const bigtime_t now = system_time();
         if (sample.valid && now - sample.when < 300000)
             return sample.lightText;
+        if (gCompositor) {     // the wallpaper is not in the dock's picture: the plate rule stands in
+            sample.valid = true; sample.lightText = (fDockAlpha < 0.35f); sample.when = now;
+            return sample.lightText;
+        }
 
         GLdouble modelview[16], projection[16];
         GLint viewport[4];
@@ -9149,42 +8234,6 @@ void SyncDockWithRunningDeskbarApps() {
 
 	    BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
 
-	    if (kUseCustomTrackerMenu) {
-	        // Our own menu (see NavMenuWindow): same look as the Linux build, snake trail included.
-	        // It runs on its own window threads, so this thread only opens it and returns; the latch
-	        // that keeps the dock's hover popups out of the way is released when the last level closes.
-	        HaikuGlDesktopEngine* engine = args->engine;
-	        bool below = (gDockLocation == kDockLocationTop);
-	        // The pill look captures the screen behind the menu, so the root level opens clear of the icon's zoomed peak
-	        // (otherwise the zoomed icon would be frozen into its corners), like the dock's other pill popups.
-	        const float clearance = kNavPillLook ? fBaseIconSize * fIconZoom / 2.0f + 8.0f : 40.0f;
-	        BPoint anchor(static_cast<float>(args->winX + args->mouseX), args->popupCenterY + (below ? clearance : -clearance));
-	        bool opened = ShowTrackerNavMenu(anchor, below,
-	            [engine, trackerMessenger](const entry_ref& ref) {
-	                BMessage refsMessage(B_REFS_RECEIVED);
-	                refsMessage.AddRef("refs", &ref);
-	                BMessenger tracker = trackerMessenger;
-	                if (tracker.IsValid()) {
-	                    tracker.SendMessage(&refsMessage);
-	                    team_id trackerTeam = -1;
-	                    app_info trackerInfo;
-	                    if (be_roster->GetAppInfo("application/x-vnd.Be-TRAK", &trackerInfo) == B_OK) {
-	                        trackerTeam = trackerInfo.team;
-	                    }
-	                    engine->fEffectAppTeam = trackerTeam;
-	                    engine->fEffectAppName = "";
-	                    engine->fEffectAnimationStartTime = SDL_GetTicks();
-	                }
-	            },
-	            [engine]() {
-	                engine->fLastTrackerMenuCloseTime = SDL_GetTicks();
-	                engine->fTrackerMenuIsActive = false;
-	            });
-	        if (!opened) args->engine->fTrackerMenuIsActive = false;
-	        delete args;
-	        return B_OK;
-	    }
-
 	    entry_ref rootRef;
 	    BEntry rootEntry("/boot/");
 	    if (rootEntry.GetRef(&rootRef) != B_OK) {
@@ -9312,6 +8361,10 @@ void SyncDockWithRunningDeskbarApps() {
                             SDL_Window* activeWin = SDL_GetMouseFocus();
                             if (activeWin) {
                                 SDL_GetWindowPosition(activeWin, &winX, &winY);
+                            }
+                            if (gCompositor && gDockNativeWindow != nullptr) {
+                                winX = (int)gDockNativeWindow->Frame().left;
+                                winY = (int)gDockNativeWindow->Frame().top;
                             }
 
                             // Package specialized isolated heap variables for the background thread context
@@ -9974,7 +9027,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                    args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
 
 		                    if (be_app && be_app->Lock()) {
-		                        BWindow* mainNativeWin = be_app->WindowAt(0);
+		                        BWindow* mainNativeWin = DockNativeWindowHandle();
 		                        if (mainNativeWin != nullptr) {
 		                            args->winX = static_cast<int32>(mainNativeWin->Frame().left);
 		                            args->winY = static_cast<int32>(mainNativeWin->Frame().top);
@@ -10200,7 +9253,7 @@ void SyncDockWithRunningDeskbarApps() {
 
 
                  if (fShowMainMenu) {
-                        BWindow* nativeWin = be_app->WindowAt(0);
+                        BWindow* nativeWin = DockNativeWindowHandle();
                         if (nativeWin != nullptr && nativeWin->Lock()) {
                             nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
                             nativeWin->ResizeBy(0, -220.0f);
@@ -10254,7 +9307,7 @@ void SyncDockWithRunningDeskbarApps() {
 
 				        // SMART NAVIGATION: Query native Haiku window coordinates like preferences popup
 				        if (be_app && be_app->Lock()) {
-				            BWindow* mainNativeWin = be_app->WindowAt(0);
+				            BWindow* mainNativeWin = DockNativeWindowHandle();
 				            if (mainNativeWin != nullptr) {
 				                args->winX = static_cast<int32>(mainNativeWin->Frame().left);
 				                args->winY = static_cast<int32>(mainNativeWin->Frame().top);
@@ -10478,7 +9531,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        y >= trashBounds.top  && y <= trashBounds.bottom) {
 
 	        if (fShowMainMenu) {
-	            BWindow* nativeWin = be_app->WindowAt(0);
+	            BWindow* nativeWin = DockNativeWindowHandle();
 	            if (nativeWin != nullptr && nativeWin->Lock()) {
 	                nativeWin->SetFeel(B_NORMAL_WINDOW_FEEL);
 	                nativeWin->ResizeBy(0, -220.0f);
@@ -10540,7 +9593,7 @@ void SyncDockWithRunningDeskbarApps() {
 
 	            // SMART NAVIGATION: Lock native Haiku app frames rather than querying raw SDL views
 	            if (be_app && be_app->Lock()) {
-	                BWindow* mainNativeWin = be_app->WindowAt(0);
+	                BWindow* mainNativeWin = DockNativeWindowHandle();
 	                if (mainNativeWin != nullptr) {
 	                    args->winX = static_cast<int32>(mainNativeWin->Frame().left);
 	                    args->winY = static_cast<int32>(mainNativeWin->Frame().top);
@@ -10741,7 +9794,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                            // Get accurate native window coordinates
 	                            int32 nativeWinX = 0;
 	                            if (be_app && be_app->Lock()) {
-	                                BWindow* mainNativeWin = be_app->WindowAt(0);
+	                                BWindow* mainNativeWin = DockNativeWindowHandle();
 	                                if (mainNativeWin != nullptr) {
 	                                    nativeWinX = static_cast<int32>(mainNativeWin->Frame().left);
 	                                }
@@ -10884,7 +9937,7 @@ void SyncDockWithRunningDeskbarApps() {
 	                args->currentDockH = static_cast<float>(std::ceil(fBaseIconSize * 3.5f));
 
 	                if (be_app && be_app->Lock()) {
-	                    BWindow* mainNativeWin = be_app->WindowAt(0);
+	                    BWindow* mainNativeWin = DockNativeWindowHandle();
 	                    if (mainNativeWin != nullptr) {
 	                        args->winX = static_cast<int32>(mainNativeWin->Frame().left);
 	                        args->winY = static_cast<int32>(mainNativeWin->Frame().top);
@@ -11155,7 +10208,7 @@ void SyncDockWithRunningDeskbarApps() {
         // =========================================================================
         // Changing from the old wallpaper to the new one, over the time SnakeTracker takes for its own (the progress is 1
         // when nothing changes).
-        {
+        if (!gCompositor) {
             const float progress = WallpaperFadeProgress();
             if (progress < 1.0f)
                 DrawWallpaperTransition(progress);
@@ -13786,9 +12839,6 @@ void SaveConfiguration() {
             settingsMsg.AddInt32("thumbnail_fps", fThumbnailCaptureFps);
             settingsMsg.AddInt32("thumbnail_size", fThumbnailSize);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
-            settingsMsg.AddBool("nav_snake_trail", gNavSnakeTrail);
-            settingsMsg.AddBool("nav_raised_look", gNavRaisedLook);
-            settingsMsg.AddBool("nav_snake_flat", gNavSnakeFlat);
             settingsMsg.AddInt32("nav_accent", (static_cast<int32>(gNavAccent.red) << 16) |
                 (static_cast<int32>(gNavAccent.green) << 8) | static_cast<int32>(gNavAccent.blue));
             settingsMsg.AddBool("nav_rounded_edges", gNavRoundedEdges);
@@ -13862,10 +12912,6 @@ void LoadConfiguration() {
                     fThumbnailSize = std::max<int32>(120, std::min<int32>(360, valInt32));
                 }
                 if (settingsMsg.FindBool("workspace_switcher", &valBool) == B_OK) fShowWorkspaceSwitcher = valBool;
-                if (settingsMsg.FindBool("nav_snake_trail", &valBool) == B_OK) gNavSnakeTrail = valBool;
-                if (settingsMsg.FindBool("nav_raised_look", &valBool) == B_OK) gNavRaisedLook = valBool;
-                else gNavRaisedLook = NavUI::SnakeLookPreference();   // (no choice of its own yet: Snake Tracker's)
-                if (settingsMsg.FindBool("nav_snake_flat", &valBool) == B_OK) gNavSnakeFlat = valBool;
                 if (settingsMsg.FindInt32("nav_accent", &valInt32) == B_OK) {
                     gNavAccent = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
                         static_cast<uint8>((valInt32 >> 8) & 0xFF), static_cast<uint8>(valInt32 & 0xFF), 255};
@@ -14297,6 +13343,11 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    {   // asks app_server: only after SDL has made the application object
+        bool (*isComposited)() = (bool (*)())dlsym(RTLD_DEFAULT, "is_composited_desktop");
+        gCompositor = (isComposited != nullptr && isComposited() && getenv("HDESKTOP_FAKE_TRANSPARENCY") == nullptr);
+        DebugLog("[hdesktop] composited desktop: %s\n", gCompositor ? "yes (real transparency)" : "no (transparency is faked)");
+    }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -14355,7 +13406,7 @@ int main(int argc, char* argv[]) {
         "Haiku Desktop Taskbar Overlay Component",
         0, yExpanded,
         dockPanelW, dockPanelH,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS
+        SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | (gCompositor ? SDL_WINDOW_HIDDEN : 0)
         //SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP
     );
 
@@ -14366,10 +13417,30 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    if (gCompositor) {
+        // SDL's window only holds the GL context: out of the way (and never shown), the dock is the native window.
+        SDL_SetWindowSize(window, 1, 1);
+        SDL_SetWindowPosition(window, -4000, -4000);
+        SDL_HideWindow(window);
+        gDockNativeWindow = new DockNativeWindow(BRect(0, yExpanded, dockPanelW - 1, yExpanded + dockPanelH - 1));
+        gDockNativeWindow->Show();
+        if (be_app != nullptr && be_app->Lock()) {
+            for (int32 i = 0; i < be_app->CountWindows(); ++i) {
+                BWindow* w = be_app->WindowAt(i);
+                if (w != nullptr && w->Lock()) {
+                    DebugLog("[hdesktop] window %d '%s' frame %.0f,%.0f %.0fx%.0f hidden %d flags %#x\n", (int)i, w->Title(),
+                        w->Frame().left, w->Frame().top, w->Frame().Width() + 1, w->Frame().Height() + 1, (int)w->IsHidden(), (unsigned)w->Flags());
+                    w->Unlock();
+                }
+            }
+            be_app->Unlock();
+        }
+    }
+
     // FIX: Pin the dock to every workspace (mirrors Haiku's DesktopWindow.cpp),
     // otherwise the overlay only shows on whichever workspace it was launched on.
     if (be_app && be_app->Lock()) {
-        BWindow* nativeWin = be_app->WindowAt(0);
+        BWindow* nativeWin = DockNativeWindowHandle();
         if (nativeWin != nullptr) {
             nativeWin->SetWorkspaces(B_ALL_WORKSPACES);
         }
@@ -14386,6 +13457,14 @@ int main(int argc, char* argv[]) {
 
 
     SDL_GL_SetSwapInterval(1);
+    if (gCompositor) {
+        if (!gDockOffscreen.Create(screenWidth, screenHeight)) {
+            DebugLog("[hdesktop] offscreen buffer failed: falling back to the faked transparency\n");
+            gCompositor = false;
+            if (gDockNativeWindow != nullptr) { gDockNativeWindow->Lock(); gDockNativeWindow->Quit(); gDockNativeWindow = nullptr; }
+            SDL_ShowWindow(window);
+        }
+    }
 	glViewport(0, 0, screenWidth, dockPanelH);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -14410,7 +13489,7 @@ int main(int argc, char* argv[]) {
     {
         int stencilBits = 0;
         SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &stencilBits);
-        desktopEngine.SetHasStencil(stencilBits > 0);
+        desktopEngine.SetHasStencil(stencilBits > 0 || gCompositor);
     }
 
 
@@ -14459,7 +13538,7 @@ int main(int argc, char* argv[]) {
     bool cursorIsInsideDock = false;
 
     while (appExecuting) {
-        if (SDL_WaitEventTimeout(&incomingEventPackage, 30)) {
+        if (SDL_WaitEventTimeout(&incomingEventPackage, (gCompositor && needsRender) ? 8 : 30)) {
             do {
                 // =========================================================================
                 // ANTI-FOCUS HIJACK INTERCEPTION PROTOCOL
@@ -14521,7 +13600,9 @@ int main(int argc, char* argv[]) {
                          incomingEventPackage.type == SDL_MOUSEBUTTONUP) {
 
                     int mouseX, mouseY;
-                    Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
+                    Uint32 buttons;
+                    if (gCompositor) { mouseX = gCompMouseX; mouseY = gCompMouseY; buttons = gCompButtons; }
+                    else buttons = SDL_GetMouseState(&mouseX, &mouseY);
 
                     if (dockState == STATE_HIDDEN && !cursorIsInsideDock) {
                         needsRender = true;
@@ -14563,7 +13644,7 @@ int main(int argc, char* argv[]) {
         if (be_app && be_app->Lock()) {
             int32 windowCount = be_app->CountWindows();
             if (windowCount > 0) {
-                BWindow* nativeWin = be_app->WindowAt(0);
+                BWindow* nativeWin = DockNativeWindowHandle();
                 if (nativeWin && nativeWin->Lock()) {
                     BView* mainView = nativeWin->ChildAt(0);
                     if (mainView) {
@@ -14695,7 +13776,8 @@ int main(int argc, char* argv[]) {
                 if (be_app && be_app->Lock()) {
                     int32 windowCount = be_app->CountWindows();
                     for (int32 i = 0; i < windowCount; i++) {
-                        BWindow* win = be_app->WindowAt(i);
+                        // (the dock's own window on a composited desktop: SDL's window is only the hidden holder of the GL context)
+                        BWindow* win = (gCompositor && gDockNativeWindow != nullptr) ? static_cast<BWindow*>(gDockNativeWindow) : be_app->WindowAt(i);
                         if (win != nullptr && win->Lock()) {
                             uint32 flags = win->Flags();
 
@@ -14873,8 +13955,16 @@ int main(int argc, char* argv[]) {
             int targetWindowY      = HiddenScreenOffsetFor(targetWindowHeight);
 
             if (targetWindowHeight != lastSetH || targetWindowY != lastSetY) {
-                SDL_SetWindowSize(window, targetWindowWidth, targetWindowHeight);
-                SDL_SetWindowPosition(window, 0, targetWindowY);
+                if (gCompositor && gDockNativeWindow != nullptr) {
+                    if (gDockNativeWindow->Lock()) {
+                        gDockNativeWindow->ResizeTo(targetWindowWidth - 1, targetWindowHeight - 1);
+                        gDockNativeWindow->MoveTo(0, targetWindowY);
+                        gDockNativeWindow->Unlock();
+                    }
+                } else {
+                    SDL_SetWindowSize(window, targetWindowWidth, targetWindowHeight);
+                    SDL_SetWindowPosition(window, 0, targetWindowY);
+                }
 
                 glViewport(0, 0, targetWindowWidth, targetWindowHeight);
 
@@ -14897,8 +13987,15 @@ int main(int argc, char* argv[]) {
             }
             // =========================================================================
 
-            desktopEngine.RenderFrame(currentY);
-            SDL_GL_SwapWindow(window);
+            if (gCompositor) {
+                gDockOffscreen.Bind();
+                desktopEngine.RenderFrame(currentY);
+                gDockOffscreen.Present(screenWidth, dockPanelH);
+                gDockOffscreen.Unbind();
+            } else {
+                desktopEngine.RenderFrame(currentY);
+                SDL_GL_SwapWindow(window);
+            }
             needsRender = false;
         }
 
@@ -14906,6 +14003,7 @@ int main(int argc, char* argv[]) {
 
     }
 
+    if (gDockNativeWindow != nullptr) { if (gDockNativeWindow->Lock()) gDockNativeWindow->Quit(); gDockNativeWindow = nullptr; }
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
     SDL_Quit();
