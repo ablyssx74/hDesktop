@@ -1,6 +1,6 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O3 -I/boot/system/develop/headers/private/app -I/boot/system/develop/headers/private/tracker -I./tracker -I/boot/system/develop/headers/private/interface
+CXXFLAGS = -Wall -O3 -I./compat -I/boot/system/develop/headers/private/app -I/boot/system/develop/headers/private/tracker -I./tracker -I/boot/system/develop/headers/private/interface
 
 
 # Target binary definitions
