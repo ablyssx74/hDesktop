@@ -862,6 +862,8 @@ using BPrivate::BNavMenu;
 // =========================================================================
 class BPopupNavMenu : public BPrivate::BNavMenu {
 public:
+    // Own SetFont, so the vtable asks for nothing of BMenu's: a newer BMenu names its own SetFont, which an older libbe (RenkuOS) does not have.
+    void SetFont(const BFont* font, uint32 mask = B_FONT_ALL) override { BView::SetFont(font, mask); }
     BPopupNavMenu(const char* title, uint32 message, const BMessenger& target)
         : BPrivate::BNavMenu(title, message, target) {}
 
@@ -1781,6 +1783,8 @@ private:
 // =========================================================================
 class BLiveMemoryMenu : public BMenu {
 public:
+    // Own SetFont, so the vtable asks for nothing of BMenu's: a newer BMenu names its own SetFont, which an older libbe (RenkuOS) does not have.
+    void SetFont(const BFont* font, uint32 mask = B_FONT_ALL) override { BView::SetFont(font, mask); }
     BLiveMemoryMenu(const char* title) : BMenu(title) {
         SetFlags(Flags() | B_PULSE_NEEDED);
         BView::SetFont(be_plain_font);   // (BView's: a newer BMenu names its own SetFont, which an older libbe does not have)
@@ -1853,6 +1857,8 @@ private:
 // =========================================================================
 class BThreadPriorityMenu : public BMenu {
 public:
+    // Own SetFont, so the vtable asks for nothing of BMenu's: a newer BMenu names its own SetFont, which an older libbe (RenkuOS) does not have.
+    void SetFont(const BFont* font, uint32 mask = B_FONT_ALL) override { BView::SetFont(font, mask); }
     BThreadPriorityMenu(const char* label, thread_id thread)
         : BMenu(label), fThread(thread) {
         _Build(); // sized correctly before its first open
@@ -1937,6 +1943,8 @@ private:
 // =========================================================================
 class BTeamThreadsMenu : public BMenu {
 public:
+    // Own SetFont, so the vtable asks for nothing of BMenu's: a newer BMenu names its own SetFont, which an older libbe (RenkuOS) does not have.
+    void SetFont(const BFont* font, uint32 mask = B_FONT_ALL) override { BView::SetFont(font, mask); }
     BTeamThreadsMenu(team_id team, const char* name)
         : BMenu(name), fTeam(-1), fLastUpdateTime(0) {
         SetFlags(Flags() | B_PULSE_NEEDED);
@@ -2057,6 +2065,8 @@ private:
 
 class BRealtimeCpuMenu : public BMenu {
 public:
+    // Own SetFont, so the vtable asks for nothing of BMenu's: a newer BMenu names its own SetFont, which an older libbe (RenkuOS) does not have.
+    void SetFont(const BFont* font, uint32 mask = B_FONT_ALL) override { BView::SetFont(font, mask); }
     BRealtimeCpuMenu(const char* title) : BMenu(title) {
         SetFlags(Flags() | B_PULSE_NEEDED);
 
