@@ -5938,7 +5938,7 @@ static int32 TitleCardFetchThread(void* data) {
         int32 width = 0, height = 0;
         BMessage message('tlth');
         message.AddInt32("token", args->tokens[i]);
-        if (ReadWindowPixelsFromServer(args->tokens[i], (int32)ThumbnailMaxWidth(), (int32)ThumbnailMaxHeight(), pixels,
+        if (ReadWindowPixelsFromServer(args->tokens[i], (int32)ThumbnailMaxWidth() - 4, (int32)ThumbnailMaxHeight() - 4, pixels,
                 &width, &height) == B_OK) {
             message.AddInt32("width", width);
             message.AddInt32("height", height);
@@ -6108,23 +6108,25 @@ public:
 
             if (entryHeight > fRowHeight) {
                 // a minimized window: its picture on a card under the title
-                BRect card(0.0f, rowRect.bottom + kCardPad, bounds.Width(), top + entryHeight - 1.0f);
-                const float cardR = gNavRoundedEdges ? 8.0f : 0.0f;
+                // a box of the size the setting gives (as the Linux build's card), centered under the title: not as wide as the popup,
+                // which a long title makes wide
+                const float cardW = ThumbnailMaxWidth(), cardH = ThumbnailMaxHeight();
+                const float cardLeft = floorf((bounds.Width() + 1.0f - cardW) / 2.0f);
+                BRect card(cardLeft, rowRect.bottom + kCardPad + 1.0f, cardLeft + cardW - 1.0f, rowRect.bottom + kCardPad + cardH);
+                const float cardR = gNavRoundedEdges ? 6.0f : 0.0f;
                 SetDrawingMode(B_OP_ALPHA);
                 SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
-                SetHighColor(rgb_color{18, 20, 26, 230});
+                SetHighColor(rgb_color{14, 14, 18, 255});
                 FillRoundRect(card, cardR, cardR);
-                if (hovered) {
-                    SetHighColor(hotColor);
-                    SetPenSize(2.0f);
-                    StrokeRoundRect(card.InsetByCopy(1.0f, 1.0f), cardR, cardR);
-                    SetPenSize(1.0f);
-                }
+                SetHighColor(hovered ? hotColor : rgb_color{60, 62, 72, 255});     // the rim, as the Linux build's card
+                if (hovered) SetPenSize(2.0f);
+                StrokeRoundRect(card.InsetByCopy(hovered ? 1.0f : 0.5f, hovered ? 1.0f : 0.5f), cardR, cardR);
+                SetPenSize(1.0f);
                 SetDrawingMode(B_OP_COPY);
                 std::map<int32, CardPicture>::iterator picture = fPictures.find(fEntries[i].serverToken);
                 if (picture != fPictures.end() && picture->second.bitmap != nullptr) {
                     BBitmap* bitmap = picture->second.bitmap;
-                    const BRect inner = card.InsetByCopy(kCardPad, kCardPad);
+                    const BRect inner = card.InsetByCopy(2.0f, 2.0f);
                     const float bw = bitmap->Bounds().Width() + 1.0f, bh = bitmap->Bounds().Height() + 1.0f;
                     const float left = floorf(inner.left + (inner.Width() + 1.0f - bw) / 2.0f);
                     const float topPicture = floorf(inner.top + (inner.Height() + 1.0f - bh) / 2.0f);
