@@ -194,6 +194,11 @@ static void AvoidDeskbarEdge() {
 }
 
 bool fShowWindowThumbnails = false;
+// Settings > "Show thumbnails only when windows are": which windows get a thumbnail. Minimized: a card with a picture for each
+// minimized window in the hover list (like the Linux build); Restored: the preview above the icon of a window that can be seen (the
+// way it was before); Both.
+enum { kThumbsMinimized = 0, kThumbsRestored = 1, kThumbsBoth = 2 };
+int32 gThumbnailMode = kThumbsMinimized;
 bool fShowAdvancedOptions = false;
 
 rgb_color gNavAccent = {70, 110, 200, 255};
@@ -234,10 +239,14 @@ int32 fThumbnailSize = 200;
 // picture of a window that is minimized. An app_server that does not know the request answers B_ERROR; it is then not tried again
 // (0), and the screen is read as before. -1: not tried yet, 1: works.
 static std::atomic<int> gServerWindowRead(-1);
-// The hover list shows a picture of each window that is minimized (like the Linux build's list), and nothing for a window that can
-// be seen: there is no preview popup of its own any more. On a composited desktop the pictures come from app_server; without one
+// The hover list shows a picture of each window that is minimized (like the Linux build's list; with Restored or Both in the settings
+// the preview popup of a window that can be seen is there too). On a composited desktop the pictures come from app_server; without one
 // (Haiku) from the last pictures hdesktop took of the windows while they could be seen (WindowPictureKeeper, a frozen last frame).
-inline bool ThumbnailCardsOn() { return fShowWindowThumbnails && (!gCompositor || gServerWindowRead.load() != 0); }
+inline bool ThumbnailCardsOn() {
+    return fShowWindowThumbnails && gThumbnailMode != kThumbsRestored && (!gCompositor || gServerWindowRead.load() != 0);
+}
+// The preview popup of a window that can be seen (above the icon).
+inline bool ThumbnailPreviewOn() { return fShowWindowThumbnails && gThumbnailMode != kThumbsMinimized; }
 inline float ThumbnailMaxWidth()  { return (float)fThumbnailSize; }
 inline float ThumbnailMaxHeight() { return (float)fThumbnailSize * 0.7f; }
 
@@ -328,6 +337,7 @@ enum {
     MSG_ADVANCED_TOGGLED = 'advt',
     MSG_THUMBNAIL_FPS_SLIDER_CHANGED = 'tfps',
     MSG_THUMBNAIL_SIZE_SLIDER_CHANGED = 'tsiz',
+    MSG_THUMBNAIL_MODE_CHANGED = 'thmd',
     MSG_SELECTOR_COLOR_OPEN = 'slco',
     MSG_SELECTOR_COLOR_CHANGED = 'slcc',
     MSG_SELECTOR_COLOR_DEFAULT = 'slcd',
@@ -2609,14 +2619,19 @@ public:
     }
 };
 
-// The settings window keeps the (optional) window-preview controls at the
-// bottom so that, with thumbnails off, they take no room: the window and its
-// backing tray grow only as far as the controls actually showing.
-//   off: just the toggle row   on: + size slider   on + Advanced: + FPS slider
-static float ConfigContentBottom() {
-    if (!fShowWindowThumbnails) return 672.0f;
-    return fShowAdvancedOptions ? 822.0f : 770.0f;
+// The settings window has tabs (as the Linux build's): Dock, Widgets, Look, Effects, Thumbnails. The window is as tall as its tallest
+// tab (Dock), so that it does not change size when the tab changes; each tab's controls are in a pane of their own.
+enum { kConfigTabCount = 5 };
+static const char* const kConfigTabNames[kConfigTabCount] = { "Dock", "Widgets", "Look", "Effects", "Thumbnails" };
+static const float kConfigTabBarTop = 76.0f, kConfigTabBarBottom = 102.0f;
+static const float kConfigPaneTop = 112.0f, kConfigPaneHeight = 250.0f;
+static BRect ConfigShutdownRect(float w) { return BRect(25.0f, 44.0f, w / 2.0f - 6.0f, 68.0f); }
+static BRect ConfigAboutRect(float w) { return BRect(w / 2.0f + 6.0f, 44.0f, w - 25.0f, 68.0f); }
+static BRect ConfigTabRect(int tab, float w) {
+    const float left = 25.0f, width = (w - 50.0f) / kConfigTabCount;
+    return BRect(left + tab * width, kConfigTabBarTop, left + (tab + 1) * width - 3.0f, kConfigTabBarBottom);
 }
+static float ConfigContentBottom() { return kConfigPaneTop + kConfigPaneHeight + 8.0f; }
 static float ConfigWindowHeight() { return ConfigContentBottom() + 82.0f; }
 
 // Settings > Selector Color and > Drawer Color: Haiku's own colour control, applied live (to the Tracker menu's selector,
@@ -2786,6 +2801,24 @@ private:
     bool fHover;
 };
 
+// The controls of one tab of the settings window sit on a pane that paints the backing colour and the tab's labels (the controls
+// are children of it, so the window's own drawing would be under them).
+class ConfigPane : public BView {
+public:
+    ConfigPane(BRect frame, std::function<void(BView*)> drawLabels)
+        : BView(frame, "config_pane", B_FOLLOW_NONE, B_WILL_DRAW), fDrawLabels(drawLabels) {
+        SetViewColor(rgb_color{24, 24, 28, 255});
+    }
+    virtual void Draw(BRect) {
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(rgb_color{24, 24, 28, 255});
+        FillRect(Bounds());
+        if (fDrawLabels) fDrawLabels(this);
+    }
+private:
+    std::function<void(BView*)> fDrawLabels;
+};
+
 class ConfigView : public BView {
 private:
     BCheckBox* fAutoHideCheckbox;
@@ -2809,6 +2842,7 @@ private:
     BCheckBox* fVolumeCheckbox;
     BCheckBox* fCpuGraphCheckbox;
     BMenuField* fDockLocationMenuField;
+    BMenuField* fThumbnailModeField = nullptr;
     BMenuField* fEffectsMenuField;
     BMenuField* fCloseEffectsMenuField;
     BSlider*   fEffectSpeedSlider;
@@ -2816,6 +2850,9 @@ private:
     BSlider*   fIconSizeSlider;
     BSlider*   fIconZoomSlider;
     BButton*   fAboutButton;
+    BView*     fPane[kConfigTabCount] = { nullptr, nullptr, nullptr, nullptr, nullptr };   // the controls of each tab
+    int32      fTab = 0;
+    float      fHelpWidth[2] = { 0.0f, 0.0f };
 
 public:
 
@@ -3018,6 +3055,25 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             fThumbnailSizeSlider->Hide();
         }
 
+        // Which windows get a thumbnail: minimized, restored, both (label drawn manually in Draw())
+        {
+            BPopUpMenu* modePopup = new BPopUpMenu("Thumbnails");
+            static const char* const kModeNames[] = { "Minimized", "Restored", "Both" };
+            for (int32 mode = 0; mode < 3; ++mode) {
+                BMessage* modeMessage = new BMessage(MSG_THUMBNAIL_MODE_CHANGED);
+                modeMessage->AddInt32("mode", mode);
+                BMenuItem* modeItem = new BMenuItem(kModeNames[mode], modeMessage);
+                modeItem->SetMarked(gThumbnailMode == mode);
+                modePopup->AddItem(modeItem);
+            }
+            BRect modeRect(280.0f, 719.0f, frame.Width() - 35.0f, 743.0f);
+            fThumbnailModeField = new BMenuField(modeRect, "thumbnail_mode_field", nullptr, modePopup);
+            fThumbnailModeField->SetViewColor(B_TRANSPARENT_COLOR);
+            AddChild(fThumbnailModeField);
+            AddChild(new PillMenuFieldOverlay(fThumbnailModeField));
+            if (!fShowWindowThumbnails) fThumbnailModeField->Hide();
+        }
+
         // Row 8: Dock Location Dropdown
         BPopUpMenu* dockLocationPopup = new BPopUpMenu("Dock Location");
 
@@ -3146,6 +3202,157 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fIconZoomSlider->SetLimitLabels("None", "Large");
         fIconZoomSlider->SetValue(static_cast<int32>(std::lround(fIconZoom * 100.0f)));
         AddChild(fIconZoomSlider);
+
+        BuildTabs(frame);
+    }
+
+    // Moves every control into the pane of its tab, at its place there (a pane starts under the tab bar). The labels are drawn
+    // by Draw() at the same places (the constants there). The panes are what is hidden and shown when the tab changes, so the
+    // controls keep their own Show()/Hide() for what the settings need (the thumbnail sliders).
+    void BuildTabs(BRect frame) {
+        const float w = frame.Width();
+        for (int t = 0; t < kConfigTabCount; ++t) {
+            fPane[t] = new ConfigPane(BRect(20.0f, kConfigPaneTop, w - 20.0f, kConfigPaneTop + kConfigPaneHeight),
+                [this, t](BView* pane) { DrawPaneLabels(pane, t); });
+            AddChild(fPane[t]);
+        }
+        auto put = [this](BView* v, int tab, float x, float y) {
+            if (v == nullptr) return;
+            RemoveChild(v);
+            v->MoveTo(x - 20.0f, y);       // (the pane starts 20 px in from the window's edge)
+            fPane[tab]->AddChild(v);
+        };
+        // a dropdown: the field, then its overlay (on top of it)
+        auto putField = [this, &put](BMenuField* field, int tab, float x, float y) {
+            BView* overlay = nullptr;
+            for (int32 i = 0; i < CountChildren(); ++i) {
+                PillMenuFieldOverlay* candidate = dynamic_cast<PillMenuFieldOverlay*>(ChildAt(i));
+                if (candidate != nullptr && candidate->Frame() == field->Frame()) { overlay = candidate; break; }
+            }
+            put(field, tab, x, y);
+            put(overlay, tab, x, y);
+        };
+        const float right = w - 35.0f;
+        (void)right;
+
+        // Dock
+        put(fAutoHideCheckbox, 0, 35.0f, 14.0f);
+        put(fAutoRaiseCheckbox, 0, 290.0f, 14.0f);
+        put(fTextOverlaysCheckbox, 0, 35.0f, 38.0f);
+        put(fTextOverlaysSDLCheckbox, 0, 35.0f, 58.0f);
+        putField(fDockLocationMenuField, 0, 145.0f, 64.0f);
+        put(fAlphaSlider, 0, 35.0f, 98.0f);
+        put(fIconSizeSlider, 0, 35.0f, 148.0f);
+        put(fIconZoomSlider, 0, 35.0f, 198.0f);
+        // Widgets
+        put(fClockCheckbox, 1, 35.0f, 14.0f);
+        put(fVolumeCheckbox, 1, 290.0f, 14.0f);
+        put(fCpuGraphCheckbox, 1, 35.0f, 38.0f);
+        put(fWorkspaceSwitcherCheckbox, 1, 290.0f, 38.0f);
+        put(fSystemTrayCheckbox, 1, 35.0f, 62.0f);
+        // Look
+        put(fRoundedEdgesCheckbox, 2, 35.0f, 14.0f);
+        put(fDrawerColorButton, 2, 76.0f, 52.0f);
+        put(fDrawerSystemColorsCheckbox, 2, 230.0f, 56.0f);
+        put(fDrawerTransparencySlider, 2, 395.0f, 38.0f);
+        put(fSelectorColorButton, 2, 76.0f, 88.0f);
+        put(fNavSystemColorsCheckbox, 2, 230.0f, 92.0f);
+        {   // the [?] marks, by where they were
+            BFont plain12(be_plain_font);
+            plain12.SetSize(12.0f);
+            std::vector<HelpMark*> marks;
+            for (int32 i = 0; i < CountChildren(); ++i)
+                if (HelpMark* mark = dynamic_cast<HelpMark*>(ChildAt(i))) marks.push_back(mark);
+            const float ys[3] = { 14.0f, 56.0f, 92.0f };
+            const float xs[3] = { 62.0f + plain12.StringWidth("Rounded Edges") + 6.0f,
+                256.0f + plain12.StringWidth("Use System Colors") + 6.0f, 256.0f + plain12.StringWidth("Use System Colors") + 6.0f };
+            for (size_t i = 0; i < marks.size() && i < 3; ++i) put(marks[i], 2, xs[i], ys[i]);
+        }
+        // Effects
+        putField(fEffectsMenuField, 3, 145.0f, 12.0f);
+        putField(fCloseEffectsMenuField, 3, 145.0f, 45.0f);
+        put(fEffectSpeedSlider, 3, 35.0f, 80.0f);
+        // Thumbnails
+        put(fThumbnailsCheckbox, 4, 35.0f, 14.0f);
+        put(fThumbnailSizeSlider, 4, 35.0f, 50.0f);
+        putField(fThumbnailModeField, 4, 280.0f, 100.0f);
+        put(fAdvancedCheckbox, 4, 35.0f, 132.0f);
+        put(fThumbnailFpsSlider, 4, 35.0f, 152.0f);
+
+        for (int t = 1; t < kConfigTabCount; ++t) fPane[t]->Hide();
+    }
+
+    // The labels of a tab, drawn on its pane at the places of its controls (see BuildTabs(); x as in the window, 20 px from the pane's
+    // own left edge).
+    void DrawPaneLabels(BView* v, int tab) {
+        v->SetFont(be_plain_font);
+        v->SetFontSize(12.0f);
+        v->SetHighColor(rgb_color{220, 225, 235, 255});
+        const float dx = -20.0f;
+        auto text = [&](const char* label, float x, float y) { v->DrawString(label, BPoint(x + dx, y)); };
+        switch (tab) {
+            case 0:
+                text("Enable Auto-Hide", 62.0f, 26.0f);
+                text("Enable Auto-Raise", 317.0f, 26.0f);
+                text("Title Overlays: Haiku Mode", 62.0f, 50.0f);
+                text("Dock Location:", 35.0f, 82.0f);
+                break;
+            case 1:
+                text("Show Clock", 62.0f, 26.0f);
+                text("Show Volume", 317.0f, 26.0f);
+                text("Show CPU Graph", 62.0f, 50.0f);
+                text("Show Workspace Switcher", 317.0f, 50.0f);
+                text("Enable System Tray", 62.0f, 74.0f);
+                break;
+            case 2: {
+                text("Rounded Edges", 62.0f, 26.0f);
+                // the two colours in use, beside their buttons (they follow a colour as it is chosen)
+                const rgb_color rim = rgb_color{110, 115, 130, 255};
+                BRect drawerSwatch(30.0f + dx, 50.0f, 62.0f + dx, 78.0f), selectorSwatch(30.0f + dx, 86.0f, 62.0f + dx, 114.0f);
+                v->SetDrawingMode(B_OP_COPY);
+                v->SetHighColor(DrawerFill());
+                v->FillRoundRect(drawerSwatch, 5.0f, 5.0f);
+                v->SetHighColor(rim);
+                v->StrokeRoundRect(drawerSwatch, 5.0f, 5.0f);
+                v->SetHighColor(NavAccentColor());
+                v->FillRoundRect(selectorSwatch, 5.0f, 5.0f);
+                v->SetHighColor(rim);
+                v->StrokeRoundRect(selectorSwatch, 5.0f, 5.0f);
+                v->SetHighColor(rgb_color{220, 225, 235, 255});
+                text("Use System Colors", 256.0f, 68.0f);
+                text("Use System Colors", 256.0f, 104.0f);
+                break;
+            }
+            case 3:
+                text("Open App Effects:", 35.0f, 29.0f);
+                text("Close App Effects:", 35.0f, 62.0f);
+                break;
+            case 4: {
+                text("Enable Window Preview Thumbnails", 62.0f, 26.0f);
+                BFont expFont(be_plain_font);
+                expFont.SetSize(10.0f);
+                expFont.SetFace(B_ITALIC_FACE);
+                v->SetFont(&expFont);
+                v->SetHighColor(rgb_color{140, 150, 170, 255});
+                text("(Experimental) app_server compositing not required but some features are limited.", 62.0f, 40.0f);
+                v->SetFont(be_plain_font);
+                v->SetFontSize(12.0f);
+                v->SetHighColor(rgb_color{220, 225, 235, 255});
+                if (fShowWindowThumbnails) {
+                    text("Show thumbnails only when windows are:", 38.0f, 117.0f);
+                    text("Advanced Thumbnail Settings", 62.0f, 144.0f);
+                }
+                break;
+            }
+        }
+    }
+
+    void SetTab(int32 tab) {
+        if (tab < 0 || tab >= kConfigTabCount || tab == fTab) return;
+        fPane[fTab]->Hide();
+        fTab = tab;
+        if (fPane[fTab]->IsHidden()) fPane[fTab]->Show();
+        Invalidate();
     }
 
 
@@ -3175,118 +3382,69 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         GetMouse(&cursorPoint, &transitButtons, false);
         SetDrawingMode(B_OP_ALPHA);
 
-        // 3. Define the Interactive "Shutdown hDesktop" Button Metrics (COMPRESSED)
-        BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
+        // 3. The two buttons of the header, side by side: Shutdown hDesktop and About hdesktop
+        {
+            const BRect shutdownBtnRect = ConfigShutdownRect(canvasWidth);
+            if (shutdownBtnRect.Contains(cursorPoint)) {
+                SetHighColor(rgb_color{220, 60, 60, 45});
+                FillRect(shutdownBtnRect);
+                SetHighColor(rgb_color{255, 90, 90, 255});
+            } else {
+                SetHighColor(rgb_color{35, 36, 42, 255});
+                FillRect(shutdownBtnRect);
+                SetHighColor(rgb_color{210, 100, 100, 255});
+            }
+            StrokeRect(shutdownBtnRect);
+            SetFont(be_bold_font);
+            SetFontSize(12.0f);
+            BString shutdownText("Shutdown hDesktop");
+            DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - StringWidth(shutdownText.String())) / 2.0f,
+                shutdownBtnRect.top + 16.0f));
 
-        if (shutdownBtnRect.Contains(cursorPoint)) {
-            SetHighColor(rgb_color{220, 60, 60, 45});
-            FillRect(shutdownBtnRect);
-            SetHighColor(rgb_color{255, 90, 90, 255});
-        } else {
-            SetHighColor(rgb_color{35, 36, 42, 255});
-            FillRect(shutdownBtnRect);
-            SetHighColor(rgb_color{210, 100, 100, 255});
+            const BRect aboutBtnRect = ConfigAboutRect(canvasWidth);
+            if (aboutBtnRect.Contains(cursorPoint)) {
+                SetHighColor(rgb_color{60, 90, 220, 45});
+                FillRect(aboutBtnRect);
+                SetHighColor(rgb_color{120, 150, 255, 255});
+            } else {
+                SetHighColor(rgb_color{35, 36, 42, 255});
+                FillRect(aboutBtnRect);
+                SetHighColor(rgb_color{90, 110, 210, 255});
+            }
+            StrokeRect(aboutBtnRect);
+            BString aboutText("About hdesktop");
+            DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - StringWidth(aboutText.String())) / 2.0f,
+                aboutBtnRect.top + 16.0f));
         }
-        StrokeRect(shutdownBtnRect);
 
-        SetFont(be_bold_font);
-        SetFontSize(12.0f);
-        BString shutdownText("Shutdown hDesktop");
-        float shutdownTextW = StringWidth(shutdownText.String());
-        DrawString(shutdownText.String(), BPoint(shutdownBtnRect.left + (shutdownBtnRect.Width() - shutdownTextW) / 2.0f, 66.0f));
-
-        // 4. Define the "About hdesktop" Button Layout (Y: 82 to 106)
-        BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
-
-        if (aboutBtnRect.Contains(cursorPoint)) {
-            // Hover state: Muted blue background (matching the 45 alpha layout) and bright blue text
-            SetHighColor(rgb_color{60, 90, 220, 45});
-            FillRect(aboutBtnRect);
-            SetHighColor(rgb_color{120, 150, 255, 255}); // Bright hover blue
-        } else {
-            // Normal state: Dark background and standard medium blue text
-            SetHighColor(rgb_color{35, 36, 42, 255});
-            FillRect(aboutBtnRect);
-            SetHighColor(rgb_color{90, 110, 210, 255});  // Standard medium blue
+        // 4. The tab bar
+        {
+            SetFont(be_plain_font);
+            SetFontSize(12.0f);
+            font_height tabFh;
+            GetFontHeight(&tabFh);
+            for (int t = 0; t < kConfigTabCount; ++t) {
+                const BRect tabRect = ConfigTabRect(t, canvasWidth);
+                const bool selected = (t == fTab);
+                SetDrawingMode(B_OP_COPY);
+                SetHighColor(selected ? rgb_color{36, 30, 62, 255} : rgb_color{30, 31, 37, 255});
+                FillRoundRect(tabRect, 4.0f, 4.0f);
+                SetHighColor(selected ? rgb_color{145, 30, 252, 255} : rgb_color{60, 62, 72, 255});
+                StrokeRoundRect(tabRect, 4.0f, 4.0f);
+                SetHighColor(selected ? rgb_color{235, 225, 255, 255} : rgb_color{170, 176, 190, 255});
+                const char* name = kConfigTabNames[t];
+                DrawString(name, BPoint(floorf(tabRect.left + (tabRect.Width() - StringWidth(name)) / 2.0f),
+                    floorf(tabRect.top + (tabRect.Height() + tabFh.ascent - tabFh.descent) / 2.0f)));
+            }
+            SetDrawingMode(B_OP_ALPHA);
         }
-        StrokeRect(aboutBtnRect);
 
-
-        // 5. Draw the Text centered inside the button
-        SetFont(be_bold_font);
-        SetFontSize(12.0f);
-        BString aboutText("About hdesktop");
-        float aboutTextW = StringWidth(aboutText.String());
-        DrawString(aboutText.String(), BPoint(aboutBtnRect.left + (aboutBtnRect.Width() - aboutTextW) / 2.0f, 98.0f));
-
-		// 6. BALANCED BACKING CONTAINER
+        // 5. The backing container of the controls
         SetHighColor(rgb_color{24, 24, 28, 255});
-        BRect checkboxTrayRect(20.0f, 115.0f, canvasWidth - 20.0f, ConfigContentBottom());
+        BRect checkboxTrayRect(20.0f, kConfigTabBarBottom + 6.0f, canvasWidth - 20.0f, ConfigContentBottom());
         FillRoundRect(checkboxTrayRect, 4.0f, 4.0f);
         SetHighColor(rgb_color{48, 50, 58, 255});
         StrokeRoundRect(checkboxTrayRect, 4.0f, 4.0f);
-
-		// Draw Checkbox Labels manually with guaranteed light text color
-        SetFont(be_plain_font);
-        SetFontSize(12.0f);
-        SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Enable Auto-Hide", BPoint(62.0f, 134.0f));
-        DrawString("Enable System Tray", BPoint(62.0f, 154.0f));
-        DrawString("Enable Auto-Raise", BPoint(62.0f, 174.0f));
-        DrawString("Show Clock", BPoint(317.0f, 134.0f));
-        DrawString("Show Volume", BPoint(317.0f, 154.0f));
-        DrawString("Show CPU Graph", BPoint(317.0f, 174.0f));
-        DrawString("Title Overlays: Haiku Mode", BPoint(62.0f, 194.0f));
-        DrawString("Show Workspace Switcher", BPoint(317.0f, 194.0f));
-        DrawString("Rounded Edges", BPoint(62.0f, 234.0f));
-        {   // the two colours in use, beside their buttons (they follow a colour as it is chosen)
-            const rgb_color rim = rgb_color{110, 115, 130, 255};
-            BRect drawerSwatch(30.0f, 260.0f, 62.0f, 288.0f), selectorSwatch(30.0f, 296.0f, 62.0f, 324.0f);
-            SetDrawingMode(B_OP_COPY);
-            SetHighColor(DrawerFill());
-            FillRoundRect(drawerSwatch, 5.0f, 5.0f);
-            SetHighColor(rim);
-            StrokeRoundRect(drawerSwatch, 5.0f, 5.0f);
-            SetHighColor(NavAccentColor());
-            FillRoundRect(selectorSwatch, 5.0f, 5.0f);
-            SetHighColor(rim);
-            StrokeRoundRect(selectorSwatch, 5.0f, 5.0f);
-            SetHighColor(rgb_color{220, 225, 235, 255});
-            DrawString("Use System Colors", BPoint(256.0f, 280.0f));
-            DrawString("Use System Colors", BPoint(256.0f, 316.0f));
-        }
-        DrawString("Enable Window Preview Thumbnails", BPoint(62.0f, 649.0f));
-
-        // Smaller, italicized note under the Thumbnails checkbox -- the row
-        // below it (Row 7, Advanced Thumbnail Settings) was shifted down
-        // another 20px, same as every row from there on, to make room.
-        BFont expFont(be_plain_font);
-        expFont.SetSize(10.0f);
-        expFont.SetFace(B_ITALIC_FACE);
-        SetFont(&expFont);
-        SetHighColor(rgb_color{140, 150, 170, 255});
-        DrawString("(Experimental) app_server compositing not required but some features are limited.",
-            BPoint(62.0f, 663.0f));
-
-        // Reset back to plain before the rest of this method's labels --
-        // otherwise every DrawString() below would inherit the 9pt italic.
-        SetFont(be_plain_font);
-        SetFontSize(12.0f);
-        SetHighColor(rgb_color{220, 225, 235, 255});
-
-        // Kept in sync with the checkbox's own Show()/Hide() state -- only
-        // meaningful while Window Preview Thumbnails above is enabled.
-        if (fShowWindowThumbnails) {
-            DrawString("Advanced Thumbnail Settings", BPoint(62.0f, 757.0f));
-        }
-        DrawString("Dock Location:", BPoint(35.0f, 347.0f));
-
-        // Draw Open and Close Effect labels manually with guaranteed light text color
-        SetFont(be_plain_font);
-        SetFontSize(12.0f);
-        SetHighColor(rgb_color{220, 225, 235, 255});
-        DrawString("Open App Effects:", BPoint(35.0f, 379.0f));
-        DrawString("Close App Effects:", BPoint(35.0f, 412.0f));
 
         // Reset font back to plain for buttons/other elements
         SetFont(be_plain_font);
@@ -3323,8 +3481,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* message) {
         const float w = Bounds().Width(), h = Bounds().Height();
         const BRect buttons[3] = {
-            BRect(25.0f, 50.0f, w - 25.0f, 74.0f),                                   // Shutdown hDesktop
-            BRect(25.0f, 82.0f, w - 25.0f, 106.0f),                                  // About hdesktop
+            ConfigShutdownRect(w),                                                   // Shutdown hDesktop
+            ConfigAboutRect(w),                                                      // About hdesktop
             BRect((w - 100.0f) / 2.0f, h - 45.0f, (w + 100.0f) / 2.0f, h - 18.0f)    // Close
         };
         int32 now = -1;
@@ -3353,10 +3511,18 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         float canvasWidth = Bounds().Width();
         float canvasHeight = Bounds().Height();
 
-        BRect shutdownBtnRect(25.0f, 50.0f, canvasWidth - 25.0f, 74.0f);
-        BRect aboutBtnRect(25.0f, 82.0f, canvasWidth - 25.0f, 106.0f);
+        BRect shutdownBtnRect = ConfigShutdownRect(canvasWidth);
+        BRect aboutBtnRect = ConfigAboutRect(canvasWidth);
         BRect closeBtnRect((canvasWidth - 100.0f) / 2.0f, canvasHeight - 45.0f,
                            (canvasWidth + 100.0f) / 2.0f, canvasHeight - 18.0f);
+
+        // a tab of the tab bar
+        for (int t = 0; t < kConfigTabCount; ++t) {
+            if (ConfigTabRect(t, canvasWidth).Contains(point)) {
+                SetTab(t);
+                return;
+            }
+        }
 
         // Check if Shutdown button was clicked
         if (shutdownBtnRect.Contains(point)) {
@@ -3399,6 +3565,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fAdvancedCheckbox->SetTarget(this);
         fThumbnailFpsSlider->SetTarget(this);
         fThumbnailSizeSlider->SetTarget(this);
+        fThumbnailModeField->Menu()->SetTargetForItems(this);
         fWorkspaceSwitcherCheckbox->SetTarget(this);
         fRoundedEdgesCheckbox->SetTarget(this);
         fSelectorColorButton->SetTarget(this);
@@ -3495,6 +3662,11 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 } else if (!fShowWindowThumbnails && !fThumbnailSizeSlider->IsHidden()) {
                     fThumbnailSizeSlider->Hide();
                 }
+                if (fShowWindowThumbnails && fThumbnailModeField->IsHidden()) {
+                    fThumbnailModeField->Show();
+                } else if (!fShowWindowThumbnails && !fThumbnailModeField->IsHidden()) {
+                    fThumbnailModeField->Hide();
+                }
                 FitWindowToContent();
                 SaveConfiguration();
                 Invalidate();
@@ -3523,6 +3695,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 BString thumbnailFpsLabel;
                 thumbnailFpsLabel << "Thumbnail Preview FPS: " << fThumbnailCaptureFps;
                 fThumbnailFpsSlider->SetLabel(thumbnailFpsLabel.String());
+                SaveConfiguration();
+                break;
+            }
+
+            case MSG_THUMBNAIL_MODE_CHANGED: {
+                int32 mode = kThumbsMinimized;
+                if (message->FindInt32("mode", &mode) == B_OK) gThumbnailMode = std::max<int32>(0, std::min<int32>(2, mode));
                 SaveConfiguration();
                 break;
             }
@@ -11980,9 +12159,9 @@ void SyncDockWithRunningDeskbarApps() {
 			    // engine's whole coordinate space is set up to match the desktop
 			    // 1:1 -- see the gluOrtho2D call in main()), so it can be handed
 			    // straight to the popup for anchoring.
-			    // (On a composited desktop there is no preview popup of a window that can be seen: only the cards for minimized
-			    // windows in the title list below.)
-			    if (fShowWindowThumbnails && haveActiveTaskWinThumbnailFrame && !ThumbnailCardsOn()) {
+			    // (The preview popup of a window that can be seen is there with Restored or Both in the settings; the cards for minimized
+			    // windows are in the title list below.)
+			    if (ThumbnailPreviewOn() && haveActiveTaskWinThumbnailFrame) {
 			        // Lazy, one-time: only the first thumbnail a session actually
 			        // shows pays for BDirectWindow setup/verification -- see
 			        // SetupDirectCaptureIfNeeded()'s own comment for why this isn't
@@ -13538,6 +13717,7 @@ void SaveConfiguration() {
             settingsMsg.AddBool("advanced_options", fShowAdvancedOptions);
             settingsMsg.AddInt32("thumbnail_fps", fThumbnailCaptureFps);
             settingsMsg.AddInt32("thumbnail_size", fThumbnailSize);
+            settingsMsg.AddInt32("thumbnail_mode", gThumbnailMode);
             settingsMsg.AddBool("workspace_switcher", fShowWorkspaceSwitcher);
             settingsMsg.AddInt32("nav_accent", (static_cast<int32>(gNavAccent.red) << 16) |
                 (static_cast<int32>(gNavAccent.green) << 8) | static_cast<int32>(gNavAccent.blue));
@@ -13609,6 +13789,7 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("window_thumbnails", &valBool) == B_OK) fShowWindowThumbnails = valBool;
                 if (settingsMsg.FindBool("advanced_options", &valBool) == B_OK) fShowAdvancedOptions = valBool;
                 if (settingsMsg.FindInt32("thumbnail_fps", &valInt32) == B_OK) fThumbnailCaptureFps = valInt32;
+                if (settingsMsg.FindInt32("thumbnail_mode", &valInt32) == B_OK) gThumbnailMode = std::max<int32>(0, std::min<int32>(2, valInt32));
                 if (settingsMsg.FindInt32("thumbnail_size", &valInt32) == B_OK) {
                     fThumbnailSize = std::max<int32>(120, std::min<int32>(360, valInt32));
                 }
