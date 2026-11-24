@@ -3274,10 +3274,10 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         put(fEffectSpeedSlider, 3, 35.0f, 80.0f);
         // Thumbnails
         put(fThumbnailsCheckbox, 4, 35.0f, 14.0f);
-        put(fThumbnailSizeSlider, 4, 35.0f, 50.0f);
-        putField(fThumbnailModeField, 4, 280.0f, 100.0f);
-        put(fAdvancedCheckbox, 4, 35.0f, 132.0f);
-        put(fThumbnailFpsSlider, 4, 35.0f, 152.0f);
+        put(fThumbnailSizeSlider, 4, 35.0f, 104.0f);
+        putField(fThumbnailModeField, 4, 290.0f, 62.0f);
+        put(fAdvancedCheckbox, 4, 35.0f, 162.0f);
+        put(fThumbnailFpsSlider, 4, 35.0f, 184.0f);
 
         for (int t = 1; t < kConfigTabCount; ++t) fPane[t]->Hide();
     }
@@ -3339,8 +3339,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 v->SetFontSize(12.0f);
                 v->SetHighColor(rgb_color{220, 225, 235, 255});
                 if (fShowWindowThumbnails) {
-                    text("Show thumbnails only when windows are:", 38.0f, 117.0f);
-                    text("Advanced Thumbnail Settings", 62.0f, 144.0f);
+                    text("Show thumbnails only when windows are:", 38.0f, 79.0f);
+                    text("Advanced Thumbnail Settings", 62.0f, 174.0f);
                 }
                 break;
             }
@@ -5703,6 +5703,7 @@ struct ThumbnailCaptureArgs {
     int32 windowToken = -1;    // the window's app_server token, for ReadWindowPixelsFromServer(); -1: none
     int32 boxWidth = 0;        // the box the picture is scaled to fit (0: the thumbnail setting's)
     int32 boxHeight = 0;
+    bool offscreen = false;    // the window is on another workspace: its place on the screen shows other windows (never read the screen)
 };
 
 // (gServerWindowRead and ThumbnailCardsOn() are declared at the top of the file, by ThumbnailMaxWidth().)
@@ -5886,6 +5887,7 @@ private:
     BRect fWindowFrame;        // the target window's on-screen frame to capture (screen coords) -- write-once
     team_id fTeam;
     int32 fServerToken;        // the window's app_server token (-1: none), for the RenkuOS read of its pixels
+    bool fOffscreen;           // the window is on another workspace
     bool fCaptureInFlight;
     bigtime_t fLastCaptureTime;
     // True while some other app's window covers the target (see
@@ -5897,12 +5899,12 @@ private:
 
 public:
     ThumbnailPreviewWindow(BPoint anchorScreenPoint, HaikuRect anchorIconRect,
-        team_id team, BRect windowFrame, bool initiallyOccluded, int32 serverToken = -1)
+        team_id team, BRect windowFrame, bool initiallyOccluded, int32 serverToken = -1, bool offscreen = false)
         : BWindow(BRect(0, 0, 10, 10), "Window Preview",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                   B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
           fTicker(nullptr), fView(nullptr), fAnchorIconRect(anchorIconRect),
-          fWindowFrame(windowFrame), fTeam(team), fServerToken(serverToken),
+          fWindowFrame(windowFrame), fTeam(team), fServerToken(serverToken), fOffscreen(offscreen),
           fCaptureInFlight(false), fLastCaptureTime(0), fOccluded(initiallyOccluded) {
 
         float panelW = ThumbnailMaxWidth() + 8.0f;
@@ -5988,6 +5990,7 @@ public:
         args->targetMessenger = BMessenger(this);
         args->windowFrame = fWindowFrame;
         args->windowToken = fServerToken;
+        args->offscreen = fOffscreen;
 
         thread_id captureThread = spawn_thread(ThumbnailCaptureThreadFunc,
             "hdesktop_thumb_capture", B_LOW_PRIORITY, args);
@@ -6747,6 +6750,31 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
     if (args != nullptr) {
         BRect windowFrame = args->windowFrame;
 
+        if (args->offscreen && !gCompositor) {
+            // a window of another workspace, without a compositor: the last picture hdesktop took of it while it was shown there
+            std::vector<uint8_t> cached;
+            int32 cachedWidth = 0, cachedHeight = 0;
+            {
+                BAutolock lock(gWindowPicturesLock);
+                std::map<int32, WindowPicture>::iterator it = gWindowPictures.find(args->windowToken);
+                if (it != gWindowPictures.end() && !it->second.bits.empty()) {
+                    cached = it->second.bits;
+                    cachedWidth = it->second.width;
+                    cachedHeight = it->second.height;
+                }
+            }
+            if (!cached.empty()) {
+                BMessage resultMsg('thbm');
+                resultMsg.AddInt32("token", args->windowToken);
+                resultMsg.AddInt32("width", cachedWidth);
+                resultMsg.AddInt32("height", cachedHeight);
+                resultMsg.AddData("pixels", B_RAW_TYPE, cached.data(), cached.size());
+                args->targetMessenger.SendMessage(&resultMsg);
+            }
+            delete args;
+            return B_OK;
+        }
+
         {   // RenkuOS: the window's own pixels from app_server, scaled down there to the box the popup shows
             std::vector<uint8_t> pixels;
             int32 pixelsWidth = 0, pixelsHeight = 0;
@@ -6761,6 +6789,11 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                 delete args;
                 return B_OK;
             }
+        }
+
+        if (args->offscreen) {          // (nothing of it to read: a read of the screen would show other windows)
+            delete args;
+            return B_OK;
         }
 
         if (windowFrame.IsValid() && windowFrame.Width() >= 2.0f && windowFrame.Height() >= 2.0f) {
@@ -7001,7 +7034,7 @@ public:
 
 private:
     void Tick() {
-        if (!ThumbnailCardsOn() || gCompositor || be_app == nullptr) return;
+        if (!fShowWindowThumbnails || gCompositor || be_app == nullptr) return;
         const bigtime_t now = system_time();
         if (fInFlight && now - fInFlightSince > 5000000) fInFlight = false;     // (a capture that gave no answer)
         if (fInFlight) return;
@@ -11016,7 +11049,7 @@ void SyncDockWithRunningDeskbarApps() {
 
 	    {   // without a compositor the pictures of the cards come from reads of the screen: the fast path is set up once
 	        static bool sPictureCaptureSetupAttempted = false;
-	        if (!sPictureCaptureSetupAttempted && ThumbnailCardsOn() && !gCompositor) {
+	        if (!sPictureCaptureSetupAttempted && fShowWindowThumbnails && !gCompositor) {
 	            sPictureCaptureSetupAttempted = true;
 	            SetupDirectCaptureIfNeeded();
 	        }
@@ -12161,6 +12194,31 @@ void SyncDockWithRunningDeskbarApps() {
 			    // straight to the popup for anchoring.
 			    // (The preview popup of a window that can be seen is there with Restored or Both in the settings; the cards for minimized
 			    // windows are in the title list below.)
+			    bool previewOffscreen = false;
+			    if (ThumbnailPreviewOn() && !haveActiveTaskWinThumbnailFrame) {
+			        // An app whose windows are all on other workspaces: the first of them that is not minimized (its picture is the
+			        // one app_server or hdesktop kept of it, not a read of the screen)
+			        std::vector<team_id> previewTeams = activeTaskWin.Teams();
+			        for (size_t pt = 0; pt < previewTeams.size() && !haveActiveTaskWinThumbnailFrame; ++pt) {
+			            int32 otherCount = 0;
+			            int32* otherTokens = get_token_list(previewTeams[pt], &otherCount);
+			            if (otherTokens == nullptr) continue;
+			            for (int32 o = 0; o < otherCount && !haveActiveTaskWinThumbnailFrame; ++o) {
+			                client_window_info* other = get_window_info(otherTokens[o]);
+			                if (other == nullptr) continue;
+			                if (other->feel == B_NORMAL_WINDOW_FEEL && !other->is_mini && other->show_hide_level == 0
+			                        && (other->workspaces & (1 << currentWorkspace)) == 0 && other->name[0] != '\0') {
+			                    activeTaskWinThumbnailFrame.Set(other->window_left, other->window_top, other->window_right, other->window_bottom);
+			                    activeTaskWinThumbnailToken = other->server_token;
+			                    activeTaskWinThumbnailOccluded = false;
+			                    haveActiveTaskWinThumbnailFrame = true;
+			                    previewOffscreen = true;
+			                }
+			                free(other);
+			            }
+			            free(otherTokens);
+			        }
+			    }
 			    if (ThumbnailPreviewOn() && haveActiveTaskWinThumbnailFrame) {
 			        // Lazy, one-time: only the first thumbnail a session actually
 			        // shows pays for BDirectWindow setup/verification -- see
@@ -12186,7 +12244,7 @@ void SyncDockWithRunningDeskbarApps() {
 			                (iconBounds.top + iconBounds.bottom) / 2.0f);
 			            gActiveThumbnailPreview = new ThumbnailPreviewWindow(anchorScreenPoint, iconBounds,
 			                activeTaskWin.teamId, activeTaskWinThumbnailFrame, activeTaskWinThumbnailOccluded,
-			                activeTaskWinThumbnailToken);
+			                activeTaskWinThumbnailToken, previewOffscreen);
 			            gActiveThumbnailPreview->Show();
 			        } else {
 			            // Same popup, same app -- just tell it whether the target
