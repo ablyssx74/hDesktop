@@ -75,6 +75,9 @@
 // drawn offscreen with an alpha channel and shown in a native transparent window. Haiku without a compositor
 // keeps the old way: this is decided at run time (is_composited_desktop() is looked up by name).
 // ===========================================================================================================
+#ifndef B_TRANSPARENT_BACKGROUND
+#define B_TRANSPARENT_BACKGROUND 0x00040000UL   // RenkuOS only (a view that draws no background of its own: the parent is drawn behind it)
+#endif
 #ifndef B_TRANSPARENT_WINDOW
 #define B_TRANSPARENT_WINDOW 0x80000000   // RenkuOS only; on Haiku the flag does not exist (and the compositor path never runs)
 #endif
@@ -205,6 +208,10 @@ bool gNavUseSystemColors = false;
 bool gDrawerUseSystemColors = false;
 bool gDrawerColorAuto = true;
 rgb_color gDrawerColor = {185, 200, 234, 255};
+// Settings > Drawer Transparency (RenkuOS, where a window can be see-through): how see-through the drawer's panel is, in percent;
+// the icons and the text stay as they are. 0 is the opaque panel. Without a compositor there is nothing to see through.
+int gDrawerTransparency = 0;
+inline bool DrawerIsTranslucent() { return gCompositor && gDrawerTransparency > 0; }
 
 // The selector's colour in use: the chosen one, or Haiku's menu selection colour.
 inline rgb_color NavAccentColor() {
@@ -318,6 +325,7 @@ enum {
     MSG_SELECTOR_COLOR_UPDATED = 'slcu',
     MSG_DRAWER_COLOR_OPEN = 'drco',
     MSG_DRAWER_COLOR_UPDATED = 'drcu',
+    MSG_DRAWER_TRANSPARENCY_CHANGED = 'drtr',
     MSG_NAV_SYSTEM_COLORS_TOGGLED = 'nvsc',
     MSG_ROUNDED_EDGES_TOGGLED = 'rdge',
     MSG_DRAWER_SYSTEM_COLORS_TOGGLED = 'drsc',   // sent to the settings view so its swatch repaints
@@ -2750,6 +2758,7 @@ private:
     BCheckBox* fRoundedEdgesCheckbox;
     BButton*   fSelectorColorButton;
     BButton*   fDrawerColorButton;
+    BSlider*   fDrawerTransparencySlider = nullptr;
     BCheckBox* fNavSystemColorsCheckbox;
     BCheckBox* fDrawerSystemColorsCheckbox;
     BCheckBox* fThumbnailsCheckbox;
@@ -2867,6 +2876,17 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fDrawerSystemColorsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fDrawerSystemColorsCheckbox->SetValue(gDrawerUseSystemColors ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fDrawerSystemColorsCheckbox);
+        {   // the drawer panel's transparency, on the drawer colour's row (RenkuOS: elsewhere a window cannot be see-through)
+            BString label;
+            label.SetToFormat("Transparency: %d%%", static_cast<int>(gDrawerTransparency));
+            fDrawerTransparencySlider = new CompactSlider(BRect(395.0f, 250.0f, frame.Width() - 35.0f, 294.0f),
+                "drawer_alpha_slider", label.String(), new BMessage(MSG_DRAWER_TRANSPARENCY_CHANGED), 0, 80);
+            fDrawerTransparencySlider->SetHighColor(rgb_color{220, 225, 235, 255});
+            fDrawerTransparencySlider->SetValue(gDrawerTransparency);
+            fDrawerTransparencySlider->SetToolTip("How see-through the drawer's panel is (the icons and the text stay as they are).");
+            AddChild(fDrawerTransparencySlider);
+            if (!gCompositor) fDrawerTransparencySlider->Hide();
+        }
 
         fSelectorColorButton = new BButton(BRect(76.0f, 300.0f, 216.0f, 324.0f), "selector_color_btn",
             "Selector Color" B_UTF8_ELLIPSIS, new BMessage(MSG_SELECTOR_COLOR_OPEN));
@@ -3346,6 +3366,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fDrawerColorButton->SetTarget(this);
         fNavSystemColorsCheckbox->SetTarget(this);
         fDrawerSystemColorsCheckbox->SetTarget(this);
+        fDrawerTransparencySlider->SetTarget(this);
         fClockCheckbox->SetTarget(this);
         fVolumeCheckbox->SetTarget(this);
         fCpuGraphCheckbox->SetTarget(this);
@@ -3521,6 +3542,16 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 fSelectorColorButton->SetEnabled(!gNavUseSystemColors);
                 SaveConfiguration();
                 Invalidate();
+                break;
+            }
+
+            case MSG_DRAWER_TRANSPARENCY_CHANGED: {
+                gDrawerTransparency = std::min(80, std::max(0, static_cast<int>(fDrawerTransparencySlider->Value())));
+                BString label;
+                label.SetToFormat("Transparency: %d%%", static_cast<int>(gDrawerTransparency));
+                fDrawerTransparencySlider->SetLabel(label.String());
+                fDrawerTransparencySlider->Invalidate();
+                SaveConfiguration();
                 break;
             }
 
@@ -3950,7 +3981,11 @@ public:
     int32 fHoverIdx = -1;            // the one of them that drawing showed lit
 
     DrawerView(BRect frame) : BView(frame, "DrawerView", B_FOLLOW_ALL, B_WILL_DRAW), fSnake(NavUI::SnakeLookPreference()) {
-        if (fSnake)
+        if (fSnake && DrawerIsTranslucent()) {
+            // a see-through panel: this view draws no background (the panel behind it, drawn by DrawerFrameView, shows through)
+            SetViewColor(B_TRANSPARENT_COLOR);
+            SetFlags(Flags() | B_TRANSPARENT_BACKGROUND);
+        } else if (fSnake)
             SetViewColor(DrawerFill());
         else
             // Set a sleek matte background color that coordinates with your dark desktop setup
@@ -4067,9 +4102,11 @@ public:
         uint32 transitButtons;
         GetMouse(&cursorPoint, &transitButtons, false);
 
-        SetDrawingMode(B_OP_COPY);
-        SetHighColor(fill);
-        FillRect(Bounds());
+        if (!DrawerIsTranslucent()) {       // (a see-through panel keeps what the frame view drew behind this view)
+            SetDrawingMode(B_OP_COPY);
+            SetHighColor(fill);
+            FillRect(Bounds());
+        }
 
         // the title, in the middle of the header
         SetFont(be_bold_font);
@@ -4786,9 +4823,31 @@ public:
     static const int kCorner = 22;      // the corners' radius
 
     DrawerFrameView(BRect frame, BRect screenFrame)
-        : BView(frame, "DrawerFrame", B_FOLLOW_ALL, B_WILL_DRAW) {
+        : BView(frame, "DrawerFrame", B_FOLLOW_ALL, B_WILL_DRAW), fPanel(nullptr) {
         SetViewColor(DrawerFill());
         for (int i = 0; i < 4; ++i) fCorner[i] = nullptr;
+        if (DrawerIsTranslucent()) {
+            // On a composited desktop the window is see-through: the whole panel is one picture, the fill with its own alpha
+            // (not premultiplied) and the four corners cut out of it, so nothing of the screen behind has to be read.
+            SetViewColor(B_TRANSPARENT_COLOR);
+            const int w = static_cast<int>(frame.Width()) + 1, h = static_cast<int>(frame.Height()) + 1;
+            fPanel = new BBitmap(BRect(0, 0, w - 1, h - 1), B_RGBA32);
+            const rgb_color fillColor = DrawerFill();
+            const float opacity = 1.0f - gDrawerTransparency / 100.0f;
+            for (int py = 0; py < h; ++py) {
+                uint8* row = static_cast<uint8*>(fPanel->Bits()) + py * fPanel->BytesPerRow();
+                const float fy = std::min(py, h - 1 - py) + 0.5f;
+                for (int px = 0; px < w; ++px) {
+                    const float fx = std::min(px, w - 1 - px) + 0.5f;
+                    float cover = 1.0f;
+                    if (fx < kCorner && fy < kCorner)
+                        cover = NavUI::Clamp01(0.5f + kCorner - std::sqrt((kCorner - fx) * (kCorner - fx) + (kCorner - fy) * (kCorner - fy)));
+                    row[px * 4 + 0] = fillColor.blue; row[px * 4 + 1] = fillColor.green; row[px * 4 + 2] = fillColor.red;
+                    row[px * 4 + 3] = static_cast<uint8>(std::lround(255.0f * opacity * cover));
+                }
+            }
+            return;
+        }
         for (int i = 0; i < 4; ++i) {
             const bool right = (i & 1) != 0, bottom = (i & 2) != 0;
             const float x = right ? screenFrame.right - (kCorner - 1) : screenFrame.left;
@@ -4817,9 +4876,17 @@ public:
 
     ~DrawerFrameView() {
         for (int i = 0; i < 4; ++i) delete fCorner[i];
+        delete fPanel;
     }
 
-    virtual void Draw(BRect) {
+
+    virtual void Draw(BRect updateRect) {
+        if (fPanel != nullptr) {
+            SetDrawingMode(B_OP_COPY);
+            const BRect r = updateRect & fPanel->Bounds();
+            if (r.IsValid()) DrawBitmap(fPanel, r, r);
+            return;
+        }
         SetDrawingMode(B_OP_COPY);
         SetHighColor(DrawerFill());
         FillRect(Bounds());
@@ -4834,6 +4901,7 @@ public:
 
 private:
     BBitmap* fCorner[4];
+    BBitmap* fPanel;      // the see-through panel's picture (composited desktop), or nullptr
 };
 
 
@@ -4850,7 +4918,8 @@ public:
     HaikuAppDrawerWindow(float screenH)
         : BWindow(BRect(0, 0, 100, 100), "App Dashboard Menu",
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
-                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE),
+                  B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE
+                  | (NavUI::SnakeLookPreference() && DrawerIsTranslucent() ? (uint32)B_TRANSPARENT_WINDOW : 0u)),
           fHoverTicker(nullptr),
           fMouseHasEntered(false), // Initially false so it won't instant-close
           fLeftTime(0) {
@@ -4878,6 +4947,10 @@ public:
             DrawerView* drawerView = new DrawerView(inner);
             BScrollView* scrollView = new BScrollView("DashboardScroll", drawerView,
                 B_FOLLOW_ALL, 0, false, true, B_NO_BORDER);
+            if (DrawerIsTranslucent()) {
+                scrollView->SetViewColor(B_TRANSPARENT_COLOR);
+                scrollView->SetFlags(scrollView->Flags() | B_TRANSPARENT_BACKGROUND);
+            }
             panel->AddChild(scrollView);
         } else {
             BRect bounds = Bounds();
@@ -12971,6 +13044,7 @@ void SaveConfiguration() {
             settingsMsg.AddBool("drawer_color_auto", gDrawerColorAuto);
             settingsMsg.AddInt32("drawer_color", (static_cast<int32>(gDrawerColor.red) << 16) |
                 (static_cast<int32>(gDrawerColor.green) << 8) | static_cast<int32>(gDrawerColor.blue));
+            settingsMsg.AddInt32("drawer_transparency", gDrawerTransparency);
             settingsMsg.AddBool("show_clock", fShowClock);
             settingsMsg.AddBool("show_volume", fShowVolume);
             settingsMsg.AddBool("show_cpu_graph", fShowCpuGraph);
@@ -13048,6 +13122,8 @@ void LoadConfiguration() {
                     gDrawerColor = rgb_color{static_cast<uint8>((valInt32 >> 16) & 0xFF),
                         static_cast<uint8>((valInt32 >> 8) & 0xFF), static_cast<uint8>(valInt32 & 0xFF), 255};
                 }
+                if (settingsMsg.FindInt32("drawer_transparency", &valInt32) == B_OK)
+                    gDrawerTransparency = std::min(80, std::max(0, static_cast<int>(valInt32)));
                 if (settingsMsg.FindBool("show_clock", &valBool) == B_OK) fShowClock = valBool;
                 if (settingsMsg.FindBool("show_volume", &valBool) == B_OK) fShowVolume = valBool;
                 if (settingsMsg.FindBool("show_cpu_graph", &valBool) == B_OK) fShowCpuGraph = valBool;
