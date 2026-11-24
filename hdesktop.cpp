@@ -229,6 +229,14 @@ inline rgb_color NavAccentColor() {
 // Card width in px -- the "Thumbnail Size" slider's value; the height keeps
 // the original 200:140 proportions.
 int32 fThumbnailSize = 200;
+// RenkuOS: the compositor keeps every window's pixels in a buffer of its own, and app_server hands them out with
+// AS_READ_WINDOW_PIXELS ('RWpx'): the window as it is, scaled down to fit a size, also while other windows cover it, and a small
+// picture of a window that is minimized. An app_server that does not know the request answers B_ERROR; it is then not tried again
+// (0), and the screen is read as before. -1: not tried yet, 1: works.
+static std::atomic<int> gServerWindowRead(-1);
+// On a composited desktop the hover list shows a picture of each window that is minimized (like the Linux build's list), and
+// nothing for a window that can be seen: there is no preview popup of its own any more.
+inline bool ThumbnailCardsOn() { return fShowWindowThumbnails && gCompositor && gServerWindowRead.load() != 0; }
 inline float ThumbnailMaxWidth()  { return (float)fThumbnailSize; }
 inline float ThumbnailMaxHeight() { return (float)fThumbnailSize * 0.7f; }
 
@@ -366,10 +374,12 @@ struct TrackedWindowInfo {
     // entries with no real, individually addressable window (the Rakarrack
     // guard, the no-windows-found fallback).
     int32 serverToken;
+    // The window is minimized (its preview card shows a picture of it, on a composited desktop)
+    bool minimized;
 
     // Explicit constructor to fix brace-enclosed initialization failures
-    TrackedWindowInfo(BString t, BRect box, int32 token = -1)
-        : title(t), hitBox(box), serverToken(token) {}
+    TrackedWindowInfo(BString t, BRect box, int32 token = -1, bool mini = false)
+        : title(t), hitBox(box), serverToken(token), minimized(mini) {}
 };
 
 
@@ -821,7 +831,7 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
                         // its own server_token, so TitleListPreviewWindow can
                         // list and activate each one individually instead of
                         // being folded into a single combined summary line.
-                        outList.push_back(TrackedWindowInfo(subTitle, BRect(), wInfo->server_token));
+                        outList.push_back(TrackedWindowInfo(subTitle, BRect(), wInfo->server_token, wInfo->is_mini != 0));
                     }
                 }
             }
@@ -846,6 +856,31 @@ void GetTrackedWindowsFromTeam(team_id team, std::vector<TrackedWindowInfo>& out
 
 
 
+// Every minimized window of a team, on every workspace (the list above only sees the current one): marks the ones already in
+// `list` as minimized and adds the others.
+static void AppendMinimizedWindowsOfTeam(team_id team, std::vector<TrackedWindowInfo>& list) {
+    int32 count = 0;
+    int32* tokens = get_token_list(team, &count);
+    if (tokens == nullptr) return;
+    for (int32 i = 0; i < count; ++i) {
+        client_window_info* info = get_window_info(tokens[i]);
+        if (info == nullptr) continue;
+        if (info->is_mini && info->feel == B_NORMAL_WINDOW_FEEL && info->name[0] != '\0') {
+            bool found = false;
+            for (size_t k = 0; k < list.size(); ++k) {
+                if (list[k].serverToken == info->server_token) {
+                    list[k].minimized = true;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) list.push_back(TrackedWindowInfo(BString(info->name), BRect(), info->server_token, true));
+        }
+        free(info);
+    }
+    free(tokens);
+}
+
 // Window list for a whole taskbar entry -- every team of a grouped app.
 void GetTrackedWindowsForItem(const TaskbarItem& item, std::vector<TrackedWindowInfo>& outList) {
     outList.clear();
@@ -860,6 +895,9 @@ void GetTrackedWindowsForItem(const TaskbarItem& item, std::vector<TrackedWindow
             if (teamList[w].serverToken >= 0) outList.push_back(teamList[w]);
             else fallbacks.push_back(teamList[w]);
         }
+    }
+    if (ThumbnailCardsOn()) {      // the minimized windows of every workspace
+        for (size_t t = 0; t < teams.size(); ++t) AppendMinimizedWindowsOfTeam(teams[t], outList);
     }
     if (outList.empty() && !fallbacks.empty()) outList.push_back(fallbacks[0]);
 }
@@ -5482,7 +5520,60 @@ static void SetupDirectCaptureIfNeeded() {
 struct ThumbnailCaptureArgs {
     BMessenger targetMessenger;
     BRect windowFrame;
+    int32 windowToken = -1;    // the window's app_server token, for ReadWindowPixelsFromServer(); -1: none
 };
+
+// (gServerWindowRead and ThumbnailCardsOn() are declared at the top of the file, by ThumbnailMaxWidth().)
+
+// Fills `out` with width * height BGRA pixels. B_NOT_SUPPORTED when there is no such way (not composited, an app_server without
+// the request) or the window has no buffer (it is hidden: nothing to show); other errors are a window that is gone.
+static status_t ReadWindowPixelsFromServer(int32 token, int32 maxWidth, int32 maxHeight, std::vector<uint8_t>& out,
+    int32* _width, int32* _height) {
+    if (!gCompositor || token < 0 || maxWidth < 1 || maxHeight < 1 || gServerWindowRead.load() == 0)
+        return B_NOT_SUPPORTED;
+
+    const int32 bytesPerRow = maxWidth * 4;
+    const size_t size = ((size_t)bytesPerRow * maxHeight + B_PAGE_SIZE - 1) & ~((size_t)B_PAGE_SIZE - 1);
+    uint8* bits = nullptr;
+    area_id area = create_area("window pixels", (void**)&bits, B_ANY_ADDRESS, size, B_NO_LOCK,
+        B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA);
+    if (area < B_OK)
+        return area;
+
+    status_t status = B_ERROR;
+    int32 width = 0, height = 0;
+    {
+        BPrivate::AppServerLink link;
+        link.StartMessage('RWpx');
+        link.Attach<int32>(token);
+        link.Attach<area_id>(area);
+        link.Attach<int32>(bytesPerRow);
+        link.Attach<int32>(maxWidth);
+        link.Attach<int32>(maxHeight);
+        if (link.FlushWithReply(status) == B_OK && status == B_OK) {
+            link.Read<int32>(&width);
+            link.Read<int32>(&height);
+        }
+    }
+
+    if (status == B_ERROR) {                  // the answer of an app_server that does not know the request
+        gServerWindowRead.store(0);
+        delete_area(area);
+        return B_NOT_SUPPORTED;
+    }
+    if (status == B_OK && width > 0 && height > 0 && width <= maxWidth && height <= maxHeight) {
+        out.resize((size_t)width * height * 4);
+        for (int32 y = 0; y < height; ++y)
+            memcpy(out.data() + (size_t)y * width * 4, bits + (size_t)y * bytesPerRow, (size_t)width * 4);
+        gServerWindowRead.store(1);
+        *_width = width;
+        *_height = height;
+    } else if (status == B_OK) {
+        status = B_BAD_VALUE;
+    }
+    delete_area(area);
+    return status;
+}
 
 // Defined after ThumbnailPreviewWindow's own class body further down (kept
 // there alongside the rest of the capture machinery); forward-declared here
@@ -5612,6 +5703,7 @@ private:
     HaikuRect fAnchorIconRect; // the hovered taskbar icon's own screen-space bounds
     BRect fWindowFrame;        // the target window's on-screen frame to capture (screen coords) -- write-once
     team_id fTeam;
+    int32 fServerToken;        // the window's app_server token (-1: none), for the RenkuOS read of its pixels
     bool fCaptureInFlight;
     bigtime_t fLastCaptureTime;
     // True while some other app's window covers the target (see
@@ -5628,7 +5720,7 @@ public:
                   B_NO_BORDER_WINDOW_LOOK, B_FLOATING_ALL_WINDOW_FEEL,
                   B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AVOID_FOCUS),
           fTicker(nullptr), fView(nullptr), fAnchorIconRect(anchorIconRect),
-          fWindowFrame(windowFrame), fTeam(team),
+          fWindowFrame(windowFrame), fTeam(team), fServerToken(serverToken),
           fCaptureInFlight(false), fLastCaptureTime(0), fOccluded(initiallyOccluded) {
 
         float panelW = ThumbnailMaxWidth() + 8.0f;
@@ -5713,6 +5805,7 @@ public:
         ThumbnailCaptureArgs* args = new ThumbnailCaptureArgs();
         args->targetMessenger = BMessenger(this);
         args->windowFrame = fWindowFrame;
+        args->windowToken = fServerToken;
 
         thread_id captureThread = spawn_thread(ThumbnailCaptureThreadFunc,
             "hdesktop_thumb_capture", B_LOW_PRIORITY, args);
@@ -5809,6 +5902,55 @@ public:
 // TitleListPreviewView::MouseDown()'s own comment for why that first
 // attempt picked the wrong window. Nothing opens on its own by just
 // hovering; the user decides.
+// Whether two lists show the same: same windows (by token), titles and minimized state. (Not compared: hit boxes.)
+static bool SameWindowEntries(const std::vector<TrackedWindowInfo>& a, const std::vector<TrackedWindowInfo>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].serverToken != b[i].serverToken || a[i].minimized != b[i].minimized || a[i].title != b[i].title) return false;
+    }
+    return true;
+}
+
+// After a window is restored from the dock (a click on an icon, or on a card) the list does not open again for a moment: the windows
+// are still being unminimized, and it would show cards for them, and for some other window that is next in the restore.
+static bigtime_t gTitleListHoldOffUntil = 0;
+static inline void HoldOffTitleList() { gTitleListHoldOffUntil = system_time() + 1500000; }
+
+// How tall an entry of the list is: its title pill, and for a minimized window (on a composited desktop) a card with its picture below.
+static const float kCardPad = 4.0f;
+static float TitleEntryHeight(const TrackedWindowInfo& entry, float rowHeight) {
+    if (ThumbnailCardsOn() && entry.minimized) return rowHeight + kCardPad + ThumbnailMaxHeight() + kCardPad + 2.0f;
+    return rowHeight;
+}
+
+// Reads the pictures of the minimized windows of a list from app_server, one after the other, on a thread of its own (the pictures
+// are small and app_server has them ready, but it is a round trip each); every one is posted to the popup as 'tlth', and 'tlfd'
+// when all are done.
+struct TitleCardFetchArgs {
+    BMessenger target;
+    std::vector<int32> tokens;
+};
+
+static int32 TitleCardFetchThread(void* data) {
+    TitleCardFetchArgs* args = static_cast<TitleCardFetchArgs*>(data);
+    for (size_t i = 0; i < args->tokens.size(); ++i) {
+        std::vector<uint8_t> pixels;
+        int32 width = 0, height = 0;
+        BMessage message('tlth');
+        message.AddInt32("token", args->tokens[i]);
+        if (ReadWindowPixelsFromServer(args->tokens[i], (int32)ThumbnailMaxWidth(), (int32)ThumbnailMaxHeight(), pixels,
+                &width, &height) == B_OK) {
+            message.AddInt32("width", width);
+            message.AddInt32("height", height);
+            message.AddData("pixels", B_RAW_TYPE, pixels.data(), pixels.size());
+        }
+        args->target.SendMessage(&message);
+    }
+    args->target.SendMessage('tlfd');
+    delete args;
+    return B_OK;
+}
+
 class TitleListPreviewView : public BView {
 private:
     std::vector<TrackedWindowInfo> fEntries; // title/serverToken from the caller; hitBox recomputed every Draw()
@@ -5816,6 +5958,15 @@ private:
     int32 fHoveredRow;
     float fRowHeight;
     BBitmap* fBackdrop; // the screen behind the popup, see CaptureScreenBehind()
+
+    // The picture of each minimized window shown as a card (by server token). `requested`: its fetch was started; `failed`: the
+    // window has no picture (nothing is shown but a note).
+    struct CardPicture {
+        BBitmap* bitmap = nullptr;
+        bool requested = false;
+        bool failed = false;
+    };
+    std::map<int32, CardPicture> fPictures;
 
 public:
     TitleListPreviewView(BRect frame, team_id team, const std::vector<TrackedWindowInfo>& entries, float rowHeight)
@@ -5827,6 +5978,40 @@ public:
 
     virtual ~TitleListPreviewView() {
         delete fBackdrop;
+        for (std::map<int32, CardPicture>::iterator it = fPictures.begin(); it != fPictures.end(); ++it) delete it->second.bitmap;
+    }
+
+    // The minimized windows whose picture has not been asked for yet; they count as asked for from now on.
+    std::vector<int32> TakePendingTokens() {
+        std::vector<int32> tokens;
+        for (size_t i = 0; i < fEntries.size(); ++i) {
+            if (!ThumbnailCardsOn() || !fEntries[i].minimized || fEntries[i].serverToken < 0) continue;
+            CardPicture& picture = fPictures[fEntries[i].serverToken];
+            if (picture.requested) continue;
+            picture.requested = true;
+            tokens.push_back(fEntries[i].serverToken);
+        }
+        return tokens;
+    }
+
+    // `bits` are BGRA pixels; none (width 0): the window has no picture. Window must be locked.
+    void SetPicture(int32 token, const uint8* bits, int32 width, int32 height) {
+        CardPicture& picture = fPictures[token];
+        delete picture.bitmap;
+        picture.bitmap = nullptr;
+        picture.failed = true;
+        if (bits != nullptr && width > 0 && height > 0) {
+            BBitmap* bitmap = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGBA32);
+            if (bitmap->IsValid()) {
+                for (int32 y = 0; y < height; ++y)
+                    memcpy(static_cast<uint8*>(bitmap->Bits()) + (size_t)y * bitmap->BytesPerRow(), bits + (size_t)y * width * 4, (size_t)width * 4);
+                picture.bitmap = bitmap;
+                picture.failed = false;
+            } else {
+                delete bitmap;
+            }
+        }
+        Invalidate();
     }
 
     // Takes ownership. Window must be locked (or not yet shown).
@@ -5843,8 +6028,22 @@ public:
     // workspace) -- keeps the same popup instance and its hover state
     // instead of tearing it down and rebuilding it every refresh.
     void UpdateEntries(const std::vector<TrackedWindowInfo>& entries) {
+        const bool same = SameWindowEntries(entries, fEntries);
+        if (same) return;
         fEntries = entries;
         if (fHoveredRow >= static_cast<int32>(fEntries.size())) fHoveredRow = -1;
+        // a window that is not minimized any more (or gone) has no picture here: asked again if it is minimized later
+        for (std::map<int32, CardPicture>::iterator it = fPictures.begin(); it != fPictures.end();) {
+            bool still = false;
+            for (size_t i = 0; i < fEntries.size(); ++i)
+                if (fEntries[i].serverToken == it->first && fEntries[i].minimized) still = true;
+            if (still) {
+                ++it;
+            } else {
+                delete it->second.bitmap;
+                it = fPictures.erase(it);
+            }
+        }
         Invalidate();
     }
 
@@ -5880,10 +6079,11 @@ public:
         const rgb_color hotColor = NavUI::PillHot();
         const rgb_color dark = rgb_color{20, 22, 28, 255};
 
+        float top = 0.0f;
         for (size_t i = 0; i < fEntries.size(); ++i) {
-            float top = (float)i * (fRowHeight + kTitlePillGap);
+            const float entryHeight = TitleEntryHeight(fEntries[i], fRowHeight);
             BRect rowRect(0.0f, top, bounds.Width(), top + fRowHeight - 1.0f);
-            fEntries[i].hitBox = rowRect;
+            fEntries[i].hitBox = BRect(0.0f, top, bounds.Width(), top + entryHeight - 1.0f);   // the whole card is the click target
 
             bool hovered = (static_cast<int32>(i) == fHoveredRow);
             rgb_color fill = hovered ? hotColor : pillColor;
@@ -5905,6 +6105,38 @@ public:
             if (textLeft < 4.0f) textLeft = 4.0f;
             DrawString(truncTitle.String(),
                 BPoint(textLeft, rowRect.top + fh.ascent + ((rowRect.Height() + 1.0f - (fh.ascent + fh.descent)) / 2.0f)));
+
+            if (entryHeight > fRowHeight) {
+                // a minimized window: its picture on a card under the title
+                BRect card(0.0f, rowRect.bottom + kCardPad, bounds.Width(), top + entryHeight - 1.0f);
+                const float cardR = gNavRoundedEdges ? 8.0f : 0.0f;
+                SetDrawingMode(B_OP_ALPHA);
+                SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+                SetHighColor(rgb_color{18, 20, 26, 230});
+                FillRoundRect(card, cardR, cardR);
+                if (hovered) {
+                    SetHighColor(hotColor);
+                    SetPenSize(2.0f);
+                    StrokeRoundRect(card.InsetByCopy(1.0f, 1.0f), cardR, cardR);
+                    SetPenSize(1.0f);
+                }
+                SetDrawingMode(B_OP_COPY);
+                std::map<int32, CardPicture>::iterator picture = fPictures.find(fEntries[i].serverToken);
+                if (picture != fPictures.end() && picture->second.bitmap != nullptr) {
+                    BBitmap* bitmap = picture->second.bitmap;
+                    const BRect inner = card.InsetByCopy(kCardPad, kCardPad);
+                    const float bw = bitmap->Bounds().Width() + 1.0f, bh = bitmap->Bounds().Height() + 1.0f;
+                    const float left = floorf(inner.left + (inner.Width() + 1.0f - bw) / 2.0f);
+                    const float topPicture = floorf(inner.top + (inner.Height() + 1.0f - bh) / 2.0f);
+                    DrawBitmap(bitmap, BPoint(left, topPicture));
+                } else if (picture != fPictures.end() && picture->second.failed) {
+                    SetHighColor(rgb_color{150, 156, 172, 255});
+                    const char* note = "No preview";
+                    DrawString(note, BPoint(floorf((bounds.Width() - font.StringWidth(note)) / 2.0f),
+                        floorf(card.top + (card.Height() + fh.ascent - fh.descent) / 2.0f)));
+                }
+            }
+            top += entryHeight + kTitlePillGap;
         }
     }
 
@@ -5917,8 +6149,11 @@ public:
             }
         }
         if (newHover != fHoveredRow) {
+            const int32 old = fHoveredRow;
             fHoveredRow = newHover;
-            Invalidate();
+            // only the two cards that change (the pill and the card's frame): the rest is not drawn again
+            if (old >= 0 && old < (int32)fEntries.size()) Invalidate(fEntries[old].hitBox);
+            if (newHover >= 0) Invalidate(fEntries[newHover].hitBox);
         }
     }
 
@@ -5946,6 +6181,7 @@ public:
     virtual void MouseDown(BPoint point) {
         for (size_t i = 0; i < fEntries.size(); ++i) {
             if (fEntries[i].hitBox.Contains(point)) {
+                HoldOffTitleList();
                 if (fEntries[i].serverToken >= 0) {
                     do_window_action(fEntries[i].serverToken, B_BRING_TO_FRONT, BRect(), false);
                 } else {
@@ -5975,6 +6211,9 @@ private:
     float fStackOffset;
     float fRequestedStackOffset = 0.0f; // render thread's own copy, to skip redundant posts
     std::vector<TrackedWindowInfo> fLastEntries;
+    bool fFetchingPictures = false;   // the thread that reads the pictures of the cards is running
+    std::vector<TrackedWindowInfo> fPostedEntries;   // what UpdateEntries() last posted (render thread only)
+    bool fPostedEntriesValid = false;
     BRect fBackdropFrame; // where the view's backdrop was captured
     bool fBackdropTried = false;
     // Width auto-sizes to the widest title (see ResizeAndReposition()),
@@ -6008,6 +6247,7 @@ public:
         fView = new TitleListPreviewView(Bounds(), team, entries, fRowHeight);
         AddChild(fView);
         UpdateBackdrop();
+        RequestPictures();
 
         // Self-closing poll, same 100ms cadence and relevance check as
         // WorkspacePreviewWindow's own 'tick' -- no reason for this one to
@@ -6023,6 +6263,23 @@ public:
     }
 
     team_id Team() const { return fTeam; }
+
+    // Starts reading the pictures of the minimized windows that have none yet (one thread for all of them at a time).
+    void RequestPictures() {
+        if (fFetchingPictures || fView == nullptr) return;
+        std::vector<int32> tokens = fView->TakePendingTokens();
+        if (tokens.empty()) return;
+        TitleCardFetchArgs* args = new TitleCardFetchArgs();
+        args->target = BMessenger(this);
+        args->tokens = tokens;
+        thread_id thread = spawn_thread(TitleCardFetchThread, "hdesktop_card_pictures", B_LOW_PRIORITY, args);
+        if (thread >= B_OK) {
+            fFetchingPictures = true;
+            resume_thread(thread);
+        } else {
+            delete args;
+        }
+    }
 
     // Sizes and positions this window for a given set of entries, anchored
     // the same way the constructor originally placed it (horizontally
@@ -6048,7 +6305,13 @@ public:
     void ResizeAndReposition(const std::vector<TrackedWindowInfo>& entries) {
         fLastEntries = entries;
         size_t rowCount = entries.empty() ? 1 : entries.size();
-        float panelH = fRowHeight * (float)rowCount + kTitlePillGap * (float)(rowCount - 1); // one pill per row
+        float panelH = 0.0f;                      // one pill per row, and a card under the pill of a minimized window
+        for (size_t i = 0; i < entries.size(); ++i) panelH += TitleEntryHeight(entries[i], fRowHeight);
+        if (entries.empty()) panelH = fRowHeight;
+        panelH += kTitlePillGap * (float)(rowCount - 1);
+        bool anyCard = false;
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (TitleEntryHeight(entries[i], fRowHeight) > fRowHeight) anyCard = true;
 
         BFont font(be_plain_font);
         font.SetSize(11.0f);
@@ -6060,6 +6323,7 @@ public:
         float panelW = widestTitle + fRowHeight + 4.0f; // room for the pills' round ends, as Draw() truncates
         if (panelW < kMinPanelWidth) panelW = kMinPanelWidth;
         if (panelW > kMaxPanelWidth) panelW = kMaxPanelWidth;
+        if (anyCard) panelW = std::max(panelW, ThumbnailMaxWidth() + 2.0f * kCardPad + 2.0f);   // wide enough for the pictures
 
         BScreen screen(this);
         BRect screenFrame = screen.Frame();
@@ -6082,8 +6346,10 @@ public:
         if (targetY < 10.0f) targetY = 10.0f;
         if (targetY + panelH > screenFrame.bottom - 10.0f) targetY = screenFrame.bottom - 10.0f - panelH;
 
-        MoveTo(targetX, targetY);
-        ResizeTo(panelW, panelH);
+        // (not when it is already there: a move or a resize makes app_server draw the window again)
+        const BRect now = Frame();
+        if (fabsf(now.left - targetX) > 0.5f || fabsf(now.top - targetY) > 0.5f) MoveTo(targetX, targetY);
+        if (fabsf(now.Width() - panelW) > 0.5f || fabsf(now.Height() - panelH) > 0.5f) ResizeTo(panelW, panelH);
         UpdateBackdrop();
     }
 
@@ -6138,6 +6404,10 @@ public:
     // to another app), so a raw pointer hand-off is fine -- MessageReceived
     // takes ownership and deletes it.
     void UpdateEntries(const std::vector<TrackedWindowInfo>& entries) {
+        // (called on every frame the pointer is on the icon: nothing is posted, resized or repainted when nothing changed)
+        if (fPostedEntriesValid && SameWindowEntries(entries, fPostedEntries)) return;
+        fPostedEntries = entries;
+        fPostedEntriesValid = true;
         BMessage msg('tlup');
         msg.AddPointer("entries", new std::vector<TrackedWindowInfo>(entries));
         PostMessage(&msg);
@@ -6166,7 +6436,27 @@ public:
                     fView->UpdateEntries(*entries);
                 }
                 delete entries;
+                RequestPictures();
             }
+            return;
+        }
+        if (message->what == 'tlth') {         // the picture of one minimized window (none: it has no picture)
+            int32 token = -1;
+            if (message->FindInt32("token", &token) == B_OK && fView != nullptr) {
+                const void* bits = nullptr;
+                ssize_t size = 0;
+                int32 width = 0, height = 0;
+                if (message->FindData("pixels", B_RAW_TYPE, &bits, &size) == B_OK && message->FindInt32("width", &width) == B_OK
+                        && message->FindInt32("height", &height) == B_OK && size >= (ssize_t)width * height * 4)
+                    fView->SetPicture(token, static_cast<const uint8*>(bits), width, height);
+                else
+                    fView->SetPicture(token, nullptr, 0, 0);
+            }
+            return;
+        }
+        if (message->what == 'tlfd') {         // all the pictures asked for are in
+            fFetchingPictures = false;
+            RequestPictures();
             return;
         }
         if (message->what == 'tltk') {
@@ -6178,7 +6468,17 @@ public:
                 ChildAt(0)->GetMouse(&screenMousePos, &buttons, false);
                 ChildAt(0)->ConvertToScreen(&screenMousePos);
 
-                bool stillRelevant = Frame().Contains(screenMousePos) ||
+                // The popup, the icon (and 40 px above and below it), and the strip between them as wide as both together: going from
+                // the icon to the popup on a slant, or to a card at the far end of a wide popup, must not close it on the way.
+                const BRect popup = Frame();
+                const float left = std::min(popup.left, fAnchorIconRect.left), right = std::max(popup.right, fAnchorIconRect.right);
+                bool betweenIconAndPopup = false;
+                if (popup.bottom <= fAnchorIconRect.top)          // a popup above the icon (bottom dock)
+                    betweenIconAndPopup = screenMousePos.y >= popup.bottom - 4.0f && screenMousePos.y <= fAnchorIconRect.top + 4.0f;
+                else if (popup.top >= fAnchorIconRect.bottom)     // a popup below the icon (top dock)
+                    betweenIconAndPopup = screenMousePos.y >= fAnchorIconRect.bottom - 4.0f && screenMousePos.y <= popup.top + 4.0f;
+                betweenIconAndPopup = betweenIconAndPopup && screenMousePos.x >= left && screenMousePos.x <= right;
+                bool stillRelevant = popup.Contains(screenMousePos) || betweenIconAndPopup ||
                     (screenMousePos.x >= fAnchorIconRect.left && screenMousePos.x <= fAnchorIconRect.right &&
                      screenMousePos.y >= fAnchorIconRect.top - 40.0f && screenMousePos.y <= fAnchorIconRect.bottom + 40.0f);
 
@@ -6241,6 +6541,21 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
     if (args != nullptr) {
         BRect windowFrame = args->windowFrame;
 
+        {   // RenkuOS: the window's own pixels from app_server, scaled down there to the box the popup shows
+            std::vector<uint8_t> pixels;
+            int32 pixelsWidth = 0, pixelsHeight = 0;
+            if (ReadWindowPixelsFromServer(args->windowToken, (int32)ThumbnailMaxWidth(), (int32)ThumbnailMaxHeight(), pixels,
+                    &pixelsWidth, &pixelsHeight) == B_OK) {
+                BMessage resultMsg('thbm');
+                resultMsg.AddInt32("width", pixelsWidth);
+                resultMsg.AddInt32("height", pixelsHeight);
+                resultMsg.AddData("pixels", B_RAW_TYPE, pixels.data(), pixels.size());
+                args->targetMessenger.SendMessage(&resultMsg);
+                delete args;
+                return B_OK;
+            }
+        }
+
         if (windowFrame.IsValid() && windowFrame.Width() >= 2.0f && windowFrame.Height() >= 2.0f) {
             BScreen screen(B_MAIN_SCREEN_ID);
             if (screen.IsValid()) {
@@ -6289,7 +6604,7 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                 bool wholeWindowOnScreen = screenFrame.Contains(windowFrame.LeftTop())
                     && screenFrame.Contains(windowFrame.RightBottom());
 
-                if (downscale && wholeWindowOnScreen
+                if (downscale && wholeWindowOnScreen && !gCompositor
                         && gDirectCaptureVerified.load(std::memory_order_acquire)) {
                     // Fast path: read exactly the dstWidth x dstHeight pixels
                     // this thumbnail will actually show, straight out of the
@@ -9632,6 +9947,15 @@ void SyncDockWithRunningDeskbarApps() {
 	                }
 
 
+	                // No list of minimized windows while this restores them. Closed here, before any AppServerLink below exists:
+	                // closing the popup waits for its thread, which may be waiting for the app_server connection (to make a
+	                // picture), and an AppServerLink holds that connection until it goes out of scope.
+	                HoldOffTitleList();
+	                if (gActiveTitleListPreview != nullptr) {
+	                    if (gActiveTitleListPreview->Lock()) gActiveTitleListPreview->Quit();
+	                    gActiveTitleListPreview = nullptr;
+	                }
+
 	                // For a grouped app, the team that ends up focused is the one
 	                // used most recently if it belongs to the group; the others
 	                // are brought forward first so it lands on top.
@@ -11234,6 +11558,10 @@ void SyncDockWithRunningDeskbarApps() {
 		        }
 		    }
 
+		    // On a composited desktop app_server hands out the window's own pixels, covered or not.
+		    if (gCompositor && gServerWindowRead.load() != 0)
+		        activeTaskWinThumbnailOccluded = false;
+
 		    // Deduce if the application's graphical canvas is completely folded down
 		    bool appIsGenuinelyMinimized = false;
 		    if (isTracker) {
@@ -11489,13 +11817,15 @@ void SyncDockWithRunningDeskbarApps() {
 			    // engine's whole coordinate space is set up to match the desktop
 			    // 1:1 -- see the gluOrtho2D call in main()), so it can be handed
 			    // straight to the popup for anchoring.
-			    if (fShowWindowThumbnails && haveActiveTaskWinThumbnailFrame) {
+			    // (On a composited desktop there is no preview popup of a window that can be seen: only the cards for minimized
+			    // windows in the title list below.)
+			    if (fShowWindowThumbnails && haveActiveTaskWinThumbnailFrame && !ThumbnailCardsOn()) {
 			        // Lazy, one-time: only the first thumbnail a session actually
 			        // shows pays for BDirectWindow setup/verification -- see
 			        // SetupDirectCaptureIfNeeded()'s own comment for why this isn't
 			        // done unconditionally at startup instead.
 			        static bool sDirectCaptureSetupAttempted = false;
-			        if (!sDirectCaptureSetupAttempted) {
+			        if (!sDirectCaptureSetupAttempted && !gCompositor) {   // (not on a composited desktop: the pixels come from app_server)
 			            sDirectCaptureSetupAttempted = true;
 			            SetupDirectCaptureIfNeeded();
 			        }
@@ -11542,7 +11872,17 @@ void SyncDockWithRunningDeskbarApps() {
 			    // the other. Gap: thumbnail panel height + 8px margin each side.
 			    float titleStackOffset = (gActiveThumbnailPreview != nullptr)
 			        ? (ThumbnailMaxHeight() + 8.0f) + 16.0f : 0.0f;
-			    if (fShowTitleOverlaysHaiku && !fCurrentWindowsList.empty()) {
+			    // The list: every window with title overlays on. With cards (a composited desktop, thumbnails on) the minimized ones
+			    // are in it, each with its picture, also when the overlays are off.
+			    std::vector<TrackedWindowInfo> popupEntries;
+			    if (ThumbnailCardsOn()) {
+			        for (size_t e = 0; e < fCurrentWindowsList.size(); ++e)
+			            if (fShowTitleOverlaysHaiku || fCurrentWindowsList[e].minimized) popupEntries.push_back(fCurrentWindowsList[e]);
+			    } else if (fShowTitleOverlaysHaiku) {
+			        popupEntries = fCurrentWindowsList;
+			    }
+			    if (system_time() < gTitleListHoldOffUntil) popupEntries.clear();      // a restore is going on
+			    if (!popupEntries.empty()) {
 			        if (gActiveTitleListPreview == nullptr ||
 			            gActiveTitleListPreview->Team() != activeTaskWin.teamId) {
 			            if (gActiveTitleListPreview != nullptr) {
@@ -11554,13 +11894,13 @@ void SyncDockWithRunningDeskbarApps() {
 
 			            BPoint anchorScreenPoint(listBaseX, listBaseY);
 			            gActiveTitleListPreview = new TitleListPreviewWindow(anchorScreenPoint, iconBounds,
-			                activeTaskWin.teamId, fCurrentWindowsList, titleStackOffset);
+			                activeTaskWin.teamId, popupEntries, titleStackOffset);
 			            gActiveTitleListPreview->Show();
 			        } else {
 			            // Same popup, same app -- just refresh its list in place
 			            // (a window may have opened/closed/moved workspace since
 			            // the last 300ms refresh) instead of tearing it down.
-			            gActiveTitleListPreview->UpdateEntries(fCurrentWindowsList);
+			            gActiveTitleListPreview->UpdateEntries(popupEntries);
 			            gActiveTitleListPreview->SetStackOffset(titleStackOffset);
 			        }
 			    } else if (gActiveTitleListPreview != nullptr) {
