@@ -234,9 +234,10 @@ int32 fThumbnailSize = 200;
 // picture of a window that is minimized. An app_server that does not know the request answers B_ERROR; it is then not tried again
 // (0), and the screen is read as before. -1: not tried yet, 1: works.
 static std::atomic<int> gServerWindowRead(-1);
-// On a composited desktop the hover list shows a picture of each window that is minimized (like the Linux build's list), and
-// nothing for a window that can be seen: there is no preview popup of its own any more.
-inline bool ThumbnailCardsOn() { return fShowWindowThumbnails && gCompositor && gServerWindowRead.load() != 0; }
+// The hover list shows a picture of each window that is minimized (like the Linux build's list), and nothing for a window that can
+// be seen: there is no preview popup of its own any more. On a composited desktop the pictures come from app_server; without one
+// (Haiku) from the last pictures hdesktop took of the windows while they could be seen (WindowPictureKeeper, a frozen last frame).
+inline bool ThumbnailCardsOn() { return fShowWindowThumbnails && (!gCompositor || gServerWindowRead.load() != 0); }
 inline float ThumbnailMaxWidth()  { return (float)fThumbnailSize; }
 inline float ThumbnailMaxHeight() { return (float)fThumbnailSize * 0.7f; }
 
@@ -5521,6 +5522,8 @@ struct ThumbnailCaptureArgs {
     BMessenger targetMessenger;
     BRect windowFrame;
     int32 windowToken = -1;    // the window's app_server token, for ReadWindowPixelsFromServer(); -1: none
+    int32 boxWidth = 0;        // the box the picture is scaled to fit (0: the thumbnail setting's)
+    int32 boxHeight = 0;
 };
 
 // (gServerWindowRead and ThumbnailCardsOn() are declared at the top of the file, by ThumbnailMaxWidth().)
@@ -5913,6 +5916,15 @@ static bool SameWindowEntries(const std::vector<TrackedWindowInfo>& a, const std
 
 // After a window is restored from the dock (a click on an icon, or on a card) the list does not open again for a moment: the windows
 // are still being unminimized, and it would show cards for them, and for some other window that is next in the restore.
+// Without a compositor: the last picture taken of each window while it could be seen, by the window's server token.
+struct WindowPicture {
+    std::vector<uint8_t> bits;     // BGRA
+    int32 width = 0, height = 0;
+    bigtime_t at = 0;
+};
+static std::map<int32, WindowPicture> gWindowPictures;
+static BLocker gWindowPicturesLock("hdesktop window pictures");
+
 static bigtime_t gTitleListHoldOffUntil = 0;
 static inline void HoldOffTitleList() { gTitleListHoldOffUntil = system_time() + 1500000; }
 
@@ -5938,8 +5950,21 @@ static int32 TitleCardFetchThread(void* data) {
         int32 width = 0, height = 0;
         BMessage message('tlth');
         message.AddInt32("token", args->tokens[i]);
-        if (ReadWindowPixelsFromServer(args->tokens[i], (int32)ThumbnailMaxWidth() - 4, (int32)ThumbnailMaxHeight() - 4, pixels,
-                &width, &height) == B_OK) {
+        bool got = false;
+        if (gCompositor) {
+            got = ReadWindowPixelsFromServer(args->tokens[i], (int32)ThumbnailMaxWidth() - 4, (int32)ThumbnailMaxHeight() - 4, pixels,
+                &width, &height) == B_OK;
+        } else {            // the last picture taken while the window could be seen
+            BAutolock lock(gWindowPicturesLock);
+            std::map<int32, WindowPicture>::iterator it = gWindowPictures.find(args->tokens[i]);
+            if (it != gWindowPictures.end() && !it->second.bits.empty()) {
+                pixels = it->second.bits;
+                width = it->second.width;
+                height = it->second.height;
+                got = true;
+            }
+        }
+        if (got) {
             message.AddInt32("width", width);
             message.AddInt32("height", height);
             message.AddData("pixels", B_RAW_TYPE, pixels.data(), pixels.size());
@@ -6549,6 +6574,7 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
             if (ReadWindowPixelsFromServer(args->windowToken, (int32)ThumbnailMaxWidth(), (int32)ThumbnailMaxHeight(), pixels,
                     &pixelsWidth, &pixelsHeight) == B_OK) {
                 BMessage resultMsg('thbm');
+                resultMsg.AddInt32("token", args->windowToken);
                 resultMsg.AddInt32("width", pixelsWidth);
                 resultMsg.AddInt32("height", pixelsHeight);
                 resultMsg.AddData("pixels", B_RAW_TYPE, pixels.data(), pixels.size());
@@ -6592,8 +6618,9 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                 // fit the box natively; dstWidth/dstHeight is what it'll
                 // actually be drawn at either way, so there's nothing lost
                 // by only ever capturing and sending that many pixels.
-                float scale = std::min(ThumbnailMaxWidth() / (float)fullWidth,
-                    ThumbnailMaxHeight() / (float)fullHeight);
+                const float boxW = args->boxWidth > 0 ? (float)args->boxWidth : ThumbnailMaxWidth();
+                const float boxH = args->boxHeight > 0 ? (float)args->boxHeight : ThumbnailMaxHeight();
+                float scale = std::min(boxW / (float)fullWidth, boxH / (float)fullHeight);
                 bool downscale = scale < 1.0f;
                 int32 dstWidth  = downscale ? std::max((int32)1, (int32)(fullWidth * scale + 0.5f)) : fullWidth;
                 int32 dstHeight = downscale ? std::max((int32)1, (int32)(fullHeight * scale + 0.5f)) : fullHeight;
@@ -6634,6 +6661,7 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                     }
 
                     BMessage resultMsg('thbm');
+                resultMsg.AddInt32("token", args->windowToken);
                     resultMsg.AddInt32("width", dstWidth);
                     resultMsg.AddInt32("height", dstHeight);
                     resultMsg.AddData("pixels", B_RAW_TYPE, smallPixels.data(), smallPixels.size());
@@ -6714,6 +6742,7 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
                     }
 
                     BMessage resultMsg('thbm');
+                resultMsg.AddInt32("token", args->windowToken);
                     if (downscale) {
                         // Reached here because either the fast path above
                         // wasn't safe to take (window not fully on-screen, or
@@ -6748,6 +6777,121 @@ static int32 ThumbnailCaptureThreadFunc(void* data) {
     delete args;
     return B_OK;
 }
+
+
+// Without a compositor (Haiku) nothing can give the picture of a window that is minimized: its pixels are on no screen. So hdesktop
+// takes a picture of the windows that can be seen, one window a second in turn (each at most every few seconds), with the capture
+// above, and keeps the last one of each; the hover list shows it on the card of the window once that is minimized (a frozen last
+// frame). Does nothing while the thumbnails are off or on a composited desktop (app_server gives the pictures there).
+class WindowPictureKeeper : public BLooper {
+public:
+    WindowPictureKeeper() : BLooper("hdesktop window pictures"), fRunner(nullptr), fInFlight(false), fInFlightSince(0), fNext(0), fTicks(0) {
+        Run();
+        BMessage tick('pktk');
+        fRunner = new BMessageRunner(BMessenger(this), &tick, 1000000);
+    }
+    virtual ~WindowPictureKeeper() { delete fRunner; }
+
+    virtual void MessageReceived(BMessage* message) {
+        switch (message->what) {
+            case 'pktk':
+                Tick();
+                break;
+            case 'thbm': {          // a capture is done
+                fInFlight = false;
+                int32 token = -1, width = 0, height = 0;
+                const void* bits = nullptr;
+                ssize_t size = 0;
+                if (message->FindInt32("token", &token) == B_OK && message->FindInt32("width", &width) == B_OK
+                        && message->FindInt32("height", &height) == B_OK
+                        && message->FindData("pixels", B_RAW_TYPE, &bits, &size) == B_OK && token >= 0 && size >= (ssize_t)width * height * 4) {
+                    BAutolock lock(gWindowPicturesLock);
+                    WindowPicture& picture = gWindowPictures[token];
+                    picture.bits.assign(static_cast<const uint8_t*>(bits), static_cast<const uint8_t*>(bits) + (size_t)width * height * 4);
+                    picture.width = width;
+                    picture.height = height;
+                    picture.at = system_time();
+                }
+                break;
+            }
+            default:
+                BLooper::MessageReceived(message);
+                break;
+        }
+    }
+
+private:
+    void Tick() {
+        if (!ThumbnailCardsOn() || gCompositor || be_app == nullptr) return;
+        const bigtime_t now = system_time();
+        if (fInFlight && now - fInFlightSince > 5000000) fInFlight = false;     // (a capture that gave no answer)
+        if (fInFlight) return;
+
+        const int32 workspace = current_workspace();
+        int32* tokens = nullptr;
+        int32 count = 0;
+        BPrivate::get_window_order(workspace, &tokens, &count);
+        if (tokens != nullptr && count > 0) {
+            const team_id own = be_app->Team();
+            for (int32 n = 0; n < count; ++n) {
+                const int32 i = (fNext + n) % count;
+                client_window_info* info = get_window_info(tokens[i]);
+                if (info == nullptr) continue;
+                const bool candidate = info->team != own && info->feel == B_NORMAL_WINDOW_FEEL && !info->is_mini
+                    && info->show_hide_level == 0 && (info->workspaces & (1 << workspace)) != 0 && info->layer > 0
+                    && (info->window_right - info->window_left) >= 80 && (info->window_bottom - info->window_top) >= 60;
+                const BRect frame(info->window_left, info->window_top, info->window_right, info->window_bottom);
+                const int32 token = info->server_token;
+                free(info);
+                if (!candidate) continue;
+                {
+                    BAutolock lock(gWindowPicturesLock);
+                    std::map<int32, WindowPicture>::iterator it = gWindowPictures.find(token);
+                    if (it != gWindowPictures.end() && now - it->second.at < 6000000) continue;      // a picture of it, not old
+                }
+                if (IsThumbnailCandidateOccluded(tokens, i, frame, workspace, own)) continue;       // (another window is on it)
+
+                ThumbnailCaptureArgs* args = new ThumbnailCaptureArgs();
+                args->targetMessenger = BMessenger(this);
+                args->windowFrame = frame;
+                args->windowToken = token;
+                args->boxWidth = (int32)ThumbnailMaxWidth() - 4;      // (what fits inside the card)
+                args->boxHeight = (int32)ThumbnailMaxHeight() - 4;
+                thread_id thread = spawn_thread(ThumbnailCaptureThreadFunc, "hdesktop_picture_keeper", B_LOW_PRIORITY, args);
+                if (thread >= B_OK) {
+                    fInFlight = true;
+                    fInFlightSince = now;
+                    fNext = i + 1;
+                    resume_thread(thread);
+                } else {
+                    delete args;
+                }
+                break;
+            }
+        }
+        if (tokens != nullptr) free(tokens);
+
+        if (++fTicks % 10 == 0) {          // pictures of windows that are gone
+            BAutolock lock(gWindowPicturesLock);
+            for (std::map<int32, WindowPicture>::iterator it = gWindowPictures.begin(); it != gWindowPictures.end();) {
+                client_window_info* info = get_window_info(it->first);
+                if (info == nullptr) {
+                    it = gWindowPictures.erase(it);
+                } else {
+                    free(info);
+                    ++it;
+                }
+            }
+        }
+    }
+
+    BMessageRunner* fRunner;
+    bool fInFlight;
+    bigtime_t fInFlightSince;
+    int32 fNext;
+    int32 fTicks;
+};
+static WindowPictureKeeper* gPictureKeeper = nullptr;
 
 
 // =========================================================================
@@ -8719,6 +8863,15 @@ void SyncDockWithRunningDeskbarApps() {
 	        if (screen.GetBitmap(&bm, false, &r) != B_OK || bm == nullptr) return;
 	        sAddTile(bm, r);   // takes the picture
 	    }
+	    // A menu whose submenus are made by the program itself (the CPU graph's menu: they cannot take their own pictures as they open):
+	    // begin a chain and take the whole screen, so that the picture behind each level, wherever it opens, is there.
+	    static void BeginAll(BMenu* menu) {
+	        Find();
+	        if (sBeginChain == nullptr || sAddTile == nullptr || sWantsTile == nullptr) return;
+	        sBeginChain(AnyMenu);
+	        if (!sWantsTile(menu)) return;
+	        Tile(BScreen(B_MAIN_SCREEN_ID).Frame());
+	    }
 	    // menu is about to open with its top left at where: begin a chain, take the screen behind it and a strip to its right (submenus)
 	    static void Begin(BMenu* menu, BPoint where) {
 	        Find();
@@ -10681,6 +10834,14 @@ void SyncDockWithRunningDeskbarApps() {
 	    // 1. STEP POSIX TIMING ENGINES AND KERNEL RECORD SAMPLES
 	    // =========================================================================
 	    SyncDockWithRunningDeskbarApps();
+
+	    {   // without a compositor the pictures of the cards come from reads of the screen: the fast path is set up once
+	        static bool sPictureCaptureSetupAttempted = false;
+	        if (!sPictureCaptureSetupAttempted && ThumbnailCardsOn() && !gCompositor) {
+	            sPictureCaptureSetupAttempted = true;
+	            SetupDirectCaptureIfNeeded();
+	        }
+	    }
 
 	    UpdateLiveClockTexture();
 	    UpdateGlobalCpuLoadTracker();
@@ -13624,6 +13785,9 @@ void AsyncCpuMenuRunner::_DisplayCPUGraphMenu() {
     // Notice we use Go(..., false, false) intentionally here!
     // Since this method runs exclusively within our separate worker looper window thread,
     // blocking synchronously here is completely safe and won't lock your main SDL loop.
+    // With SnakeTracker's look in all programs, the menu is drawn in the pill look (the raised lit row, the rounded corners) only when
+    // the control look has the screen behind it; the Tracker icon's menu hands it over, and so does this one now.
+    HaikuGlDesktopEngine::SnakeMenuTiles::BeginAll(pcMenu);
     BMenuItem* chosenAction = pcMenu->Go(screenClickPoint, false, false);
 
     // FIX: Release the safety shield flag instantly when the menu collapses or a selection finishes
@@ -14128,6 +14292,8 @@ int main(int argc, char* argv[]) {
     int localMouseY = 0;
     uint32 nativeButtons = 0;
     bool cursorIsInsideDock = false;
+
+    gPictureKeeper = new WindowPictureKeeper();      // (without a compositor: the pictures for the cards of minimized windows)
 
     while (appExecuting) {
         if (SDL_WaitEventTimeout(&incomingEventPackage, (gCompositor && needsRender) ? 8 : 30)) {
