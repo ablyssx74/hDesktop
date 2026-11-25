@@ -32,6 +32,7 @@
 #include <Directory.h>
 #include <Entry.h>
 #include <File.h>
+#include <AppFileInfo.h>
 #include <FindDirectory.h>
 #include <KernelExport.h>
 #include <Font.h>
@@ -2488,7 +2489,7 @@ static std::map<int32, std::string> TrayItemAppFiles() {
             if (imageUsed[k]) continue;
             size_t slash = images[k].rfind('/');
             std::string base = (slash == std::string::npos) ? images[k] : images[k].substr(slash + 1);
-            if (base == items[i].second) {
+            if (strcasecmp(base.c_str(), items[i].second.c_str()) == 0) {
                 result[items[i].first] = images[k];
                 imageUsed[k] = true;
                 found = true;
@@ -2624,6 +2625,14 @@ struct TrayForwardArgs {
     float screenY;
 };
 
+// How many tray items are drawn: an item with no picture (no icon found) takes no room, so it leaves no blank space.
+static size_t TrayDrawnItemCount() {
+    size_t count = 0;
+    for (size_t i = 0; i < fLiveTrayItems.size(); ++i)
+        if (fLiveTrayItems[i].textureId != 0) ++count;
+    return count;
+}
+
 // A tray icon's picture, kept sharp when the dock zooms it. Like the clock (rasterized large once, drawn smaller), the icon is
 // taken from the app's vector icon at kTrayIconSource pixels, not blown up from the 16 pixel mini icon, and its picture is
 // uploaded with mipmaps, so a zoom or the plain size scales it down from that picture. The color of the see-through pixels
@@ -2662,10 +2671,22 @@ static void BleedIconEdges(std::vector<uint32>& pixels, int32 size) {
 
 // The texture of the picture of the file's icon; 0 when there is none.
 static GLuint SharpTrayIconTexture(const entry_ref& appRef) {
-    BNode fileNode(&appRef);
-    BNodeInfo nodeInfo(&fileNode);
     BBitmap big(BRect(0, 0, kTrayIconSource - 1, kTrayIconSource - 1), B_RGBA32);
-    if (big.InitCheck() != B_OK || nodeInfo.GetTrackerIcon(&big, (icon_size)kTrayIconSource) != B_OK) return 0;
+    if (big.InitCheck() != B_OK) return 0;
+    // The icon in the app file's own resources first: the system's file type database may have none for an app that was just
+    // installed (rweather), and Tracker's icon call then gives the generic one.
+    bool gotIcon = false;
+    {
+        BFile appFile(&appRef, B_READ_ONLY);
+        BAppFileInfo appInfo(&appFile);
+        if (appFile.InitCheck() == B_OK && appInfo.InitCheck() == B_OK)
+            gotIcon = appInfo.GetIcon(&big, (icon_size)kTrayIconSource) == B_OK;
+    }
+    if (!gotIcon) {
+        BNode fileNode(&appRef);
+        BNodeInfo nodeInfo(&fileNode);
+        if (nodeInfo.GetTrackerIcon(&big, (icon_size)kTrayIconSource) != B_OK) return 0;
+    }
 
     std::vector<uint32> pixels((size_t)kTrayIconSource * kTrayIconSource);
     const uint8* rows = (const uint8*)big.Bits();
@@ -2709,6 +2730,13 @@ void SyncDynamicSystrayTextures() {
                 // --- FILTER OUT PROCESSCONTROLLER ---
                 if (itemNameStr == "ProcessController" || itemNameStr == "ProcessControllerView") {
                     continue;
+                }
+
+                // --- FILTER OUT THE DESKBAR'S WORKSPACES WIDGET: hdesktop has its own workspace switcher ---
+                {
+                    std::string lowered(itemNameStr);
+                    for (size_t c = 0; c < lowered.size(); ++c) lowered[c] = (char)tolower((unsigned char)lowered[c]);
+                    if (lowered == "workspaces") continue;
                 }
 
                 activeSnapshot.push_back({itemNameStr, idProber});
@@ -9897,7 +9925,7 @@ void SyncDockWithRunningDeskbarApps() {
             	SyncDynamicSystrayTextures();
 			}
 	        float traySectionPadding = clockSectionPadding;
-	        size_t trayCount = fLiveTrayItems.size();
+	        size_t trayCount = TrayDrawnItemCount();
 
             float baselineTrayWidth = 0.0f;
             if (showSystemTray && trayCount > 0) {
@@ -11550,7 +11578,7 @@ void SyncDockWithRunningDeskbarApps() {
             	SyncDynamicSystrayTextures();
 			}
 	        float traySectionPadding = clockSectionPadding;
-	        size_t trayCount = fLiveTrayItems.size();
+	        size_t trayCount = TrayDrawnItemCount();
 
             float baselineTrayWidth = 0.0f;
             if (showSystemTray && trayCount > 0) {
