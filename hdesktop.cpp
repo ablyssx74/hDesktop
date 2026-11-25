@@ -9400,11 +9400,12 @@ void SyncDockWithRunningDeskbarApps() {
 		            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
 		            if (deskbarMessenger.IsValid()) {
 
-		                // The items that have a menu of their own here (in the dock's look) keep it; every other item
-		                // gets the click itself, so it shows its own menu, whatever app it is.
-		                // (HDESKTOP_TRAY_FORWARD_ALL in the environment: every item gets the click itself, for testing.)
-		                static const bool forwardAll = (getenv("HDESKTOP_TRAY_FORWARD_ALL") != nullptr);
-		                const bool hasOwnMenu = !forwardAll && (item.name == "ProcessController" || item.name == "ProcessControllerView" ||
+		                // Every tray item gets the click itself, so it shows its own menu and does what it does in the
+		                // Deskbar, whatever app it is. The menus made here for a few items (the network, the media icon,
+		                // ProcessController, SuperMusicThingy) are only used when HDESKTOP_TRAY_OWN_MENUS is in the
+		                // environment.
+		                static const bool useOwnMenus = (getenv("HDESKTOP_TRAY_OWN_MENUS") != nullptr);
+		                const bool hasOwnMenu = useOwnMenus && (item.name == "ProcessController" || item.name == "ProcessControllerView" ||
 		                                         item.name == "NetworkStatus" || item.name == "MediaReplicant" ||
 		                                         item.name == "SuperMusicTrayIcon" || item.name == "HaikuSuperMusicThingy");
 		                if (!hasOwnMenu && (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT || button == SDL_BUTTON_MIDDLE)) {
