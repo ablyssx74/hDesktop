@@ -2498,10 +2498,10 @@ static std::map<int32, std::string> TrayItemAppFiles() {
     }
     std::vector<size_t> leftImages;
     for (size_t k = 0; k < images.size(); ++k) if (!imageUsed[k]) leftImages.push_back(k);
-    if (leftItems.size() == leftImages.size()) {
-        for (size_t n = 0; n < leftItems.size(); ++n)
-            result[items[leftItems[n]].first] = images[leftImages[n]];
-    }
+    // (one item and one image left: they belong together; with more, the order they were loaded in says nothing sure:
+    // the volume item runs from /boot/system/bin/desklink and an app's own item can be loaded before it)
+    if (leftItems.size() == 1 && leftImages.size() == 1)
+        result[items[leftItems[0]].first] = images[leftImages[0]];
     return result;
 }
 
@@ -2624,6 +2624,68 @@ struct TrayForwardArgs {
     float screenY;
 };
 
+// A tray icon's picture, kept sharp when the dock zooms it. Like the clock (rasterized large once, drawn smaller), the icon is
+// taken from the app's vector icon at kTrayIconSource pixels, not blown up from the 16 pixel mini icon, and its picture is
+// uploaded with mipmaps, so a zoom or the plain size scales it down from that picture. The color of the see-through pixels
+// is first spread from the pixels next to them: they are black in the picture, and blended with their neighbours when it is
+// scaled down they would draw a dark rim round the icon.
+static const int32 kTrayIconSource = 128;
+
+static void BleedIconEdges(std::vector<uint32>& pixels, int32 size) {
+    std::vector<uint8_t> hasColor((size_t)size * size, 0);
+    for (size_t i = 0; i < pixels.size(); ++i) hasColor[i] = (pixels[i] >> 24) != 0 ? 1 : 0;
+    for (int pass = 0; pass < 24; ++pass) {
+        bool changed = false;
+        std::vector<uint8_t> nextHas(hasColor);
+        for (int32 y = 0; y < size; ++y) {
+            for (int32 x = 0; x < size; ++x) {
+                const size_t index = (size_t)y * size + x;
+                if (hasColor[index]) continue;
+                for (int dy = -1; dy <= 1 && !nextHas[index]; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int32 nx = x + dx, ny = y + dy;
+                        if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+                        const size_t neighbour = (size_t)ny * size + nx;
+                        if (!hasColor[neighbour]) continue;
+                        pixels[index] = pixels[neighbour] & 0x00FFFFFFu;   // its color, still no alpha
+                        nextHas[index] = 1;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        hasColor.swap(nextHas);
+        if (!changed) break;
+    }
+}
+
+// The texture of the picture of the file's icon; 0 when there is none.
+static GLuint SharpTrayIconTexture(const entry_ref& appRef) {
+    BNode fileNode(&appRef);
+    BNodeInfo nodeInfo(&fileNode);
+    BBitmap big(BRect(0, 0, kTrayIconSource - 1, kTrayIconSource - 1), B_RGBA32);
+    if (big.InitCheck() != B_OK || nodeInfo.GetTrackerIcon(&big, (icon_size)kTrayIconSource) != B_OK) return 0;
+
+    std::vector<uint32> pixels((size_t)kTrayIconSource * kTrayIconSource);
+    const uint8* rows = (const uint8*)big.Bits();
+    for (int32 y = 0; y < kTrayIconSource; ++y)
+        memcpy(&pixels[(size_t)y * kTrayIconSource], rows + (size_t)y * big.BytesPerRow(), kTrayIconSource * sizeof(uint32));
+    BleedIconEdges(pixels, kTrayIconSource);
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGBA8, kTrayIconSource, kTrayIconSource, GL_BGRA,
+        GL_UNSIGNED_INT_8_8_8_8_REV, pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
 void SyncDynamicSystrayTextures() {
     bigtime_t currentTime = system_time();
     // Throttle: Only probe Deskbar twice per second (500,000 microseconds)
@@ -2699,10 +2761,7 @@ void SyncDynamicSystrayTextures() {
                 signature << itemName;
             }
 
-            std::map<int32, std::string>::const_iterator addonFile = addonFiles.find(snap.second);
-            if (addonFile != addonFiles.end() && BEntry(addonFile->second.c_str()).GetRef(&appRef) == B_OK) {
-                assetResolved = true;   // the app file that the Deskbar loaded for this item
-            } else if (be_roster->FindApp(signature.String(), &appRef) == B_OK) {
+            if (be_roster->FindApp(signature.String(), &appRef) == B_OK) {
                 assetResolved = true;
             } else {
                 const char* fallbackDirectories[] = {
@@ -2720,11 +2779,23 @@ void SyncDynamicSystrayTextures() {
                         break;
                     }
                 }
+
+                // the guesses found nothing: the app file that the Deskbar loaded for this item
+                if (!assetResolved) {
+                    std::map<int32, std::string>::const_iterator addonFile = addonFiles.find(snap.second);
+                    if (addonFile != addonFiles.end() && BEntry(addonFile->second.c_str()).GetRef(&appRef) == B_OK)
+                        assetResolved = true;
+                }
             }
 
             GLuint textureID = 0;
 
             if (assetResolved) {
+                textureID = SharpTrayIconTexture(appRef);
+            }
+
+            if (assetResolved && textureID == 0) {
+                // (no vector picture of the icon: the old way, from the 16 pixel mini icon)
                 BNode fileNode(&appRef);
                 BNodeInfo nodeInfo(&fileNode);
 
