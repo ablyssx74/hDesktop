@@ -2444,6 +2444,186 @@ private:
 
 
 
+// =============================================================================
+// Tray items of the Deskbar: which app file is behind each one, and a click sent to the real item
+// =============================================================================
+// A tray item is a replicant view in the Deskbar's team. The Deskbar tells only its name (BDeskbar), but the app files that
+// it loaded for its items are in its team's images (the add-on images that are not system add-ons), and the item views
+// are in its window's view tree, where they can be sent a mouse click that makes the item open its own menu.
+
+static std::vector<std::pair<int32, std::string> > AllDeskbarItems() {
+    std::vector<std::pair<int32, std::string> > items;
+    BDeskbar deskbar;
+    for (int32 id = 0; id < 150; ++id) {
+        const char* name = nullptr;
+        if (deskbar.GetItemInfo(id, &name) == B_OK && name != nullptr && name[0] != '\0')
+            items.push_back(std::make_pair(id, std::string(name)));
+    }
+    return items;   // in id order
+}
+
+// item id -> the app file whose code runs that item. An image whose file name is the item's name is taken for it; the
+// items that are left get the images that are left in the order they were loaded, when there are as many of each.
+static std::map<int32, std::string> TrayItemAppFiles() {
+    std::map<int32, std::string> result;
+    BMessenger deskbar("application/x-vnd.be-tskb");
+    if (!deskbar.IsValid()) return result;
+
+    std::vector<std::string> images;
+    image_info info;
+    int32 cookie = 0;
+    while (get_next_image_info(deskbar.Team(), &cookie, &info) == B_OK) {
+        if (info.type != B_ADD_ON_IMAGE) continue;
+        std::string path(info.name);
+        if (path.find("/add-ons/") != std::string::npos) continue;   // catalogs, control looks and the like
+        images.push_back(path);
+    }
+
+    std::vector<std::pair<int32, std::string> > items = AllDeskbarItems();
+    std::vector<bool> imageUsed(images.size(), false);
+    std::vector<size_t> leftItems;
+    for (size_t i = 0; i < items.size(); ++i) {
+        bool found = false;
+        for (size_t k = 0; k < images.size() && !found; ++k) {
+            if (imageUsed[k]) continue;
+            size_t slash = images[k].rfind('/');
+            std::string base = (slash == std::string::npos) ? images[k] : images[k].substr(slash + 1);
+            if (base == items[i].second) {
+                result[items[i].first] = images[k];
+                imageUsed[k] = true;
+                found = true;
+            }
+        }
+        if (!found) leftItems.push_back(i);
+    }
+    std::vector<size_t> leftImages;
+    for (size_t k = 0; k < images.size(); ++k) if (!imageUsed[k]) leftImages.push_back(k);
+    if (leftItems.size() == leftImages.size()) {
+        for (size_t n = 0; n < leftItems.size(); ++n)
+            result[items[leftItems[n]].first] = images[leftImages[n]];
+    }
+    return result;
+}
+
+static void DeskbarSpecifiers(BMessage& message, const char* property, const std::vector<int32>& path) {
+    if (property != nullptr) message.AddSpecifier(property);
+    for (int i = (int)path.size() - 1; i >= 0; --i) message.AddSpecifier("View", path[i]);
+    message.AddSpecifier("Window", "Deskbar");
+}
+
+static bool DeskbarGet(const BMessenger& deskbar, const char* property, const std::vector<int32>& path, BMessage& reply) {
+    BMessage request(B_GET_PROPERTY);
+    DeskbarSpecifiers(request, property, path);
+    if (deskbar.SendMessage(&request, &reply, 1000000, 1000000) != B_OK) return false;
+    int32 error = 0;
+    return reply.FindInt32("error", &error) != B_OK || error == 0;
+}
+
+static int32 DeskbarChildCount(const BMessenger& deskbar, const std::vector<int32>& path) {
+    BMessage request(B_COUNT_PROPERTIES), reply;
+    DeskbarSpecifiers(request, "View", path);
+    if (deskbar.SendMessage(&request, &reply, 1000000, 1000000) != B_OK) return 0;
+    int32 count = 0;
+    reply.FindInt32("result", &count);
+    return count;
+}
+
+// The view in the Deskbar's window that holds the tray items: it has one child for each item (plus perhaps the clock),
+// and its children are small.
+static bool FindDeskbarTrayView(const BMessenger& deskbar, int32 itemCount, std::vector<int32>& path, int32& childCount, int depth = 0) {
+    int32 n = DeskbarChildCount(deskbar, path);
+    for (int32 i = 0; i < n; ++i) {
+        path.push_back(i);
+        int32 kids = DeskbarChildCount(deskbar, path);
+        if (kids >= itemCount && kids <= itemCount + 2 && depth >= 1) {
+            bool small = true;
+            for (int32 k = 0; k < kids && small; ++k) {
+                std::vector<int32> child(path);
+                child.push_back(k);
+                BMessage reply;
+                BRect frame;
+                if (!DeskbarGet(deskbar, "Frame", child, reply) || reply.FindRect("result", &frame) != B_OK
+                    || frame.Width() > 80 || frame.Height() > 40)
+                    small = false;
+            }
+            if (small) { childCount = kids; return true; }
+        }
+        if (depth < 4 && FindDeskbarTrayView(deskbar, itemCount, path, childCount, depth + 1)) return true;
+        path.pop_back();
+    }
+    return false;
+}
+
+// Sends the click to the tray item of the Deskbar item `itemId`, so that the item shows its own menu at the screen point.
+// `button`: 1 primary, 2 secondary, 4 tertiary (B_MOUSE_DOWN buttons).
+static status_t ForwardClickToTrayItem(int32 itemId, int32 buttons, float screenX, float screenY) {
+    BMessenger deskbar("application/x-vnd.be-tskb");
+    if (!deskbar.IsValid()) return B_ERROR;
+
+    std::vector<std::pair<int32, std::string> > items = AllDeskbarItems();
+    int32 rank = -1;
+    for (size_t i = 0; i < items.size(); ++i) if (items[i].first == itemId) rank = (int32)i;
+    if (rank < 0) return B_ENTRY_NOT_FOUND;
+
+    std::vector<int32> trayPath;
+    int32 trayChildren = 0;
+    if (!FindDeskbarTrayView(deskbar, (int32)items.size(), trayPath, trayChildren)) return B_ENTRY_NOT_FOUND;
+    std::vector<int32> itemPath(trayPath);
+    itemPath.push_back(trayChildren - (int32)items.size() + rank);   // a clock in front of the items takes the first child
+
+    // the item's origin on the screen: the window's, plus the frames of the views down to the item
+    BMessage reply;
+    BRect windowFrame;
+    if (!DeskbarGet(deskbar, "Frame", std::vector<int32>(), reply) || reply.FindRect("result", &windowFrame) != B_OK)
+        return B_ERROR;
+    BPoint origin(windowFrame.left, windowFrame.top);
+    for (size_t depth = 1; depth <= itemPath.size(); ++depth) {
+        std::vector<int32> sub(itemPath.begin(), itemPath.begin() + depth);
+        BMessage frameReply;
+        BRect frame;
+        if (!DeskbarGet(deskbar, "Frame", sub, frameReply) || frameReply.FindRect("result", &frame) != B_OK) return B_ERROR;
+        origin.x += frame.left;
+        origin.y += frame.top;
+    }
+
+    BMessage messengerReply;
+    BMessenger target;
+    if (!DeskbarGet(deskbar, "Messenger", itemPath, messengerReply)
+        || messengerReply.FindMessenger("result", &target) != B_OK || !target.IsValid())
+        return B_ERROR;
+
+    // "be:view_where" is the point that the view's MouseDown() gets, in the view's own coordinates; an item that opens
+    // its menu at ConvertToScreen(point) then opens it at the screen point.
+    BPoint inView(screenX - origin.x, screenY - origin.y);
+    BPoint inWindow(screenX - windowFrame.left, screenY - windowFrame.top);
+
+    BMessage down(B_MOUSE_DOWN);
+    down.AddInt64("when", system_time());
+    down.AddPoint("where", inWindow);
+    down.AddPoint("be:view_where", inView);
+    down.AddInt32("buttons", buttons);
+    down.AddInt32("modifiers", 0);
+    down.AddInt32("clicks", 1);
+    status_t result = target.SendMessage(&down);
+    if (result != B_OK) return result;
+    snooze(60000);
+    BMessage up(B_MOUSE_UP);
+    up.AddInt64("when", system_time());
+    up.AddPoint("where", inWindow);
+    up.AddPoint("be:view_where", inView);
+    up.AddInt32("buttons", 0);
+    up.AddInt32("modifiers", 0);
+    target.SendMessage(&up);
+    return B_OK;
+}
+
+struct TrayForwardArgs {
+    int32 itemId;
+    int32 buttons;
+    float screenX;
+    float screenY;
+};
+
 void SyncDynamicSystrayTextures() {
     bigtime_t currentTime = system_time();
     // Throttle: Only probe Deskbar twice per second (500,000 microseconds)
@@ -2497,6 +2677,7 @@ void SyncDynamicSystrayTextures() {
 
         BRect nativeBounds(0, 0, 15, 15);
         int32 destSize = 32;
+        std::map<int32, std::string> addonFiles = TrayItemAppFiles();
 
         for (const auto& snap : activeSnapshot) {
             BBitmap scratchBitmap(nativeBounds, B_RGBA32);
@@ -2518,7 +2699,10 @@ void SyncDynamicSystrayTextures() {
                 signature << itemName;
             }
 
-            if (be_roster->FindApp(signature.String(), &appRef) == B_OK) {
+            std::map<int32, std::string>::const_iterator addonFile = addonFiles.find(snap.second);
+            if (addonFile != addonFiles.end() && BEntry(addonFile->second.c_str()).GetRef(&appRef) == B_OK) {
+                assetResolved = true;   // the app file that the Deskbar loaded for this item
+            } else if (be_roster->FindApp(signature.String(), &appRef) == B_OK) {
                 assetResolved = true;
             } else {
                 const char* fallbackDirectories[] = {
@@ -9215,6 +9399,37 @@ void SyncDockWithRunningDeskbarApps() {
 
 		            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
 		            if (deskbarMessenger.IsValid()) {
+
+		                // The items that have a menu of their own here (in the dock's look) keep it; every other item
+		                // gets the click itself, so it shows its own menu, whatever app it is.
+		                // (HDESKTOP_TRAY_FORWARD_ALL in the environment: every item gets the click itself, for testing.)
+		                static const bool forwardAll = (getenv("HDESKTOP_TRAY_FORWARD_ALL") != nullptr);
+		                const bool hasOwnMenu = !forwardAll && (item.name == "ProcessController" || item.name == "ProcessControllerView" ||
+		                                         item.name == "NetworkStatus" || item.name == "MediaReplicant" ||
+		                                         item.name == "SuperMusicTrayIcon" || item.name == "HaikuSuperMusicThingy");
+		                if (!hasOwnMenu && (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT || button == SDL_BUTTON_MIDDLE)) {
+		                    int forwardWinX = 0;
+		                    if (gCompositor && gDockNativeWindow != nullptr) {
+		                        forwardWinX = (int)gDockNativeWindow->Frame().left;
+		                    } else {
+		                        SDL_Window* focusWin = SDL_GetMouseFocus();
+		                        int unusedY = 0;
+		                        if (focusWin) SDL_GetWindowPosition(focusWin, &forwardWinX, &unusedY);
+		                    }
+		                    TrayForwardArgs* forward = new TrayForwardArgs();
+		                    forward->itemId = item.internalId;
+		                    forward->buttons = (button == SDL_BUTTON_LEFT) ? 1 : (button == SDL_BUTTON_RIGHT) ? 2 : 4;
+		                    forward->screenX = (float)forwardWinX + item.currentRenderX + (item.currentRenderWidth / 2.0f);
+		                    forward->screenY = item.currentRenderTop + (item.currentRenderWidth / 2.0f);
+		                    thread_id forwardThread = spawn_thread([](void* data) -> int32 {
+		                        TrayForwardArgs* a = static_cast<TrayForwardArgs*>(data);
+		                        ForwardClickToTrayItem(a->itemId, a->buttons, a->screenX, a->screenY);
+		                        delete a;
+		                        return B_OK;
+		                    }, "tray_click_forward", B_NORMAL_PRIORITY, forward);
+		                    if (forwardThread >= B_OK) resume_thread(forwardThread); else delete forward;
+		                    return;
+		                }
 
 		                // =========================================================================
 		                // CASE A: RIGHT-CLICK -> ASYNCHRONOUS DESKBAR REPLICANT MENU RESOLVER
