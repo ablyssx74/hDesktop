@@ -2497,6 +2497,34 @@ static std::map<int32, std::string> TrayItemAppFiles() {
         }
         if (!found) leftItems.push_back(i);
     }
+    // An item's name is often its app's name with something added or taken away (WorkspaceNumberView, WebWatch2,
+    // USBDeskbarView for WorkspaceNumber, WebWatch, USBDeskbar): an image whose file name and the item's name start the
+    // same way (the longest such) is taken for it.
+    {
+        std::vector<size_t> stillLeft;
+        for (size_t n = 0; n < leftItems.size(); ++n) {
+            std::string item(items[leftItems[n]].second);
+            for (size_t c = 0; c < item.size(); ++c) item[c] = (char)tolower((unsigned char)item[c]);
+            int best = -1;
+            size_t bestLength = 0;
+            for (size_t k = 0; k < images.size(); ++k) {
+                if (imageUsed[k]) continue;
+                size_t slash = images[k].rfind('/');
+                std::string base = (slash == std::string::npos) ? images[k] : images[k].substr(slash + 1);
+                for (size_t c = 0; c < base.size(); ++c) base[c] = (char)tolower((unsigned char)base[c]);
+                const size_t length = std::min(base.size(), item.size());
+                if (length < 4 || base.compare(0, length, item, 0, length) != 0) continue;
+                if (length > bestLength) { bestLength = length; best = (int)k; }
+            }
+            if (best >= 0) {
+                result[items[leftItems[n]].first] = images[best];
+                imageUsed[best] = true;
+            } else {
+                stillLeft.push_back(leftItems[n]);
+            }
+        }
+        leftItems.swap(stillLeft);
+    }
     std::vector<size_t> leftImages;
     for (size_t k = 0; k < images.size(); ++k) if (!imageUsed[k]) leftImages.push_back(k);
     // (one item and one image left: they belong together; with more, the order they were loaded in says nothing sure:
@@ -2801,7 +2829,8 @@ void SyncDynamicSystrayTextures() {
                     BPath pathProber(dir);
                     pathProber.Append(itemName.String());
                     BEntry checkEntry(pathProber.Path());
-                    if (checkEntry.Exists()) {
+                    // (a file: /boot/system/apps/DeskbarEyes is a folder, with the app inside)
+                    if (checkEntry.Exists() && checkEntry.IsFile()) {
                         checkEntry.GetRef(&appRef);
                         assetResolved = true;
                         break;
