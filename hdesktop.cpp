@@ -627,6 +627,11 @@ const float kOcclusionThreshold = 0.5f; // >50% covered counts as occluded
 // Wine runs each of its processes (the desktop's explorer, services, a program) as a team of the one signature below, named "wine",
 // that the roster lists like an application. Only one with a window of its own is an application to the user.
 static const char* const kWineSignature = "application/x-vnd.Wayland-App";
+// (a program whose team first became an app through Wine's own Haiku library, as VLC does, has that library's signature)
+static const char* const kWineShimSignature = "application/x-vnd.wine-haikushim";
+static bool IsWineSignature(const std::string& signature) {
+    return signature == kWineSignature || signature == kWineShimSignature;
+}
 
 static bool TeamHasUserWindow(team_id team) {
     int32 workspaces = count_workspaces();
@@ -9883,7 +9888,7 @@ void SyncDockWithRunningDeskbarApps() {
             if (strcmp(info.signature, "application/x-vnd.Be-SYS.SleepWalker") == 0) continue;
 
             std::string appSignature(info.signature);
-            if (appSignature == kWineSignature && !TeamHasUserWindow(id)) continue;
+            if (IsWineSignature(appSignature) && !TeamHasUserWindow(id)) continue;
 
             bool isDuplicate = false;
             if (appSignature == "application/x-vnd.iceweasel"    ||
@@ -9967,7 +9972,7 @@ void SyncDockWithRunningDeskbarApps() {
                     break;
                 }
             }
-            if (appSignature == kWineSignature) {
+            if (IsWineSignature(appSignature)) {
                 // A Windows program's own icon, which Wine saves for its team; it may come, or change, after the entry
                 struct stat saved;
                 const std::string file = SavedWineIconPath(id);
