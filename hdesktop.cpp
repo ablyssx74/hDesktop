@@ -51,6 +51,7 @@
 #include <MenuItem.h>
 #include <Message.h>
 #include <MessageFilter.h>
+#include <Mime.h> // create_app_meta_mime() -- the tray helper
 #include <Messenger.h>
 #include <MenuField.h>
 #include <Node.h>
@@ -118,6 +119,7 @@ static inline uint32 hdTransparentPopupFlag() { return gCompositor ? (uint32)B_T
 #include <TranslationUtils.h>
 #include <vector>
 #include <View.h>
+#include "tray_helper.h"
 #include <Window.h>
 #include <NavMenu.h>
 #include <WindowInfo.h>
@@ -412,7 +414,11 @@ struct TrayItem {
     GLuint textureId;
     float currentRenderX;
     float currentRenderWidth;
-    float currentRenderTop; // cached alongside X/width so click handling can hit-test and center popups on the real drawn icon (square, so height == currentRenderWidth)
+    float currentRenderTop; // cached alongside X/width so click handling can hit-test and center popups on the real drawn icon
+    float currentRenderHeight;
+    GLuint liveTextureId;   // the item's own picture, as it draws itself in the Deskbar (0: none, the icon above is drawn)
+    float liveAspect;       // that picture's width for each unit of height
+    bool isEyes;            // "Who is watching you?": hdesktop draws its own eyes for it, which follow the pointer
 };
 std::vector<TrayItem> fLiveTrayItems;
 bigtime_t fLastTrayUpdateTime = 0;
@@ -2598,7 +2604,17 @@ static status_t ForwardClickToTrayItem(int32 itemId, int32 buttons, float screen
     int32 trayChildren = 0;
     if (!FindDeskbarTrayView(deskbar, (int32)items.size(), trayPath, trayChildren)) return B_ENTRY_NOT_FOUND;
     std::vector<int32> itemPath(trayPath);
-    itemPath.push_back(trayChildren - (int32)items.size() + rank);   // a clock in front of the items takes the first child
+    // the item's view has the item's name (the order of the views need not be the order of the ids); failing that, by order
+    int32 child = trayChildren - (int32)items.size() + rank;   // a clock in front of the items takes the first child
+    for (int32 k = 0; k < trayChildren; ++k) {
+        std::vector<int32> candidate(trayPath);
+        candidate.push_back(k);
+        BMessage nameReply;
+        const char* viewName = nullptr;
+        if (DeskbarGet(deskbar, "InternalName", candidate, nameReply) && nameReply.FindString("result", &viewName) == B_OK
+            && items[rank].second == viewName) { child = k; break; }
+    }
+    itemPath.push_back(child);
 
     // the item's origin on the screen: the window's, plus the frames of the views down to the item
     BMessage reply;
@@ -2653,12 +2669,90 @@ struct TrayForwardArgs {
     float screenY;
 };
 
-// How many tray items are drawn: an item with no picture (no icon found) takes no room, so it leaves no blank space.
-static size_t TrayDrawnItemCount() {
-    size_t count = 0;
-    for (size_t i = 0; i < fLiveTrayItems.size(); ++i)
-        if (fLiveTrayItems[i].textureId != 0) ++count;
-    return count;
+// An item is drawn when there is something to show for it: one with no picture takes no room, so it leaves no blank space.
+static bool TrayItemIsDrawn(const TrayItem& item) {
+    return item.isEyes || item.liveTextureId != 0 || item.textureId != 0;
+}
+
+// The width of an item in the unzoomed dock; its height is 16. An item with a live picture is as wide as the picture says
+// (the weather with its temperature), the eyes are wider than high, the others are square icons.
+static float TrayItemBaseWidth(const TrayItem& item) {
+    if (item.isEyes) return 24.0f;
+    if (item.liveTextureId != 0) return 16.0f * item.liveAspect;
+    return 16.0f;
+}
+
+// The tray in rows: a row holds the width of six icons (a wide item takes the room of several), the first row is at the
+// bottom and further ones stack on it, four rows at most; with more items than that, all four rows get wider, so none is
+// left out. Positions and sizes are in the unzoomed dock's units.
+struct TraySlot {
+    size_t item;     // index in fLiveTrayItems
+    float x, y;      // from the tray block's top left corner
+    float width;
+};
+
+struct TrayLayout {
+    std::vector<TraySlot> slots;
+    float width;
+    float height;
+    float itemHeight;
+};
+
+static const float kTraySpacing = 6.0f;
+static const float kTrayRowSpacing = 3.0f;
+static const size_t kTrayMaxRows = 4;
+
+static TrayLayout ComputeTrayLayout(float baseSize) {
+    TrayLayout layout;
+    layout.width = layout.height = 0.0f;
+    layout.itemHeight = 16.0f;
+
+    std::vector<std::vector<size_t> > rows;
+    std::vector<float> rowWidths;
+    for (float capacity = 6 * 16.0f + 5 * kTraySpacing; ; capacity += 16.0f + kTraySpacing) {
+        rows.clear();
+        rowWidths.clear();
+        for (size_t i = 0; i < fLiveTrayItems.size(); ++i) {
+            if (!TrayItemIsDrawn(fLiveTrayItems[i])) continue;
+            const float width = TrayItemBaseWidth(fLiveTrayItems[i]);
+            if (rows.empty() || rowWidths.back() + kTraySpacing + width > capacity + 0.5f) {
+                rows.push_back(std::vector<size_t>());
+                rowWidths.push_back(width);
+            } else {
+                rowWidths.back() += kTraySpacing + width;
+            }
+            rows.back().push_back(i);
+        }
+        if (rows.size() <= kTrayMaxRows) break;
+    }
+    if (rows.empty()) return layout;
+
+    // One or two rows have the full size; more are made a little smaller, to stay near the height of the dock's icons.
+    const float fullHeight = rows.size() * 16.0f + (rows.size() - 1) * kTrayRowSpacing;
+    const float scale = rows.size() <= 2 ? 1.0f : std::max(0.7f, std::min(1.0f, baseSize * 1.2f / fullHeight));
+    layout.width = *std::max_element(rowWidths.begin(), rowWidths.end()) * scale;
+    layout.height = fullHeight * scale;
+    layout.itemHeight = 16.0f * scale;
+    for (size_t r = 0; r < rows.size(); ++r) {
+        float x = (layout.width - rowWidths[r] * scale) / 2.0f;
+        const float y = (rows.size() - 1 - r) * (16.0f + kTrayRowSpacing) * scale;
+        for (size_t k = 0; k < rows[r].size(); ++k) {
+            TraySlot slot;
+            slot.item = rows[r][k];
+            slot.x = x;
+            slot.y = y;
+            slot.width = TrayItemBaseWidth(fLiveTrayItems[slot.item]) * scale;
+            layout.slots.push_back(slot);
+            x += slot.width + kTraySpacing * scale;
+        }
+    }
+    return layout;
+}
+
+// How far the tray may be zoomed: as far as the icons, but a tall tray no further than to the height of a zoomed icon.
+static float TrayZoomLimit(const TrayLayout& layout, float iconZoom, float baseSize) {
+    if (layout.height <= 0.0f) return iconZoom;
+    return std::min(iconZoom, std::max(1.0f, baseSize * iconZoom / layout.height));
 }
 
 // A tray icon's picture, kept sharp when the dock zooms it. Like the clock (rasterized large once, drawn smaller), the icon is
@@ -2668,21 +2762,21 @@ static size_t TrayDrawnItemCount() {
 // scaled down they would draw a dark rim round the icon.
 static const int32 kTrayIconSource = 128;
 
-static void BleedIconEdges(std::vector<uint32>& pixels, int32 size) {
-    std::vector<uint8_t> hasColor((size_t)size * size, 0);
+static void BleedIconEdges(std::vector<uint32>& pixels, int32 width, int32 height) {
+    std::vector<uint8_t> hasColor((size_t)width * height, 0);
     for (size_t i = 0; i < pixels.size(); ++i) hasColor[i] = (pixels[i] >> 24) != 0 ? 1 : 0;
     for (int pass = 0; pass < 24; ++pass) {
         bool changed = false;
         std::vector<uint8_t> nextHas(hasColor);
-        for (int32 y = 0; y < size; ++y) {
-            for (int32 x = 0; x < size; ++x) {
-                const size_t index = (size_t)y * size + x;
+        for (int32 y = 0; y < height; ++y) {
+            for (int32 x = 0; x < width; ++x) {
+                const size_t index = (size_t)y * width + x;
                 if (hasColor[index]) continue;
                 for (int dy = -1; dy <= 1 && !nextHas[index]; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
                         const int32 nx = x + dx, ny = y + dy;
-                        if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
-                        const size_t neighbour = (size_t)ny * size + nx;
+                        if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                        const size_t neighbour = (size_t)ny * width + nx;
                         if (!hasColor[neighbour]) continue;
                         pixels[index] = pixels[neighbour] & 0x00FFFFFFu;   // its color, still no alpha
                         nextHas[index] = 1;
@@ -2720,7 +2814,7 @@ static GLuint SharpTrayIconTexture(const entry_ref& appRef) {
     const uint8* rows = (const uint8*)big.Bits();
     for (int32 y = 0; y < kTrayIconSource; ++y)
         memcpy(&pixels[(size_t)y * kTrayIconSource], rows + (size_t)y * big.BytesPerRow(), kTrayIconSource * sizeof(uint32));
-    BleedIconEdges(pixels, kTrayIconSource);
+    BleedIconEdges(pixels, kTrayIconSource, kTrayIconSource);
 
     GLuint texture = 0;
     glGenTextures(1, &texture);
@@ -2733,6 +2827,520 @@ static GLuint SharpTrayIconTexture(const entry_ref& appRef) {
         GL_UNSIGNED_INT_8_8_8_8_REV, pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
     return texture;
+}
+
+// =============================================================================
+// Live tray pictures: the items as they draw themselves in the Deskbar, hidden or not
+// =============================================================================
+// hdesktop puts a small item of its own in the Deskbar's tray (tray_helper.cpp). Asked once a second by a thread here,
+// it lets the other items draw into bitmaps and sends those back; the dock shows them in place of the still icons. An item
+// that gives no picture keeps its still icon. The clock and ProcessController are left out (the dock has its own), and so
+// are the eyes (the dock draws its own). HDESKTOP_STILL_TRAY in the environment turns all of this off.
+
+struct LiveTrayPicture {
+    int32 width;
+    int32 height;
+    std::vector<uint32> pixels;
+};
+
+static BLocker gLiveTrayLock("hdesktop live tray");
+static std::map<std::string, LiveTrayPicture> gLiveTrayPictures;   // under gLiveTrayLock
+static int32 gLiveTrayGeneration = 0;                              // under gLiveTrayLock: raised when the pictures change
+static int32 gLiveTrayApplied = -1;                                // the main thread's: the generation in the textures
+static volatile bool gLiveTrayQuit = false;
+static thread_id gLiveTrayThread = -1;
+
+static bool IsEyesItem(const std::string& name) {
+    return strcasestr(name.c_str(), "eyes") != nullptr;
+}
+
+static bool TrayItemIsLeftOut(const std::string& name) {
+    // (hdesktop has its own CPU graph and workspace switcher; the helper is not something to show)
+    return name == "ProcessController" || name == "ProcessControllerView" || name == HDESKTOP_TRAY_HELPER_NAME
+        || strcasecmp(name.c_str(), "workspaces") == 0;
+}
+
+// The helper's file: next to the program (a build that is not installed), else in a data directory.
+static bool FindTrayHelper(entry_ref& ref) {
+    std::vector<std::string> paths;
+    image_info info;
+    int32 cookie = 0;
+    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
+        if (info.type != B_APP_IMAGE) continue;
+        std::string path(info.name);
+        size_t slash = path.rfind('/');
+        if (slash != std::string::npos) paths.push_back(path.substr(0, slash + 1) + HDESKTOP_TRAY_HELPER_NAME);
+        break;
+    }
+    const directory_which directories[] = { B_USER_NONPACKAGED_DATA_DIRECTORY, B_USER_DATA_DIRECTORY,
+        B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, B_SYSTEM_DATA_DIRECTORY };
+    for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); ++i) {
+        BPath path;
+        if (find_directory(directories[i], &path) == B_OK && path.Append("hdesktop/" HDESKTOP_TRAY_HELPER_NAME) == B_OK)
+            paths.push_back(path.Path());
+    }
+    for (size_t i = 0; i < paths.size(); ++i) {
+        BEntry entry(paths[i].c_str(), true);
+        if (entry.Exists() && entry.IsFile() && entry.GetRef(&ref) == B_OK) {
+            // the Deskbar finds an item's code by its signature, so the system has to know the file
+            create_app_meta_mime(paths[i].c_str(), false, true, false);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Takes the tray's background color out of a picture: an item that paints it would be a light box on the dock. The pixels
+// of that color become see-through, and the ones next to them (the soft edges of text) lose their share of it.
+static void RemoveTrayBackground(LiveTrayPicture& picture, const int32* backs, int32 backCount) {
+    if (picture.pixels.empty() || (picture.pixels[0] >> 24) != 0xff) return;   // nothing painted behind it
+    const uint32 corner = picture.pixels[0] & 0x00ffffff;
+    const int back[3] = { (int)((corner >> 16) & 0xff), (int)((corner >> 8) & 0xff), (int)(corner & 0xff) };
+    bool isBackground = false;
+    for (int32 i = 0; i < backCount; ++i) {
+        const int32 c = backs[i];
+        if (abs(((c >> 16) & 0xff) - back[0]) <= 4 && abs(((c >> 8) & 0xff) - back[1]) <= 4 && abs((c & 0xff) - back[2]) <= 4)
+            isBackground = true;
+    }
+    if (!isBackground) return;
+
+    const int32 width = picture.width, height = picture.height;
+    std::vector<uint8_t> mask(picture.pixels.size(), 0);
+    for (size_t i = 0; i < picture.pixels.size(); ++i) {
+        const uint32 p = picture.pixels[i];
+        if (abs((int)((p >> 16) & 0xff) - back[0]) <= 3 && abs((int)((p >> 8) & 0xff) - back[1]) <= 3
+            && abs((int)(p & 0xff) - back[2]) <= 3)
+            mask[i] = 1;
+    }
+    std::vector<uint32> result(picture.pixels);
+    for (int32 y = 0; y < height; ++y) {
+        for (int32 x = 0; x < width; ++x) {
+            const size_t index = (size_t)y * width + x;
+            if (mask[index]) { result[index] = 0; continue; }
+            bool atEdge = false;
+            for (int dy = -2; dy <= 2 && !atEdge; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const int32 nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && ny >= 0 && nx < width && ny < height && mask[(size_t)ny * width + nx]) { atEdge = true; break; }
+                }
+            }
+            if (!atEdge) continue;
+            // "color to alpha": the least opaque color that gives this pixel when laid over the background
+            const uint32 p = picture.pixels[index];
+            const int value[3] = { (int)((p >> 16) & 0xff), (int)((p >> 8) & 0xff), (int)(p & 0xff) };
+            float alpha = 0.0f;
+            for (int c = 0; c < 3; ++c) {
+                float a = 0.0f;
+                if (value[c] > back[c]) a = (value[c] - back[c]) / (float)(255 - back[c]);
+                else if (value[c] < back[c]) a = (back[c] - value[c]) / (float)back[c];
+                alpha = std::max(alpha, a);
+            }
+            if (alpha <= 0.02f) { result[index] = 0; continue; }
+            uint32 out = (uint32)((p >> 24) * alpha + 0.5f) << 24;
+            for (int c = 0; c < 3; ++c) {
+                const int straight = std::max(0, std::min(255, (int)(back[c] + (value[c] - back[c]) / alpha + 0.5f)));
+                out |= (uint32)straight << (16 - 8 * c);
+            }
+            result[index] = out;
+        }
+    }
+    picture.pixels.swap(result);
+}
+
+static void PublishLiveTrayPictures(std::map<std::string, LiveTrayPicture>& pictures) {
+    BAutolock locked(gLiveTrayLock);
+    bool same = pictures.size() == gLiveTrayPictures.size();
+    std::map<std::string, LiveTrayPicture>::const_iterator a = pictures.begin(), b = gLiveTrayPictures.begin();
+    for (; same && a != pictures.end(); ++a, ++b)
+        same = a->first == b->first && a->second.width == b->second.width && a->second.pixels == b->second.pixels;
+    if (same) return;
+    gLiveTrayPictures.swap(pictures);
+    ++gLiveTrayGeneration;
+}
+
+static void RemoveTrayHelper() {
+    BDeskbar deskbar;
+    if (deskbar.HasItem(HDESKTOP_TRAY_HELPER_NAME)) deskbar.RemoveItem(HDESKTOP_TRAY_HELPER_NAME);
+}
+
+// ----- sharp and live: the items that show a vector icon -----
+// Most icon items draw a small picture of a vector icon in their program's resources, and switch between such icons to
+// show their state. When an item's live picture (at its own size) is one of those icons, the dock draws that icon large
+// instead; when it matches none, the live picture itself is shown.
+
+struct TrayVectorIcon {
+    std::vector<uint8_t> data;                      // the icon (HVIF)
+    std::map<int, std::vector<uint32> > rendered;   // size -> its pixels at that size
+};
+
+struct TrayIconMatch {
+    int icon;      // -1: none
+    int size, x, y;
+};
+
+// the add-on images of the Deskbar: the programs the tray items come from
+static std::vector<std::string> DeskbarAddonImages(team_id team) {
+    std::vector<std::string> images;
+    image_info info;
+    int32 cookie = 0;
+    while (get_next_image_info(team, &cookie, &info) == B_OK) {
+        if (info.type != B_ADD_ON_IMAGE) continue;
+        std::string path(info.name);
+        if (path.find("/add-ons/") == std::string::npos) images.push_back(path);
+    }
+    return images;
+}
+
+static void LoadTrayVectorIcons(const std::vector<std::string>& files, std::vector<TrayVectorIcon>& icons) {
+    icons.clear();
+    for (size_t f = 0; f < files.size() && icons.size() < 128; ++f) {
+        BFile file(files[f].c_str(), B_READ_ONLY);
+        BResources resources;
+        if (file.InitCheck() != B_OK || resources.SetTo(&file) != B_OK) continue;
+        type_code type;
+        int32 id;
+        const char* name;
+        size_t size;
+        for (int32 k = 0; icons.size() < 128 && resources.GetResourceInfo(k, &type, &id, &name, &size); ++k) {
+            if (type != B_VECTOR_ICON_TYPE) continue;
+            const void* data = resources.LoadResource(type, id, &size);
+            if (data == nullptr || size == 0) continue;
+            TrayVectorIcon icon;
+            icon.data.assign((const uint8_t*)data, (const uint8_t*)data + size);
+            icons.push_back(icon);
+        }
+    }
+}
+
+static bool RenderTrayVectorIcon(const TrayVectorIcon& icon, int size, std::vector<uint32>& pixels) {
+    BBitmap bitmap(BRect(0, 0, size - 1, size - 1), B_BITMAP_NO_SERVER_LINK, B_RGBA32);
+    if (bitmap.InitCheck() != B_OK || BIconUtils::GetVectorIcon(icon.data.data(), icon.data.size(), &bitmap) != B_OK)
+        return false;
+    pixels.resize((size_t)size * size);
+    for (int y = 0; y < size; ++y)
+        memcpy(&pixels[(size_t)y * size], (const uint8_t*)bitmap.Bits() + (size_t)y * bitmap.BytesPerRow(), size * 4);
+    return true;
+}
+
+// Which icon, at which size and place, gives this picture: the two are compared laid over the same color (the picture's
+// own background when it painted one, else gray). A fit must be close as a whole and may differ clearly in hardly any
+// pixel, so an item that draws something on top of its icon (a mark, a number) keeps its live picture.
+static TrayIconMatch MatchTrayIcon(const LiveTrayPicture& picture, std::vector<TrayVectorIcon>& icons) {
+    TrayIconMatch match = { -1, 0, 0, 0 };
+    const int width = picture.width, height = picture.height;
+    const bool painted = (picture.pixels[0] >> 24) == 0xff;
+    const int ground[3] = { painted ? (int)(picture.pixels[0] & 0xff) : 128,
+        painted ? (int)((picture.pixels[0] >> 8) & 0xff) : 128, painted ? (int)((picture.pixels[0] >> 16) & 0xff) : 128 };
+    std::vector<int> shown((size_t)width * height * 3);
+    for (size_t i = 0; i < picture.pixels.size(); ++i) {
+        const uint32 p = picture.pixels[i];
+        const int a = (int)(p >> 24);
+        for (int c = 0; c < 3; ++c)
+            shown[i * 3 + c] = ((int)((p >> (8 * c)) & 0xff) * a + ground[c] * (255 - a)) / 255;
+    }
+    const int maxBad = std::max(2, width * height / 100);
+    long best = 3L * width * height * 3 + 1;     // a mean difference of 3 for each channel at most
+    const int largest = std::min(40, std::max(width, height) + 2);
+    for (size_t n = 0; n < icons.size() && !gLiveTrayQuit; ++n) {
+        for (int size = 12; size <= largest; ++size) {
+            std::vector<uint32>& icon = icons[n].rendered[size];
+            if (icon.empty() && !RenderTrayVectorIcon(icons[n], size, icon)) break;
+            for (int oy = std::min(0, height - size) - 2; oy <= std::max(0, height - size) + 2; ++oy) {
+                for (int ox = std::min(0, width - size) - 2; ox <= std::max(0, width - size) + 2; ++ox) {
+                    long sum = 0;
+                    int bad = 0;
+                    for (int y = 0; y < height && sum < best && bad <= maxBad; ++y) {
+                        for (int x = 0; x < width; ++x) {
+                            const int ix = x - ox, iy = y - oy;
+                            const uint32 q = (ix >= 0 && iy >= 0 && ix < size && iy < size) ? icon[(size_t)iy * size + ix] : 0;
+                            const int a = (int)(q >> 24);
+                            int worst = 0;
+                            for (int c = 0; c < 3; ++c) {
+                                const int over = ((int)((q >> (8 * c)) & 0xff) * a + ground[c] * (255 - a)) / 255;
+                                const int d = abs(over - shown[((size_t)y * width + x) * 3 + c]);
+                                sum += d;
+                                worst = std::max(worst, d);
+                            }
+                            if (worst > 48) ++bad;
+                        }
+                    }
+                    if (sum < best && bad <= maxBad) {
+                        best = sum;
+                        match.icon = (int)n;
+                        match.size = size;
+                        match.x = ox;
+                        match.y = oy;
+                    }
+                }
+            }
+        }
+    }
+    DebugLog("[hdesktop] tray icon %d x %d: %s (icon %d, size %d, difference %.2f)\n", width, height,
+        match.icon >= 0 ? "matched" : "no match", match.icon, match.size,
+        match.icon >= 0 ? best / (3.0 * width * height) : 0.0);
+    return match;
+}
+
+// The item's picture made large from the matched icon: the same layout, the icon rendered at about 128 pixels.
+static bool SharpTrayPicture(const LiveTrayPicture& small, const TrayIconMatch& match,
+    const TrayVectorIcon& icon, LiveTrayPicture& out) {
+    const int factor = std::max(1, 128 / match.size);
+    std::vector<uint32> pixels;
+    if (!RenderTrayVectorIcon(icon, match.size * factor, pixels)) return false;
+    out.width = small.width * factor;
+    out.height = small.height * factor;
+    out.pixels.assign((size_t)out.width * out.height, 0);
+    const int size = match.size * factor;
+    for (int y = 0; y < size; ++y) {
+        const int ty = y + match.y * factor;
+        if (ty < 0 || ty >= out.height) continue;
+        for (int x = 0; x < size; ++x) {
+            const int tx = x + match.x * factor;
+            if (tx >= 0 && tx < out.width) out.pixels[(size_t)ty * out.width + tx] = pixels[(size_t)y * size + x];
+        }
+    }
+    return true;
+}
+
+// one item's picture out of the helper's reply
+static bool ReadTrayPicture(const BMessage& answer, int32 i, const char* widthName, const char* heightName,
+    const char* dataName, LiveTrayPicture& picture) {
+    const void* data = nullptr;
+    ssize_t size = 0;
+    if (answer.FindInt32(widthName, i, &picture.width) != B_OK || answer.FindInt32(heightName, i, &picture.height) != B_OK
+        || answer.FindData(dataName, B_RAW_TYPE, i, &data, &size) != B_OK
+        || picture.width <= 0 || picture.height <= 0 || picture.width > 1024 || picture.height > 256
+        || size != (ssize_t)picture.width * picture.height * 4)
+        return false;
+    picture.pixels.assign((const uint32*)data, (const uint32*)data + (size_t)picture.width * picture.height);
+    return true;
+}
+
+static int32 LiveTrayThread(void*) {
+    bigtime_t nextCapture = 0, nextAdd = 0;
+    int timeouts = 0;
+    std::vector<std::string> iconFiles;
+    std::vector<TrayVectorIcon> icons;
+    // for each item's picture at its own size that has been looked up: the icon that fits it
+    std::map<std::string, std::map<std::vector<uint32>, TrayIconMatch> > matches;
+    std::map<std::string, bigtime_t> nextMatch;
+    while (!gLiveTrayQuit) {
+        snooze(100000);
+        if (system_time() < nextCapture) continue;
+        nextCapture = system_time() + 1000000;
+
+        std::map<std::string, LiveTrayPicture> pictures;
+        if (!showSystemTray) {
+            RemoveTrayHelper();
+            PublishLiveTrayPictures(pictures);
+            continue;
+        }
+        BMessenger deskbarMessenger("application/x-vnd.be-tskb");
+        if (!deskbarMessenger.IsValid()) { PublishLiveTrayPictures(pictures); continue; }
+
+        BDeskbar deskbar;
+        if (!deskbar.HasItem(HDESKTOP_TRAY_HELPER_NAME)) {
+            PublishLiveTrayPictures(pictures);
+            if (system_time() < nextAdd) continue;
+            nextAdd = system_time() + 30000000;
+            entry_ref helper;
+            if (!FindTrayHelper(helper)) { DebugLog("[hdesktop] tray helper: file not found\n"); continue; }
+            const status_t added = deskbar.AddItem(&helper);
+            DebugLog("[hdesktop] tray helper: added to the Deskbar: %s\n", strerror(added));
+            nextCapture = system_time() + 300000;
+            continue;
+        }
+
+        std::vector<std::pair<int32, std::string> > items = AllDeskbarItems();
+        std::vector<int32> trayPath;
+        int32 trayChildren = 0;
+        if (!FindDeskbarTrayView(deskbarMessenger, (int32)items.size(), trayPath, trayChildren)) continue;
+        BMessage find(B_GET_PROPERTY), found;
+        find.AddSpecifier("Messenger");
+        find.AddSpecifier("View", HDESKTOP_TRAY_HELPER_NAME);
+        DeskbarSpecifiers(find, nullptr, trayPath);
+        BMessenger helper;
+        if (deskbarMessenger.SendMessage(&find, &found, 1000000, 1000000) != B_OK
+            || found.FindMessenger("result", &helper) != B_OK)
+            continue;
+
+        BMessage ask(kTrayHelperCapture), answer;
+        ask.AddFloat("scale", 4.0f);
+        for (size_t i = 0; i < items.size(); ++i)
+            if (!TrayItemIsLeftOut(items[i].second) && !IsEyesItem(items[i].second))
+                ask.AddString("name", items[i].second.c_str());
+
+        const team_id team = deskbarMessenger.Team();
+        const status_t sent = helper.SendMessage(&ask, &answer, 1000000, 3000000);
+        if (sent != B_OK || answer.what != kTrayHelperPictures) {
+            // The Deskbar went away while the items drew: one of them may not bear being asked, so no more for this run.
+            snooze(1000000);
+            team_info teamInfo;
+            if (get_team_info(team, &teamInfo) != B_OK) {
+                DebugLog("[hdesktop] tray helper: the Deskbar quit during a capture; still icons from here on\n");
+                PublishLiveTrayPictures(pictures);
+                break;
+            }
+            if (++timeouts >= 3) {     // it does not answer: still icons, and another try later
+                PublishLiveTrayPictures(pictures);
+                nextCapture = system_time() + 30000000;
+            }
+            continue;
+        }
+        timeouts = 0;
+        if (answer.GetInt32("version", 0) != kTrayHelperVersion) {   // another version's helper: put ours in
+            RemoveTrayHelper();
+            if (nextAdd < system_time()) nextAdd = 0;
+            continue;
+        }
+
+        const std::vector<std::string> images = DeskbarAddonImages(team);
+        if (images != iconFiles) {
+            iconFiles = images;
+            LoadTrayVectorIcons(iconFiles, icons);
+            matches.clear();
+            nextMatch.clear();
+        }
+
+        const char* name = nullptr;
+        for (int32 i = 0; answer.FindString("name", i, &name) == B_OK; ++i) {
+            LiveTrayPicture picture;
+            if (!ReadTrayPicture(answer, i, "width", "height", "pixels", picture)) continue;
+            int32 backs[3] = { -1, -1, -1 };
+            for (int32 k = 0; k < 3; ++k) answer.FindInt32("back", i * 3 + k, &backs[k]);
+            RemoveTrayBackground(picture, backs, 3);
+            size_t visible = 0;
+            for (size_t k = 0; k < picture.pixels.size(); ++k) if ((picture.pixels[k] >> 24) > 32) ++visible;
+            if (visible < 16) continue;   // it drew nothing to speak of: its still icon stays
+
+            // an item about as wide as high, and small, may be showing an icon
+            LiveTrayPicture small;
+            if (ReadTrayPicture(answer, i, "swidth", "sheight", "small", small)
+                && small.width <= 40 && small.height <= 40 && small.width * 2 <= small.height * 3) {
+                std::map<std::vector<uint32>, TrayIconMatch>& known = matches[name];
+                std::map<std::vector<uint32>, TrayIconMatch>::const_iterator found = known.find(small.pixels);
+                // (an item whose picture keeps changing and fits nothing, a graph, is looked up only now and then)
+                if (found == known.end() && (known.size() < 12 || system_time() >= nextMatch[name])) {
+                    if (known.size() >= 64) known.clear();
+                    found = known.insert(std::make_pair(small.pixels, MatchTrayIcon(small, icons))).first;
+                    nextMatch[name] = system_time() + 30000000;
+                }
+                if (found != known.end() && found->second.icon >= 0) {
+                    LiveTrayPicture sharp;
+                    if (SharpTrayPicture(small, found->second, icons[found->second.icon], sharp)) picture = sharp;
+                }
+            }
+            pictures[name] = picture;
+        }
+        PublishLiveTrayPictures(pictures);
+    }
+    return B_OK;
+}
+
+static void StartLiveTray() {
+    if (getenv("HDESKTOP_STILL_TRAY") != nullptr) { RemoveTrayHelper(); return; }
+    gLiveTrayThread = spawn_thread(LiveTrayThread, "hdesktop live tray", B_LOW_PRIORITY, nullptr);
+    if (gLiveTrayThread >= 0) resume_thread(gLiveTrayThread);
+}
+
+static void StopLiveTray() {
+    if (gLiveTrayThread < 0) return;
+    gLiveTrayQuit = true;
+    status_t result;
+    wait_for_thread(gLiveTrayThread, &result);
+    gLiveTrayThread = -1;
+    RemoveTrayHelper();
+}
+
+// Puts new pictures into the items' textures (the main thread: it owns the GL context). True when something changed.
+static bool ApplyLiveTrayPictures() {
+    BAutolock locked(gLiveTrayLock);
+    if (gLiveTrayApplied == gLiveTrayGeneration) return false;
+    gLiveTrayApplied = gLiveTrayGeneration;
+    for (size_t i = 0; i < fLiveTrayItems.size(); ++i) {
+        TrayItem& item = fLiveTrayItems[i];
+        std::map<std::string, LiveTrayPicture>::const_iterator found = gLiveTrayPictures.find(item.name);
+        if (found == gLiveTrayPictures.end()) {
+            if (item.liveTextureId != 0) { glDeleteTextures(1, &item.liveTextureId); item.liveTextureId = 0; }
+            continue;
+        }
+        std::vector<uint32> pixels(found->second.pixels);
+        BleedIconEdges(pixels, found->second.width, found->second.height);
+        if (item.liveTextureId == 0) glGenTextures(1, &item.liveTextureId);
+        glBindTexture(GL_TEXTURE_2D, item.liveTextureId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, GL_TRUE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, found->second.width, found->second.height, 0,
+            GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pixels.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        item.liveAspect = std::max(0.5f, std::min(5.0f, found->second.width / (float)found->second.height));
+    }
+    return true;
+}
+
+// ----- "Who is watching you?" -----
+
+// A smooth filled circle as a picture (white, or black), with a dark ring of the given share of its radius.
+static GLuint CircleTexture(uint8_t fill, float ring) {
+    const int size = 128;
+    std::vector<uint32> pixels(size * size);
+    const float radius = size / 2.0f - 1.0f;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const float dx = x + 0.5f - size / 2.0f, dy = y + 0.5f - size / 2.0f;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            const float coverage = std::max(0.0f, std::min(1.0f, radius - d + 0.5f));
+            const float inner = std::max(0.0f, std::min(1.0f, radius * (1.0f - ring) - d + 0.5f));
+            const uint32 value = (uint32)(20.0f + (fill - 20.0f) * (ring > 0.0f ? inner : 1.0f));
+            const uint32 gray = ring > 0.0f ? value : fill;
+            pixels[y * size + x] = ((uint32)(coverage * 255.0f) << 24) | (gray << 16) | (gray << 8) | gray;
+        }
+    }
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, GL_TRUE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
+static void TrayQuad(GLuint texture, float centerX, float centerY, float radiusX, float radiusY) {
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(centerX - radiusX, centerY - radiusY);
+        glTexCoord2f(1.0f, 0.0f); glVertex2f(centerX + radiusX, centerY - radiusY);
+        glTexCoord2f(1.0f, 1.0f); glVertex2f(centerX + radiusX, centerY + radiusY);
+        glTexCoord2f(0.0f, 1.0f); glVertex2f(centerX - radiusX, centerY + radiusY);
+    glEnd();
+}
+
+// Where the pointer is, in the dock's coordinates (the main loop keeps it up to date).
+static float gEyesMouseX = 0.0f;
+static float gEyesMouseY = 0.0f;
+
+// Two eyes in the box at (left, top), their pupils turned to the pointer.
+static void DrawTrayEyes(float left, float top, float width, float height) {
+    static GLuint white = 0, pupil = 0;
+    if (white == 0) { white = CircleTexture(250, 0.14f); pupil = CircleTexture(16, 0.0f); }
+    const float radiusX = width * 0.24f, radiusY = height * 0.5f;
+    const float pupilRadius = height * 0.17f;
+    for (int eye = 0; eye < 2; ++eye) {
+        const float centerX = left + width * (eye == 0 ? 0.25f : 0.75f), centerY = top + height * 0.5f;
+        TrayQuad(white, centerX, centerY, radiusX, radiusY);
+        const float reachX = std::max(0.1f, radiusX * 0.84f - pupilRadius), reachY = std::max(0.1f, radiusY * 0.84f - pupilRadius);
+        float dx = gEyesMouseX - centerX, dy = gEyesMouseY - centerY;
+        const float length = std::sqrt((dx / reachX) * (dx / reachX) + (dy / reachY) * (dy / reachY));
+        if (length > 1.0f) { dx /= length; dy /= length; }
+        TrayQuad(pupil, centerX + dx, centerY + dy, pupilRadius, pupilRadius);
+    }
 }
 
 void SyncDynamicSystrayTextures() {
@@ -2755,17 +3363,7 @@ void SyncDynamicSystrayTextures() {
             if (foundName != nullptr && strlen(foundName) > 0) {
                 std::string itemNameStr(foundName);
 
-                // --- FILTER OUT PROCESSCONTROLLER ---
-                if (itemNameStr == "ProcessController" || itemNameStr == "ProcessControllerView") {
-                    continue;
-                }
-
-                // --- FILTER OUT THE DESKBAR'S WORKSPACES WIDGET: hdesktop has its own workspace switcher ---
-                {
-                    std::string lowered(itemNameStr);
-                    for (size_t c = 0; c < lowered.size(); ++c) lowered[c] = (char)tolower((unsigned char)lowered[c]);
-                    if (lowered == "workspaces") continue;
-                }
+                if (TrayItemIsLeftOut(itemNameStr)) continue;
 
                 activeSnapshot.push_back({itemNameStr, idProber});
             }
@@ -2789,6 +3387,9 @@ void SyncDynamicSystrayTextures() {
         for (auto& oldItem : fLiveTrayItems) {
             if (oldItem.textureId != 0) {
                 glDeleteTextures(1, &oldItem.textureId);
+            }
+            if (oldItem.liveTextureId != 0) {
+                glDeleteTextures(1, &oldItem.liveTextureId);
             }
         }
         fLiveTrayItems.clear();
@@ -2900,8 +3501,14 @@ void SyncDynamicSystrayTextures() {
             newItem.currentRenderX = 0.0f;
             newItem.currentRenderWidth = 0.0f;
             newItem.currentRenderTop = 0.0f;
+            newItem.currentRenderHeight = 0.0f;
+            newItem.liveTextureId = 0;
+            newItem.liveAspect = 1.0f;
+            newItem.isEyes = IsEyesItem(snap.first);
             fLiveTrayItems.push_back(newItem);
         }
+        gLiveTrayApplied = -1;     // the new list takes the pictures there are
+        ApplyLiveTrayPictures();
     }
 }
 
@@ -9523,7 +10130,7 @@ void SyncDockWithRunningDeskbarApps() {
 		        if (item.currentRenderWidth <= 0.0f) continue;
 
 		        if (x >= item.currentRenderX && x <= (item.currentRenderX + item.currentRenderWidth) &&
-		   		    y >= item.currentRenderTop && y <= (item.currentRenderTop + item.currentRenderWidth)) {
+		   		    y >= item.currentRenderTop && y <= (item.currentRenderTop + item.currentRenderHeight)) {
 
 		            BMessenger deskbarMessenger("application/x-vnd.be-tskb");
 		            if (deskbarMessenger.IsValid()) {
@@ -9549,7 +10156,7 @@ void SyncDockWithRunningDeskbarApps() {
 		                    forward->itemId = item.internalId;
 		                    forward->buttons = (button == SDL_BUTTON_LEFT) ? 1 : (button == SDL_BUTTON_RIGHT) ? 2 : 4;
 		                    forward->screenX = (float)forwardWinX + item.currentRenderX + (item.currentRenderWidth / 2.0f);
-		                    forward->screenY = item.currentRenderTop + (item.currentRenderWidth / 2.0f);
+		                    forward->screenY = item.currentRenderTop + (item.currentRenderHeight / 2.0f);
 		                    thread_id forwardThread = spawn_thread([](void* data) -> int32 {
 		                        TrayForwardArgs* a = static_cast<TrayForwardArgs*>(data);
 		                        ForwardClickToTrayItem(a->itemId, a->buttons, a->screenX, a->screenY);
@@ -9954,11 +10561,13 @@ void SyncDockWithRunningDeskbarApps() {
             	SyncDynamicSystrayTextures();
 			}
 	        float traySectionPadding = clockSectionPadding;
-	        size_t trayCount = TrayDrawnItemCount();
 
             float baselineTrayWidth = 0.0f;
-            if (showSystemTray && trayCount > 0) {
-                baselineTrayWidth = (trayCount * 16.0f) + ((trayCount > 1 ? trayCount - 1 : 0) * 6.0f);
+            TrayLayout trayLayout;
+            trayLayout.width = trayLayout.height = trayLayout.itemHeight = 0.0f;
+            if (showSystemTray) {
+                trayLayout = ComputeTrayLayout(baseSize);
+                baselineTrayWidth = trayLayout.width;
             }
 
 	        progressiveX += traySectionPadding;
@@ -9980,7 +10589,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            float ratio = distanceTray2D / 180.0f;
 
 	            // Smooth Gaussian bell-curve falloff transitions cleanly in all directions
-	            trayScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
+	            trayScale = 1.0f + (TrayZoomLimit(trayLayout, fIconZoom, baseSize) - 1.0f) * std::exp(-ratio * ratio);
 	        }
 
 	        dynamicWidths.push_back(baselineTrayWidth * trayScale);
@@ -10920,35 +11529,19 @@ void SyncDockWithRunningDeskbarApps() {
 	    // INTERCEPT AND EVALUATE CLICK BOUNDS FOR THE REPLICANT SYSTEM TRAY
 	    // -------------------------------------------------------------------------
 	    float dynamicTrayWidth = dynamicWidths[traySlotIdx];
-	    float trayScaleFactor  = dynamicScales[traySlotIdx];
 
 	    // Only process tray metrics and click captures if the global config is enabled
 	    if (showSystemTray) {
 	        currentX += clockSectionPadding;
 
-	        // Match the 16px high tray vertical position bounds used in RenderFrame
-	        HaikuRect trayHitbox;
-	        trayHitbox.left = currentX;
-	        trayHitbox.right = currentX + dynamicTrayWidth;
-	        if (gDockLocation == kDockLocationTop) {
-	            trayHitbox.top = dockPlate.top + 10.0f;
-	            trayHitbox.bottom = dockPlate.top + 10.0f + (32.0f * trayScaleFactor);
-	        } else {
-	            trayHitbox.top = dockPlate.bottom - 10.0f - (32.0f * trayScaleFactor);
-	            trayHitbox.bottom = dockPlate.bottom - 10.0f;
-	        }
-
-	        if (x >= trayHitbox.left && x <= trayHitbox.right && y >= trayHitbox.top && y <= trayHitbox.bottom) {
-	            float localTrayTrackerX = currentX;
-	            float iconHitboxSize = 16.0f * trayScaleFactor;
-	            float traySpacing = 6.0f * trayScaleFactor;
-
-	            // Dynamically sweep over your live running system tray list
+	        // each item is where it was last drawn (the tray may have several rows)
+	        {
 	            for (size_t t = 0; t < fLiveTrayItems.size(); ++t) {
-	                float itemLeft  = localTrayTrackerX;
-	                float itemRight = itemLeft + iconHitboxSize;
+	                const TrayItem& hit = fLiveTrayItems[t];
+	                if (!TrayItemIsDrawn(hit) || hit.currentRenderWidth <= 0.0f) continue;
 
-	                if (x >= itemLeft && x <= itemRight) {
+	                if (x >= hit.currentRenderX && x <= hit.currentRenderX + hit.currentRenderWidth
+	                    && y >= hit.currentRenderTop && y <= hit.currentRenderTop + hit.currentRenderHeight) {
 	                    BMessenger deskbarMessenger("application/x-vnd.be-tskb");
 	                    if (deskbarMessenger.IsValid()) {
 
@@ -11034,8 +11627,8 @@ void SyncDockWithRunningDeskbarApps() {
 	                            }
 
 	                            // Open the popup centered right over the tray icon itself.
-	                            float trayItemCenterY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (8.0f * trayScaleFactor)) + (iconHitboxSize / 2.0f);
-	                            float anchoredMenuX = static_cast<float>(nativeWinX) + localTrayTrackerX + (iconHitboxSize / 2.0f);
+	                            float trayItemCenterY = hit.currentRenderTop + (hit.currentRenderHeight / 2.0f);
+	                            float anchoredMenuX = static_cast<float>(nativeWinX) + hit.currentRenderX + (hit.currentRenderWidth / 2.0f);
 	                            float anchoredMenuY = trayItemCenterY;
 	                            BPoint screenClickPoint(anchoredMenuX, anchoredMenuY);
 	                            PillDockAnchor(localMenu, anchoredMenuY, &screenClickPoint);
@@ -11103,7 +11696,6 @@ void SyncDockWithRunningDeskbarApps() {
 	                    fShowMainMenu = false;
 	                    return;
 	                }
-	                localTrayTrackerX += iconHitboxSize + traySpacing;
 	            }
 	        }
 	        currentX += dynamicTrayWidth;
@@ -11607,11 +12199,13 @@ void SyncDockWithRunningDeskbarApps() {
             	SyncDynamicSystrayTextures();
 			}
 	        float traySectionPadding = clockSectionPadding;
-	        size_t trayCount = TrayDrawnItemCount();
 
             float baselineTrayWidth = 0.0f;
-            if (showSystemTray && trayCount > 0) {
-                baselineTrayWidth = (trayCount * 16.0f) + ((trayCount > 1 ? trayCount - 1 : 0) * 6.0f);
+            TrayLayout trayLayout;
+            trayLayout.width = trayLayout.height = trayLayout.itemHeight = 0.0f;
+            if (showSystemTray) {
+                trayLayout = ComputeTrayLayout(baseSize);
+                baselineTrayWidth = trayLayout.width;
             }
 
 	        progressiveX += traySectionPadding;
@@ -11633,7 +12227,7 @@ void SyncDockWithRunningDeskbarApps() {
 	            float ratio = distanceTray2D / 180.0f;
 
 	            // Smooth Gaussian bell-curve falloff transitions cleanly in all directions
-	            trayScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
+	            trayScale = 1.0f + (TrayZoomLimit(trayLayout, fIconZoom, baseSize) - 1.0f) * std::exp(-ratio * ratio);
 	        }
 
 	        dynamicWidths.push_back(baselineTrayWidth * trayScale);
@@ -12878,11 +13472,15 @@ void SyncDockWithRunningDeskbarApps() {
 
 	        currentX += clockSectionPadding;
 
-	        // Vertically align the 16px high tray block cleanly within the panel
-	        float trayRenderTopY = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (8.0f * trayScaleFactor));
-
-	        float localTrayX = currentX;
-	        float traySpacing = 6.0f * trayScaleFactor;
+	        // The block of rows is centered where a single row would be; a tall block that is zoomed grows away from the
+	        // screen's edge instead of over it
+	        const TrayLayout trayLayout = ComputeTrayLayout(baseSize);
+	        const float trayBlockHeight = trayLayout.height * trayScaleFactor;
+	        float trayRenderTopY = dockPlate.bottom - 10.0f - (maxDockHeight / 2.0f) - (trayBlockHeight / 2.0f);
+	        if (gDockLocation == kDockLocationTop)
+	            trayRenderTopY = std::max(trayRenderTopY, dockPlate.top + 4.0f);
+	        else
+	            trayRenderTopY = std::min(trayRenderTopY, dockPlate.bottom - 4.0f - trayBlockHeight);
 
 	        // Force a completely clean OpenGL texturing environment state block
 	        glEnable(GL_BLEND);
@@ -12891,31 +13489,32 @@ void SyncDockWithRunningDeskbarApps() {
 	        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-	        // Iterate through all live elements dynamically extracted by the background engine
-	        for (size_t i = 0; i < fLiveTrayItems.size(); ++i) {
-	            GLuint trayTexID = fLiveTrayItems[i].textureId;
-	            if (trayTexID == 0) continue;
+	        // (an item that is not in the layout has no place to be clicked)
+	        for (size_t i = 0; i < fLiveTrayItems.size(); ++i) fLiveTrayItems[i].currentRenderWidth = 0.0f;
 
-	            float itemWidth = 16.0f * trayScaleFactor;
+	        for (size_t n = 0; n < trayLayout.slots.size(); ++n) {
+	            const TraySlot& slot = trayLayout.slots[n];
+	            TrayItem& item = fLiveTrayItems[slot.item];
+	            const GLuint trayTexID = item.liveTextureId != 0 ? item.liveTextureId : item.textureId;
+
+	            const float itemLeft = currentX + slot.x * trayScaleFactor;
+	            const float itemTop = trayRenderTopY + slot.y * trayScaleFactor;
+	            const float itemWidth = slot.width * trayScaleFactor;
+	            const float itemHeight = trayLayout.itemHeight * trayScaleFactor;
 
 	            // =========================================================================
 	            // CACHE RENDER POSITION METRICS FOR FAST PASS-2 HIT TESTING IN MOUSE CLICK
 	            // =========================================================================
-	            fLiveTrayItems[i].currentRenderX = localTrayX;
-	            fLiveTrayItems[i].currentRenderWidth = itemWidth;
-	            fLiveTrayItems[i].currentRenderTop = trayRenderTopY;
+	            item.currentRenderX = itemLeft;
+	            item.currentRenderWidth = itemWidth;
+	            item.currentRenderTop = itemTop;
+	            item.currentRenderHeight = itemHeight;
 
-	            // Bind explicitly for this specific quad draw task run
-	            glBindTexture(GL_TEXTURE_2D, trayTexID);
-	            glBegin(GL_QUADS);
-	                glTexCoord2f(0.0f, 0.0f); glVertex2f(localTrayX, trayRenderTopY);
-	                glTexCoord2f(1.0f, 0.0f); glVertex2f(localTrayX + itemWidth, trayRenderTopY);
-	                glTexCoord2f(1.0f, 1.0f); glVertex2f(localTrayX + itemWidth, trayRenderTopY + itemWidth);
-	                glTexCoord2f(0.0f, 1.0f); glVertex2f(localTrayX, trayRenderTopY + itemWidth);
-	            glEnd();
-
-	            // Advance layout vector forward using dynamic scaling specs
-	            localTrayX += itemWidth + traySpacing;
+	            if (item.isEyes)
+	                DrawTrayEyes(itemLeft, itemTop, itemWidth, itemHeight);
+	            else
+	                TrayQuad(trayTexID, itemLeft + itemWidth / 2.0f, itemTop + itemHeight / 2.0f,
+	                    itemWidth / 2.0f, itemHeight / 2.0f);
 	        }
 			/*
 	        // --- CRITICAL DEFENSIVE SHIELD: FORCE FULL OpenGL STATE SHUTDOWN ---
@@ -14877,6 +15476,7 @@ int main(int argc, char* argv[]) {
     bool cursorIsInsideDock = false;
 
     gPictureKeeper = new WindowPictureKeeper();      // (without a compositor: the pictures for the cards of minimized windows)
+    StartLiveTray();
 
     while (appExecuting) {
         if (SDL_WaitEventTimeout(&incomingEventPackage, (gCompositor && needsRender) ? 8 : 30)) {
@@ -15282,6 +15882,25 @@ int main(int argc, char* argv[]) {
         if (desktopEngine.WallpaperFadeActive())
             needsRender = true;
 
+        if (showSystemTray && ApplyLiveTrayPictures())
+            needsRender = true;
+
+        // the eyes look after the pointer wherever it goes, while the dock is on the screen
+        gEyesMouseX = static_cast<float>(localMouseX);
+        gEyesMouseY = static_cast<float>(adjustedMouseY);
+        if (showSystemTray && dockState != STATE_HIDDEN) {
+            static float eyesDrawnX = 0.0f, eyesDrawnY = 0.0f;
+            if ((gEyesMouseX != eyesDrawnX || gEyesMouseY != eyesDrawnY)) {
+                for (size_t i = 0; i < fLiveTrayItems.size(); ++i) {
+                    if (!fLiveTrayItems[i].isEyes) continue;
+                    eyesDrawnX = gEyesMouseX;
+                    eyesDrawnY = gEyesMouseY;
+                    needsRender = true;
+                    break;
+                }
+            }
+        }
+
         if (needsRender) {
             // =========================================================================
             // DYNAMIC HARDWARE WINDOW RESIZING ENGINE
@@ -15344,6 +15963,7 @@ int main(int argc, char* argv[]) {
 
     }
 
+    StopLiveTray();
     if (gDockNativeWindow != nullptr) { if (gDockNativeWindow->Lock()) gDockNativeWindow->Quit(); gDockNativeWindow = nullptr; }
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);

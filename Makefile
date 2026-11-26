@@ -40,6 +40,15 @@ GUI_SRCS = hdesktop.cpp
 GUI_OBJS = $(GUI_SRCS:.cpp=.o)
 GUI_RSRCS = hdesktop.rsrc
 
+# The item hdesktop puts in the Deskbar's tray to get the other items' live pictures. It runs inside the Deskbar, so on
+# 32-bit it is built with the compiler the Deskbar is built with (gcc 2), unlike hdesktop itself.
+HELPER_TARGET = hDesktopTrayHelper
+ifeq ($(UNAME_M), BePC)
+    HELPER_CXX = g++
+else
+    HELPER_CXX = $(CXX)
+endif
+
 
 # Shared linking assets
 # -lgame: BDirectWindow's own symbols live in Haiku's separate Game Kit lib,
@@ -51,7 +60,15 @@ LIBS = -L./lib -lbe -lgame -ltracker -ltranslation -lmedia -lSDL2 -lGL -lGLU -ll
 LDFLAGS = $(INCLUDE) -Wl,--gc-sections -s $(SNAKE_RPATH)
 
 # Master target execution rule
-all: $(GUI_TARGET) 
+all: $(GUI_TARGET) $(HELPER_TARGET)
+
+$(HELPER_TARGET): tray_helper.cpp tray_helper.h tray_helper.rdef
+	$(HELPER_CXX) -O2 -Wall -o $(HELPER_TARGET) tray_helper.cpp -lbe
+	rc -o tray_helper.rsrc tray_helper.rdef
+	xres -o $(HELPER_TARGET) tray_helper.rsrc
+	mimeset -f $(HELPER_TARGET)
+
+hdesktop.o: tray_helper.h
 
 # Link the graphical desktop client binary
 $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
@@ -75,7 +92,7 @@ $(GUI_OBJS): VERSION
 
 # Deep system cleaning target
 clean:
-	rm -f *.o *.rsrc *.version.rdef $(GUI_TARGET) 
+	rm -f *.o *.rsrc *.version.rdef $(GUI_TARGET) $(HELPER_TARGET)
 	rm -f $(NAME) *.hpkg
 	rm -rf build
 
@@ -93,6 +110,8 @@ release: all
 	mkdir -p $(PACKAGE_DIR)/bin
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
+	mkdir -p $(PACKAGE_DIR)/data/$(GUI_TARGET)
+	cp -a $(HELPER_TARGET) $(PACKAGE_DIR)/data/$(GUI_TARGET)/$(HELPER_TARGET)
 	ln -s /boot/system/apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s /boot/system/apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
 	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-$(REVISION)-$(ARCH).hpkg	
