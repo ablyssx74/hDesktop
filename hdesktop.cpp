@@ -164,6 +164,16 @@ bool fShowWorkspaceSwitcher = true;
 bool fShowClock = true;
 bool fShowVolume = true;
 bool fShowCpuGraph = true;
+// The Eyeballs widget: eyes of hdesktop's own that follow the pointer, in the system tray or beside the clock (also beside the
+// clock while the system tray is off). Only one set of eyes shows: with the Deskbar's "Who is watching you?" there too, the
+// user is asked which (gEyeballsOverOther: asked already, and Eyeballs was the answer).
+bool fShowEyeballs = false;
+enum EyeballsPlace { kEyeballsInTray = 0, kEyeballsBesideClock = 1 };
+int32 gEyeballsPlace = kEyeballsInTray;
+bool gEyeballsOverOther = false;
+static const char* const kEyeballsItemName = "hDesktopEyeballs";   // its item in the dock's tray
+static bool EyeballsBesideClock() { return fShowEyeballs && (gEyeballsPlace == kEyeballsBesideClock || !showSystemTray); }
+static BMessenger gConfigViewMessenger;   // the open settings view, told when the answer changes the check box
 
 // Which screen edge the dock is pinned to. Left/Right are intentionally not
 // offered in the settings UI yet -- the dock's layout, hit-testing, and
@@ -356,6 +366,10 @@ enum {
     MSG_CLOCK_TOGGLED = 'cktg',
     MSG_VOLUME_TOGGLED = 'vltg',
     MSG_CPUGRAPH_TOGGLED = 'cptg',
+    MSG_EYEBALLS_TOGGLED = 'eytg',
+    MSG_EYEBALLS_IN_TRAY = 'eyit',
+    MSG_EYEBALLS_BESIDE_CLOCK = 'eybc',
+    MSG_EYEBALLS_CHANGED = 'eych',
     MSG_DOCKLOCATION_BOTTOM_TOGGLED = 'dlbt',
     MSG_DOCKLOCATION_TOP_TOGGLED = 'dltp',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
@@ -3348,6 +3362,51 @@ static void DrawTrayEyes(float left, float top, float width, float height) {
     }
 }
 
+// Is "Who is watching you?" in the Deskbar's tray?
+static bool DeskbarHasEyes() {
+    BDeskbar deskbar;
+    for (int32 id = 0; id < 150; ++id) {
+        const char* name = nullptr;
+        if (deskbar.GetItemInfo(id, &name) != B_OK || name == nullptr) continue;
+        const bool eyes = IsEyesItem(name);
+        free(const_cast<char*>(name));
+        if (eyes) return true;
+    }
+    return false;
+}
+
+static int32 gEyesQuestionOpen = 0;
+
+static int32 EyesQuestionThread(void*) {
+    BAlert* alert = new BAlert("Eyeballs",
+        "\"Who is watching you?\" is already in the Deskbar's tray. Only one set of eyes can show in hDesktop.\n\n"
+        "Which would you like? (The Deskbar's tray is not changed.)",
+        "Who is watching you?", "Eyeballs", nullptr, B_WIDTH_AS_USUAL, B_IDEA_ALERT);
+    alert->CenterOnScreen();
+    const int32 choice = alert->Go();
+    fShowEyeballs = (choice == 1);
+    gEyeballsOverOther = (choice == 1);
+    SaveConfiguration();
+    gConfigViewMessenger.SendMessage(MSG_EYEBALLS_CHANGED);
+    atomic_set(&gEyesQuestionOpen, 0);
+    return 0;
+}
+
+// Asks which set of eyes the user prefers, in a thread of its own so that the dock keeps drawing.
+static void AskWhichEyes() {
+    if (atomic_get_and_set(&gEyesQuestionOpen, 1) != 0) return;
+    const thread_id thread = spawn_thread(EyesQuestionThread, "hdesktop eyes question", B_NORMAL_PRIORITY, nullptr);
+    if (thread < 0 || resume_thread(thread) != B_OK) atomic_set(&gEyesQuestionOpen, 0);
+}
+
+// "Who is watching you?" may come while Eyeballs is on (at the start, or added later): ask then, too.
+static void CheckForOtherEyes() {
+    static bigtime_t next = 0;
+    if (!fShowEyeballs || gEyeballsOverOther || system_time() < next) return;
+    next = system_time() + 3000000;
+    if (DeskbarHasEyes()) AskWhichEyes();
+}
+
 void SyncDynamicSystrayTextures() {
     bigtime_t currentTime = system_time();
     // Throttle: Only probe Deskbar twice per second (500,000 microseconds)
@@ -3369,10 +3428,18 @@ void SyncDynamicSystrayTextures() {
                 std::string itemNameStr(foundName);
 
                 if (TrayItemIsLeftOut(itemNameStr)) continue;
+                // (one set of eyes: Eyeballs, when on, takes the place of the Deskbar's)
+                if (fShowEyeballs && gEyeballsOverOther && IsEyesItem(itemNameStr)) continue;
 
                 activeSnapshot.push_back({itemNameStr, idProber});
             }
         }
+    }
+    if (fShowEyeballs && gEyeballsPlace == kEyeballsInTray) {
+        // (while the question is open the Deskbar's eyes stay, and ours wait)
+        bool otherEyes = false;
+        for (const auto& snap : activeSnapshot) otherEyes = otherEyes || IsEyesItem(snap.first);
+        if (!otherEyes) activeSnapshot.push_back({kEyeballsItemName, -1});
     }
 
     // 2. Diff check: Rebuild GL textures if a structural change occurred
@@ -3509,7 +3576,7 @@ void SyncDynamicSystrayTextures() {
             newItem.currentRenderHeight = 0.0f;
             newItem.liveTextureId = 0;
             newItem.liveAspect = 1.0f;
-            newItem.isEyes = IsEyesItem(snap.first);
+            newItem.isEyes = snap.first == kEyeballsItemName || IsEyesItem(snap.first);
             fLiveTrayItems.push_back(newItem);
         }
         gLiveTrayApplied = -1;     // the new list takes the pictures there are
@@ -3765,6 +3832,8 @@ private:
     BCheckBox* fClockCheckbox;
     BCheckBox* fVolumeCheckbox;
     BCheckBox* fCpuGraphCheckbox;
+    BCheckBox* fEyeballsCheckbox;
+    BMenuField* fEyeballsPlaceField;
     BMenuField* fDockLocationMenuField;
     BMenuField* fThumbnailModeField = nullptr;
     BMenuField* fEffectsMenuField;
@@ -3830,6 +3899,26 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fCpuGraphCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
         fCpuGraphCheckbox->SetValue(fShowCpuGraph ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fCpuGraphCheckbox);
+
+        fEyeballsCheckbox = new BCheckBox(BRect(290.0f, 362.0f, 310.0f, 378.0f), "eyeballs_cb", nullptr,
+            new BMessage(MSG_EYEBALLS_TOGGLED));
+        fEyeballsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
+        fEyeballsCheckbox->SetValue(fShowEyeballs ? B_CONTROL_ON : B_CONTROL_OFF);
+        AddChild(fEyeballsCheckbox);
+        {
+            BPopUpMenu* placePopup = new BPopUpMenu("Eyeballs Location");
+            BMenuItem* inTray = new BMenuItem("System Tray", new BMessage(MSG_EYEBALLS_IN_TRAY));
+            inTray->SetMarked(gEyeballsPlace == kEyeballsInTray);
+            placePopup->AddItem(inTray);
+            BMenuItem* besideClock = new BMenuItem("Beside Clock", new BMessage(MSG_EYEBALLS_BESIDE_CLOCK));
+            besideClock->SetMarked(gEyeballsPlace == kEyeballsBesideClock);
+            placePopup->AddItem(besideClock);
+            fEyeballsPlaceField = new BMenuField(BRect(145.0f, 390.0f, frame.Width() - 35.0f, 415.0f),
+                "eyeballs_place_field", nullptr, placePopup);
+            fEyeballsPlaceField->SetViewColor(B_TRANSPARENT_COLOR);
+            AddChild(fEyeballsPlaceField);
+            AddChild(new PillMenuFieldOverlay(fEyeballsPlaceField));
+        }
 
         // Rows 4-5, left column: Text Overlays -- two mutually exclusive
         // checkboxes, Haiku mode on row 4 and SDL mode directly under it on
@@ -4174,6 +4263,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         put(fCpuGraphCheckbox, 1, 35.0f, 38.0f);
         put(fWorkspaceSwitcherCheckbox, 1, 290.0f, 38.0f);
         put(fSystemTrayCheckbox, 1, 35.0f, 62.0f);
+        put(fEyeballsCheckbox, 1, 290.0f, 62.0f);
+        putField(fEyeballsPlaceField, 1, 145.0f, 90.0f);
         // Look
         put(fRoundedEdgesCheckbox, 2, 35.0f, 14.0f);
         put(fDrawerColorButton, 2, 76.0f, 52.0f);
@@ -4227,6 +4318,8 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 text("Show CPU Graph", 62.0f, 50.0f);
                 text("Show Workspace Switcher", 317.0f, 50.0f);
                 text("Enable System Tray", 62.0f, 74.0f);
+                text("Show Eyeballs", 317.0f, 74.0f);
+                text("Eyeballs Location:", 35.0f, 107.0f);
                 break;
             case 2: {
                 text("Rounded Edges", 62.0f, 26.0f);
@@ -4500,6 +4593,9 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fClockCheckbox->SetTarget(this);
         fVolumeCheckbox->SetTarget(this);
         fCpuGraphCheckbox->SetTarget(this);
+        fEyeballsCheckbox->SetTarget(this);
+        fEyeballsPlaceField->Menu()->SetTargetForItems(this);
+        gConfigViewMessenger = BMessenger(this);
         fDockLocationMenuField->Menu()->SetTargetForItems(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
         fCloseEffectsMenuField->Menu()->SetTargetForItems(this);
@@ -4730,6 +4826,32 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
                 fShowCpuGraph = (fCpuGraphCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
                 Invalidate();
+                break;
+            }
+
+            case MSG_EYEBALLS_TOGGLED: {
+                const bool on = (fEyeballsCheckbox->Value() == B_CONTROL_ON);
+                gEyeballsOverOther = false;
+                if (on && DeskbarHasEyes()) {
+                    fShowEyeballs = true;     // (until the answer says otherwise)
+                    AskWhichEyes();
+                } else {
+                    fShowEyeballs = on;
+                    SaveConfiguration();
+                }
+                Invalidate();
+                break;
+            }
+
+            case MSG_EYEBALLS_CHANGED: {
+                fEyeballsCheckbox->SetValue(fShowEyeballs ? B_CONTROL_ON : B_CONTROL_OFF);
+                break;
+            }
+
+            case MSG_EYEBALLS_IN_TRAY:
+            case MSG_EYEBALLS_BESIDE_CLOCK: {
+                gEyeballsPlace = message->what == MSG_EYEBALLS_IN_TRAY ? kEyeballsInTray : kEyeballsBesideClock;
+                SaveConfiguration();
                 break;
             }
 
@@ -10150,7 +10272,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    // =========================================================================
 	    if (showSystemTray) {
 		    for (const auto& item : fLiveTrayItems) {
-		        if (item.currentRenderWidth <= 0.0f) continue;
+		        if (item.currentRenderWidth <= 0.0f || item.name == kEyeballsItemName) continue;
 
 		        if (x >= item.currentRenderX && x <= (item.currentRenderX + item.currentRenderWidth) &&
 		   		    y >= item.currentRenderTop && y <= (item.currentRenderTop + item.currentRenderHeight)) {
@@ -10654,6 +10776,22 @@ void SyncDockWithRunningDeskbarApps() {
                 dynamicScales.push_back(1.0f);
             }
 
+            // The Eyeballs widget, right of the clock (its slot is the last one, see below)
+            float eyeballsWidth = 0.0f, eyeballsScale = 1.0f;
+            if (EyeballsBesideClock()) {
+                progressiveX += clockSectionPadding;
+                const float baseEyeballsWidth = 48.0f * (baseSize / 48.0f);
+                const float distanceX = std::abs(fMouseX - ZoomCenterX(progressiveX + (baseEyeballsWidth / 2.0f)));
+                const float distanceY = std::abs(fMouseY - DockEdgeY(10.0f + (baseSize / 2.0f)));
+                const float distance2D = std::sqrt(distanceX * distanceX + distanceY * distanceY);
+                if (fCursorIsInsideHitbox && distance2D < 180.0f) {
+                    const float ratio = distance2D / 180.0f;
+                    eyeballsScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
+                }
+                eyeballsWidth = baseEyeballsWidth * eyeballsScale;
+                progressiveX += eyeballsWidth;
+            }
+
             // =========================================================================
             // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
@@ -10743,6 +10881,8 @@ void SyncDockWithRunningDeskbarApps() {
                 dynamicWidths.push_back(0.0f);
                 dynamicScales.push_back(1.0f);
             }
+            dynamicWidths.push_back(eyeballsWidth);
+            dynamicScales.push_back(eyeballsScale);
 
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
@@ -10768,6 +10908,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    size_t volumeSlotIdx  = totalIconsCount + 3;
 	    size_t cpuSlotIdx     = totalIconsCount + 4;
 	    size_t workspaceSlotIdx = totalIconsCount + 5;
+	    size_t eyeballsSlotIdx = totalIconsCount + 6;
 
 	    float dockMarginBottom = 15.0f;
 	    HaikuRect dockPlate;
@@ -10815,6 +10956,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    if (fShowClock && fClockTexture.id != 0) layoutTrackerX += clockSectionPadding + dynamicWidths[clockSlotIdx];
 
 	    // Accountability shift step past our volume metrics
+	    if (EyeballsBesideClock()) layoutTrackerX += clockSectionPadding + dynamicWidths[eyeballsSlotIdx];
 	    if (fShowVolume) layoutTrackerX += clockSectionPadding + dynamicWidths[volumeSlotIdx];
 	    layoutTrackerX += clockSectionPadding;
 
@@ -11561,7 +11703,7 @@ void SyncDockWithRunningDeskbarApps() {
 	        {
 	            for (size_t t = 0; t < fLiveTrayItems.size(); ++t) {
 	                const TrayItem& hit = fLiveTrayItems[t];
-	                if (!TrayItemIsDrawn(hit) || hit.currentRenderWidth <= 0.0f) continue;
+	                if (!TrayItemIsDrawn(hit) || hit.currentRenderWidth <= 0.0f || hit.name == kEyeballsItemName) continue;
 
 	                if (x >= hit.currentRenderX && x <= hit.currentRenderX + hit.currentRenderWidth
 	                    && y >= hit.currentRenderTop && y <= hit.currentRenderTop + hit.currentRenderHeight) {
@@ -11742,6 +11884,9 @@ void SyncDockWithRunningDeskbarApps() {
 	        }
 	        currentX += dynamicClockW;
 	    }
+
+	    // the Eyeballs widget does nothing when clicked
+	    if (EyeballsBesideClock()) currentX += clockSectionPadding + dynamicWidths[eyeballsSlotIdx];
 
 	    // -------------------------------------------------------------------------
 	    // Skip past Volume Slider component space footprint natively (WITH SIZE RATIO)
@@ -12292,6 +12437,22 @@ void SyncDockWithRunningDeskbarApps() {
                 dynamicScales.push_back(1.0f);
             }
 
+            // The Eyeballs widget, right of the clock (its slot is the last one, see below)
+            float eyeballsWidth = 0.0f, eyeballsScale = 1.0f;
+            if (EyeballsBesideClock()) {
+                progressiveX += clockSectionPadding;
+                const float baseEyeballsWidth = 48.0f * (baseSize / 48.0f);
+                const float distanceX = std::abs(fMouseX - ZoomCenterX(progressiveX + (baseEyeballsWidth / 2.0f)));
+                const float distanceY = std::abs(fMouseY - DockEdgeY(10.0f + (baseSize / 2.0f)));
+                const float distance2D = std::sqrt(distanceX * distanceX + distanceY * distanceY);
+                if (fCursorIsInsideHitbox && distance2D < 180.0f) {
+                    const float ratio = distance2D / 180.0f;
+                    eyeballsScale = 1.0f + (fIconZoom - 1.0f) * std::exp(-ratio * ratio);
+                }
+                eyeballsWidth = baseEyeballsWidth * eyeballsScale;
+                progressiveX += eyeballsWidth;
+            }
+
             // =========================================================================
             // PROCESS DYNAMIC VOLUME SLIDER COMPONENT METRICS (2D SMOOTH FIX)
             // =========================================================================
@@ -12381,6 +12542,8 @@ void SyncDockWithRunningDeskbarApps() {
                 dynamicWidths.push_back(0.0f);
                 dynamicScales.push_back(1.0f);
             }
+            dynamicWidths.push_back(eyeballsWidth);
+            dynamicScales.push_back(eyeballsScale);
 
             float leftEdge = (fWidth / 2.0f) - (totalCalculatedWidth / 2.0f);
             totalCalculatedWidth = progressiveX - leftEdge;
@@ -12409,6 +12572,7 @@ void SyncDockWithRunningDeskbarApps() {
         size_t volumeSlotIdx = totalIconsCount + 3;
         size_t cpuSlotIdx    = totalIconsCount + 4;
         size_t workspaceSlotIdx = totalIconsCount + 5;
+        size_t eyeballsSlotIdx = totalIconsCount + 6;
 
         // Calculate our dynamic size ratio multiplier based on your slider baseline
         float layoutSizeRatio = baseSize / 48.0f;
@@ -13656,6 +13820,23 @@ void SyncDockWithRunningDeskbarApps() {
 
 
 
+        // The Eyeballs widget, right of the clock
+        if (EyeballsBesideClock()) {
+            currentX += clockSectionPadding;
+            const float width = dynamicWidths[eyeballsSlotIdx];
+            const float height = width * (2.0f / 3.0f);
+            const float top = dockPlate.bottom - 10.0f - ((maxDockHeight / 2.0f) + (height / 2.0f));
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_TEXTURE_2D);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+            DrawTrayEyes(currentX, top, width, height);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glDisable(GL_TEXTURE_2D);
+            currentX += width;
+        }
+
         // =========================================================================
         // NEW: DRAW DYNAMIC VOLUME CONTROL SLIDER (DYNAMIC SIZE SCALING & SOLID BLACK)
         // =========================================================================
@@ -14795,6 +14976,9 @@ void SaveConfiguration() {
             settingsMsg.AddBool("show_clock", fShowClock);
             settingsMsg.AddBool("show_volume", fShowVolume);
             settingsMsg.AddBool("show_cpu_graph", fShowCpuGraph);
+            settingsMsg.AddBool("show_eyeballs", fShowEyeballs);
+            settingsMsg.AddInt32("eyeballs_place", gEyeballsPlace);
+            settingsMsg.AddBool("eyeballs_over_deskbar", gEyeballsOverOther);
             settingsMsg.AddInt32("dock_location", gDockLocation);
 
 			settingsMsg.AddFloat(kSettingsIconSizeKey, fBaseIconSize);
@@ -14875,6 +15059,10 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("show_clock", &valBool) == B_OK) fShowClock = valBool;
                 if (settingsMsg.FindBool("show_volume", &valBool) == B_OK) fShowVolume = valBool;
                 if (settingsMsg.FindBool("show_cpu_graph", &valBool) == B_OK) fShowCpuGraph = valBool;
+                if (settingsMsg.FindBool("show_eyeballs", &valBool) == B_OK) fShowEyeballs = valBool;
+                if (settingsMsg.FindInt32("eyeballs_place", &valInt32) == B_OK)
+                    gEyeballsPlace = (valInt32 == kEyeballsBesideClock) ? kEyeballsBesideClock : kEyeballsInTray;
+                if (settingsMsg.FindBool("eyeballs_over_deskbar", &valBool) == B_OK) gEyeballsOverOther = valBool;
                 if (settingsMsg.FindInt32("dock_location", &valInt32) == B_OK) {
                     gDockLocation = (valInt32 == kDockLocationTop) ? kDockLocationTop : kDockLocationBottom;
                 }
@@ -15951,10 +16139,16 @@ int main(int argc, char* argv[]) {
         // the eyes look after the pointer wherever it goes, while the dock is on the screen
         gEyesMouseX = static_cast<float>(localMouseX);
         gEyesMouseY = static_cast<float>(adjustedMouseY);
-        if (showSystemTray && dockState != STATE_HIDDEN) {
+        CheckForOtherEyes();
+        if (dockState != STATE_HIDDEN) {
             static float eyesDrawnX = 0.0f, eyesDrawnY = 0.0f;
             if ((gEyesMouseX != eyesDrawnX || gEyesMouseY != eyesDrawnY)) {
-                for (size_t i = 0; i < fLiveTrayItems.size(); ++i) {
+                if (EyeballsBesideClock()) {
+                    eyesDrawnX = gEyesMouseX;
+                    eyesDrawnY = gEyesMouseY;
+                    needsRender = true;
+                }
+                for (size_t i = 0; showSystemTray && i < fLiveTrayItems.size(); ++i) {
                     if (!fLiveTrayItems[i].isEyes) continue;
                     eyesDrawnX = gEyesMouseX;
                     eyesDrawnY = gEyesMouseY;
