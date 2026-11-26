@@ -110,6 +110,7 @@ static inline uint32 hdTransparentPopupFlag() { return gCompositor ? (uint32)B_T
 #include <set>
 #include <Shape.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <StorageKit.h>
 #include <String.h>
@@ -522,6 +523,10 @@ struct TaskbarItem {
     std::string signature;
     bool isGroup = false;
     std::vector<team_id> groupTeams;
+
+    // A Windows program under Wine: when the picture of its own icon, which Wine saves for its team, was last written
+    // (0: there is none, the icon is Wine's)
+    time_t savedIconTime = 0;
 
     bool HasTeam(team_id team) const {
         if (team == teamId) return true;
@@ -9840,6 +9845,24 @@ void SyncDockWithRunningDeskbarApps() {
                     break;
                 }
             }
+            if (appSignature == kWineSignature) {
+                // A Windows program's own icon, which Wine saves for its team; it may come, or change, after the entry
+                struct stat saved;
+                const std::string file = SavedWineIconPath(id);
+                const time_t when = !file.empty() && stat(file.c_str(), &saved) == 0 ? saved.st_mtime : 0;
+                time_t had = 0;
+                for (const auto& oldWin : oldTaskbarWindows)
+                    if (IsSameDockEntry(oldWin, openApp)) had = oldWin.savedIconTime;
+                openApp.savedIconTime = when;
+                if (when != 0 && (!reusedTexture || had != when)) {
+                    const HaikuTexture own = LoadSavedWineIcon(file);
+                    if (own.id != 0) {
+                        if (reusedTexture) glDeleteTextures(1, &openApp.icon.id);
+                        openApp.icon = own;
+                        reusedTexture = true;
+                    }
+                }
+            }
             if (!reusedTexture) {
                 openApp.icon = LoadIconFromNode(path.Path(), 128);
             }
@@ -14454,6 +14477,46 @@ public:
 private:
 
     // Helper function that handles real files, directories, and symlink resolution paths
+    // Where Wine saves the icon of the program that runs in a team (winewayland's systray_haiku.c); empty without HOME.
+    static std::string SavedWineIconPath(team_id team) {
+        BPath path;
+        if (find_directory(B_USER_CACHE_DIRECTORY, &path) != B_OK) return std::string();
+        char name[64];
+        snprintf(name, sizeof(name), "wine-icons/%d.wicn", (int)team);
+        if (path.Append(name) != B_OK) return std::string();
+        return path.Path();
+    }
+
+    // "WICN", width, height (int32), then the pixels (B_RGBA32, not premultiplied).
+    HaikuTexture LoadSavedWineIcon(const std::string& file) {
+        HaikuTexture texture;
+        FILE* in = fopen(file.c_str(), "rb");
+        if (in == nullptr) return texture;
+        char magic[4];
+        int32 size[2] = { 0, 0 };
+        std::vector<uint32> pixels;
+        if (fread(magic, 1, 4, in) == 4 && memcmp(magic, "WICN", 4) == 0 && fread(size, 4, 2, in) == 2
+            && size[0] > 0 && size[1] > 0 && size[0] <= 512 && size[1] <= 512) {
+            pixels.resize((size_t)size[0] * size[1]);
+            if (fread(pixels.data(), 4, pixels.size(), in) != pixels.size()) pixels.clear();
+        }
+        fclose(in);
+        if (pixels.empty()) return texture;
+        BleedIconEdges(pixels, size[0], size[1]);
+        texture.width = size[0];
+        texture.height = size[1];
+        glGenTextures(1, &texture.id);
+        glBindTexture(GL_TEXTURE_2D, texture.id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, GL_TRUE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size[0], size[1], 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pixels.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return texture;
+    }
+
     HaikuTexture LoadIconFromNode(const char* filepath, int targetSize) {
         HaikuTexture texture;
 
