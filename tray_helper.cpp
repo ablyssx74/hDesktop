@@ -8,11 +8,31 @@
 #include <Dragger.h>
 #include <Message.h>
 #include <Picture.h>
+#include <ToolTip.h>
 #include <View.h>
 #include <Window.h>
 #include <string.h>
 
 #include "tray_helper.h"
+
+// BView::GetToolTipAt() is for a view itself; it is what the system asks when the pointer rests on one, so an item that
+// makes its tool tip there, or sets one, answers it.
+class ToolTipAccess : public BView {
+public:
+	static bool At(BView* view, BPoint where, BToolTip** tip)
+	{
+		return static_cast<ToolTipAccess*>(view)->GetToolTipAt(where, tip);
+	}
+
+private:
+	// (never made: gcc 2 wants a constructor, BView having none without arguments)
+	ToolTipAccess()
+		:
+		BView(BRect(0, 0, 0, 0), "", 0, 0)
+	{
+	}
+};
+
 
 class TrayHelperView : public BView {
 public:
@@ -64,6 +84,8 @@ public:
 		const char* name;
 		for (int32 i = 0; message->FindString("name", i, &name) == B_OK; i++)
 			_Capture(name, scale, reply);
+		if (message->FindString("tip", &name) == B_OK)
+			_ToolTip(name, reply);
 		message->SendReply(&reply);
 	}
 
@@ -73,11 +95,12 @@ private:
 		return ((int32)color.red << 16) | ((int32)color.green << 8) | color.blue;
 	}
 
-	void _Capture(const char* name, float scale, BMessage& reply)
+	// The tray view of that name, or NULL.
+	BView* _Item(const char* name)
 	{
 		BView* tray = Parent();
 		if (tray == NULL)
-			return;
+			return NULL;
 		BView* view = NULL;
 		for (int32 i = 0; i < tray->CountChildren(); i++) {
 			BView* child = tray->ChildAt(i);
@@ -87,6 +110,47 @@ private:
 				break;
 			}
 		}
+		return view;
+	}
+
+	// The text of the tool tip the item shows at its middle: that of a view of its own there, else the item's.
+	void _ToolTip(const char* name, BMessage& reply)
+	{
+		BView* view = _Item(name);
+		if (view == NULL)
+			return;
+		const BRect bounds = view->Bounds();
+		BPoint where((bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2);
+		BView* deepest = view;
+		for (int32 i = view->CountChildren() - 1; i >= 0; i--) {
+			BView* child = view->ChildAt(i);
+			if (dynamic_cast<BDragger*>(child) == NULL && child->Frame().Contains(where)) {
+				deepest = child;
+				break;
+			}
+		}
+		for (;;) {
+			BPoint at = where;
+			if (deepest != view)
+				at -= deepest->Frame().LeftTop();
+			BToolTip* tip = NULL;
+			if (ToolTipAccess::At(deepest, at, &tip) && tip != NULL) {
+				BTextToolTip* text = dynamic_cast<BTextToolTip*>(tip);
+				if (text != NULL && text->Text() != NULL && text->Text()[0] != '\0') {
+					reply.AddString("tip", text->Text());
+					return;
+				}
+			}
+			if (deepest == view)
+				return;
+			deepest = view;
+		}
+	}
+
+	void _Capture(const char* name, float scale, BMessage& reply)
+	{
+		BView* tray = Parent();
+		BView* view = _Item(name);
 		if (view == NULL || view->IsHidden(view))
 			return;
 

@@ -63,7 +63,7 @@ LDFLAGS = $(INCLUDE) -Wl,--gc-sections -s $(SNAKE_RPATH)
 all: $(GUI_TARGET) $(HELPER_TARGET)
 
 $(HELPER_TARGET): tray_helper.cpp tray_helper.h tray_helper.rdef
-	$(HELPER_CXX) -O2 -Wall -o $(HELPER_TARGET) tray_helper.cpp -lbe
+	$(HELPER_CXX) -O2 -Wall -I/boot/system/develop/headers/private/interface -o $(HELPER_TARGET) tray_helper.cpp -lbe
 	rc -o tray_helper.rsrc tray_helper.rdef
 	xres -o $(HELPER_TARGET) tray_helper.rsrc
 	mimeset -f $(HELPER_TARGET)

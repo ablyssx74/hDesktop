@@ -2873,6 +2873,8 @@ static std::map<std::string, LiveTrayPicture> gLiveTrayPictures;   // under gLiv
 static int32 gLiveTrayGeneration = 0;                              // under gLiveTrayLock: raised when the pictures change
 static int32 gLiveTrayApplied = -1;                                // the main thread's: the generation in the textures
 static volatile bool gLiveTrayQuit = false;
+static std::string gTrayHoverName;                                 // under gLiveTrayLock: the item under the pointer
+static std::string gTrayTipName, gTrayTipText;                     // under gLiveTrayLock: the tool tip last sent, whose
 static thread_id gLiveTrayThread = -1;
 
 static bool IsEyesItem(const std::string& name) {
@@ -3149,8 +3151,14 @@ static int32 LiveTrayThread(void*) {
     // for each item's picture at its own size that has been looked up: the icon that fits it
     std::map<std::string, std::map<std::vector<uint32>, TrayIconMatch> > matches;
     std::map<std::string, bigtime_t> nextMatch;
+    std::string askedTip;   // the item whose tool tip was asked for last
     while (!gLiveTrayQuit) {
         snooze(100000);
+        std::string hover;
+        { BAutolock locked(gLiveTrayLock); hover = gTrayHoverName; }
+        // (an item that the pointer has just come to is asked about at once)
+        if (!hover.empty() && hover != askedTip && nextCapture - system_time() <= 1000000) nextCapture = 0;
+        askedTip = hover;
         if (system_time() < nextCapture) continue;
         nextCapture = system_time() + 1000000;
 
@@ -3195,6 +3203,8 @@ static int32 LiveTrayThread(void*) {
             if (!TrayItemIsLeftOut(items[i].second) && !IsEyesItem(items[i].second))
                 ask.AddString("name", items[i].second.c_str());
 
+        if (!hover.empty()) ask.AddString("tip", hover.c_str());
+
         const team_id team = deskbarMessenger.Team();
         const status_t sent = helper.SendMessage(&ask, &answer, 1000000, 3000000);
         if (sent != B_OK || answer.what != kTrayHelperPictures) {
@@ -3217,6 +3227,13 @@ static int32 LiveTrayThread(void*) {
             RemoveTrayHelper();
             if (nextAdd < system_time()) nextAdd = 0;
             continue;
+        }
+
+        if (!hover.empty()) {
+            const char* tip = answer.GetString("tip", "");
+            BAutolock locked(gLiveTrayLock);
+            gTrayTipName = hover;
+            gTrayTipText = tip;
         }
 
         const std::vector<std::string> images = DeskbarAddonImages(team);
@@ -3275,6 +3292,145 @@ static void StopLiveTray() {
     wait_for_thread(gLiveTrayThread, &result);
     gLiveTrayThread = -1;
     RemoveTrayHelper();
+}
+
+// ----- the tool tips of the tray items -----
+// The pointer never reaches the real items, so the dock shows their tool tips itself: the helper sends the text of the item
+// under the pointer, and a small window of hdesktop's shows it beside the dock, in the look of the dock's menus.
+
+class TrayTipView : public BView {
+    std::vector<BString> fLines;
+    BBitmap* fBackdrop;
+    float fLineHeight, fAscent;
+public:
+    static constexpr float kPadX = 10.0f, kPadY = 6.0f, kRadius = 8.0f;
+    TrayTipView(BRect frame, const std::vector<BString>& lines, float lineHeight, float ascent)
+        : BView(frame, "TrayTipView", B_FOLLOW_ALL, B_WILL_DRAW), fLines(lines), fBackdrop(nullptr),
+          fLineHeight(lineHeight), fAscent(ascent) {
+        SetViewColor(B_TRANSPARENT_COLOR);
+        SetFont(be_plain_font);
+    }
+    virtual ~TrayTipView() { delete fBackdrop; }
+    void SetBackdrop(BBitmap* bitmap) { delete fBackdrop; fBackdrop = bitmap; }
+
+    virtual void Draw(BRect) {
+        const BRect bounds = Bounds();
+        const rgb_color fill = NavUI::PillFill();
+        SetDrawingMode(B_OP_COPY);
+        if (gNavRoundedEdges && (gCompositor || (fBackdrop != nullptr && fBackdrop->IsValid()))) {
+            if (!gCompositor) DrawBitmap(fBackdrop, fBackdrop->Bounds(), bounds);
+            SetDrawingMode(B_OP_ALPHA);
+            SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
+            SetHighColor(fill);
+            FillRoundRect(bounds, kRadius, kRadius);
+        } else {
+            SetHighColor(fill);
+            FillRect(bounds);
+        }
+        SetDrawingMode(B_OP_OVER);
+        SetHighColor(TitleColorLuminance(fill) > 140.0f ? rgb_color{20, 22, 28, 255} : rgb_color{255, 255, 255, 255});
+        SetLowColor(fill);
+        for (size_t i = 0; i < fLines.size(); ++i)
+            DrawString(fLines[i].String(), BPoint(kPadX, floorf(kPadY + fAscent + i * fLineHeight)));
+    }
+};
+
+static BMessenger gTrayTipWindow;
+
+static void HideTrayTip() {
+    if (gTrayTipWindow.IsValid()) gTrayTipWindow.SendMessage(B_QUIT_REQUESTED);
+    gTrayTipWindow = BMessenger();
+}
+
+// Shows `text` centred on the item at `item` (screen coordinates): above it, or below it with the dock at the top.
+static void ShowTrayTip(const std::string& text, BRect item) {
+    HideTrayTip();
+    std::vector<BString> lines;
+    float widest = 0.0f;
+    size_t from = 0;
+    while (from <= text.size() && lines.size() < 24) {
+        size_t end = text.find('\n', from);
+        if (end == std::string::npos) end = text.size();
+        BString line(text.substr(from, end - from).c_str());
+        line.ReplaceAll("\t", "    ");
+        be_plain_font->TruncateString(&line, B_TRUNCATE_END, 440.0f);
+        widest = std::max(widest, be_plain_font->StringWidth(line.String()));
+        lines.push_back(line);
+        from = end + 1;
+    }
+    while (!lines.empty() && lines.back().Length() == 0) lines.pop_back();
+    if (lines.empty()) return;
+    font_height fh;
+    be_plain_font->GetHeight(&fh);
+    const float lineHeight = ceilf(fh.ascent + fh.descent + fh.leading);
+    const float width = ceilf(widest + 2.0f * TrayTipView::kPadX);
+    const float height = ceilf(lines.size() * lineHeight + 2.0f * TrayTipView::kPadY);
+
+    const BRect screen = BScreen(B_MAIN_SCREEN_ID).Frame();
+    float x = floorf((item.left + item.right) / 2.0f - width / 2.0f);
+    x = std::max(screen.left + 4.0f, std::min(x, screen.right - width - 4.0f));
+    float y = gDockLocation == kDockLocationTop ? item.bottom + 8.0f : item.top - height - 8.0f;
+    y = floorf(std::max(screen.top + 4.0f, std::min(y, screen.bottom - height - 4.0f)));
+
+    BWindow* window = new BWindow(BRect(x, y, x + width - 1.0f, y + height - 1.0f), "Tray Tip", B_NO_BORDER_WINDOW_LOOK,
+        B_FLOATING_ALL_WINDOW_FEEL, B_NOT_MOVABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_NOT_CLOSABLE | B_AVOID_FOCUS
+            | (gNavRoundedEdges ? hdTransparentPopupFlag() : 0u));
+    TrayTipView* view = new TrayTipView(window->Bounds(), lines, lineHeight, fh.ascent);
+    window->AddChild(view);
+    if (gNavRoundedEdges && !gCompositor) view->SetBackdrop(CaptureScreenBehind(window->Frame()));
+    gTrayTipWindow = BMessenger(window);
+    window->Show();
+}
+
+// Called on every pass of the main loop: `allowed` says that the dock is up, the pointer on it, no button held and no menu
+// open; the pointer is in the coordinates the items were drawn in, whose x starts at the dock window's left edge.
+static void UpdateTrayTip(bool allowed, float mouseX, float mouseY, float windowX) {
+    static std::string hover, shown;
+    static bigtime_t since = 0;
+    static BRect shownAt;
+    static bool dismissed = false;
+
+    std::string name;
+    BRect item;
+    for (size_t i = 0; showSystemTray && i < fLiveTrayItems.size(); ++i) {
+        const TrayItem& hit = fLiveTrayItems[i];
+        if (!TrayItemIsDrawn(hit) || hit.currentRenderWidth <= 0.0f || hit.name == kEyeballsItemName) continue;
+        if (mouseX >= hit.currentRenderX && mouseX <= hit.currentRenderX + hit.currentRenderWidth
+            && mouseY >= hit.currentRenderTop && mouseY <= hit.currentRenderTop + hit.currentRenderHeight) {
+            name = hit.name;
+            item.Set(windowX + hit.currentRenderX, hit.currentRenderTop,
+                windowX + hit.currentRenderX + hit.currentRenderWidth, hit.currentRenderTop + hit.currentRenderHeight);
+            break;
+        }
+    }
+    // a click or an open menu puts the tip away until the pointer has left the item
+    if (!allowed) dismissed = !name.empty();
+    if (name != hover) {
+        hover = name;
+        since = system_time();
+        dismissed = false;
+        BAutolock locked(gLiveTrayLock);
+        gTrayHoverName = name;
+        gTrayTipName.clear();
+        gTrayTipText.clear();
+    }
+
+    std::string text;
+    if (allowed && !dismissed && !name.empty() && system_time() - since >= 500000) {
+        BAutolock locked(gLiveTrayLock);
+        if (gTrayTipName == name) text = gTrayTipText;
+    }
+    if (text.empty()) {
+        if (!shown.empty()) { HideTrayTip(); shown.clear(); }
+        return;
+    }
+    // (the item can still be growing under the zoom: the tip follows it when it has moved noticeably)
+    if (text != shown || fabsf(item.top - shownAt.top) > 6.0f
+        || fabsf((item.left + item.right) - (shownAt.left + shownAt.right)) > 24.0f) {
+        ShowTrayTip(text, item);
+        shown = text;
+        shownAt = item;
+    }
 }
 
 // Puts new pictures into the items' textures (the main thread: it owns the GL context). True when something changed.
@@ -16171,6 +16327,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        UpdateTrayTip(dockState == STATE_VISIBLE && cursorIsInsideDock && nativeButtons == 0
+                && !desktopEngine.MenuPopupOpen(), static_cast<float>(localMouseX), static_cast<float>(adjustedMouseY), 0.0f);
+
         if (needsRender) {
             // =========================================================================
             // DYNAMIC HARDWARE WINDOW RESIZING ENGINE
@@ -16233,6 +16392,7 @@ int main(int argc, char* argv[]) {
 
     }
 
+    HideTrayTip();
     StopLiveTray();
     if (gDockNativeWindow != nullptr) { if (gDockNativeWindow->Lock()) gDockNativeWindow->Quit(); gDockNativeWindow = nullptr; }
     SDL_GL_DeleteContext(glContext);
