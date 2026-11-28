@@ -173,6 +173,14 @@ int32 gEyeballsPlace = kEyeballsInTray;
 bool gEyeballsOverOther = false;
 static const char* const kEyeballsItemName = "hDesktopEyeballs";   // its item in the dock's tray
 static bool EyeballsBesideClock() { return fShowEyeballs && (gEyeballsPlace == kEyeballsBesideClock || !showSystemTray); }
+
+// The CPU monitor that "Show CPU Graph" shows: hdesktop's own graph, or ProcessController's item in the dock's tray.
+enum CpuMonitorStyle { kCpuMonitorGraph = 0, kCpuMonitorProcessController = 1 };
+int32 gCpuMonitorStyle = kCpuMonitorGraph;
+
+static bool IsProcessControllerItem(const std::string& name) {
+    return name == "ProcessController" || name == "ProcessControllerView";
+}
 static BMessenger gConfigViewMessenger;   // the open settings view, told when the answer changes the check box
 
 // Which screen edge the dock is pinned to. Left/Right are intentionally not
@@ -370,6 +378,9 @@ enum {
     MSG_EYEBALLS_IN_TRAY = 'eyit',
     MSG_EYEBALLS_BESIDE_CLOCK = 'eybc',
     MSG_EYEBALLS_CHANGED = 'eych',
+    MSG_CPUMONITOR_GRAPH = 'cmgr',
+    MSG_CPUMONITOR_PROCESSCONTROLLER = 'cmpc',
+    MSG_CPUMONITOR_CHANGED = 'cmch',
     MSG_DOCKLOCATION_BOTTOM_TOGGLED = 'dlbt',
     MSG_DOCKLOCATION_TOP_TOGGLED = 'dltp',
     MSG_LAUNCH_CONFIG_WINDOW = 'lcfg',
@@ -1567,11 +1578,49 @@ static void TeamNameAndIcon(const team_info& teamInfo, BString& name, BBitmap** 
     *icon = bitmap;
 }
 
+// The live menus (memory, threads) change their numbers while they are open. On a composited desktop (RenkuOS) a see-through
+// menu must not be drawn again by invalidating it: app_server clears what is invalidated and the compositor can put that on
+// the screen before the program has drawn it, so the menu flashes. So only the rows that changed are drawn, straight into the
+// menu and each in a layer: background and content reach the window in one piece. Without a compositor, as before.
+static void RedrawMenuRow(BMenu* menu, const BRect& frame, const std::function<void()>& drawItem) {
+    if (menu->Window() == nullptr || menu->Window()->IsHidden()) return;   // not open yet: it is drawn as it opens
+    BRect row(menu->Bounds().left, frame.top, menu->Bounds().right, frame.bottom);
+    if (!gCompositor) {
+        menu->Invalidate(row);
+        return;
+    }
+    BRegion clip(row);
+    // the menu's corners stay as they are: their part transparent pixels would add up when painted over themselves
+    const BRect all = menu->Bounds();
+    const float side = floorf(frame.Height() / 2.0f) + 1.0f;
+    clip.Exclude(BRect(all.left, all.top, all.left + side, all.top + side));
+    clip.Exclude(BRect(all.right - side, all.top, all.right, all.top + side));
+    clip.Exclude(BRect(all.left, all.bottom - side, all.left + side, all.bottom));
+    clip.Exclude(BRect(all.right - side, all.bottom - side, all.right, all.bottom));
+    menu->PushState();
+    menu->ConstrainClippingRegion(&clip);
+    menu->BeginLayer(255);
+    BRect background = all;
+    be_control_look->DrawMenuBackground(menu, background, row, ui_color(B_MENU_BACKGROUND_COLOR));
+    drawItem();
+    menu->EndLayer();
+    menu->PopState();
+}
+
+// A menu's first Draw() after its items changed only lays it out and asks to be drawn again, leaving what was cleared for this
+// update empty on the screen. Called with an empty area first, that pass is out of the way and the menu is drawn at once.
+#define HD_DRAW_MENU_AT_ONCE \
+    virtual void Draw(BRect updateRect) override { \
+        BMenu::Draw(BRect(0, 0, -1, -1)); \
+        BMenu::Draw(updateRect); \
+    }
+
 // The parts the system row and the team rows share: the icon, the label, the numbers and the frame of the bar.
 class BMemoryRowItem : public BMenuItem {
 public:
     BMemoryRowItem(const char* label, BBitmap* icon) : BMenuItem(label, nullptr), fIcon(icon) {}
     virtual ~BMemoryRowItem() override { delete fIcon; }
+    void Redraw() { if (Menu() != nullptr) RedrawMenuRow(Menu(), Frame(), [this]() { Draw(); }); }
 
 protected:
     static const int kBarWidth = 100;
@@ -1771,20 +1820,25 @@ private:
 class BCpuBarMenuItem : public BMenuItem {
 public:
     BCpuBarMenuItem(const char* label, BMessage* message, double cpuPercent, BBitmap* icon = nullptr)
-        : BMenuItem(label, message), fCpuPercent(cpuPercent), fIcon(icon) {}
+        : BMenuItem(label, message), fCpuPercent(cpuPercent), fIcon(icon), fText(label) {}
 
     // Cascading row (a team whose threads open in a submenu); the label is the submenu's name.
     BCpuBarMenuItem(BMenu* submenu, double cpuPercent, BBitmap* icon = nullptr)
-        : BMenuItem(submenu), fCpuPercent(cpuPercent), fIcon(icon) {}
+        : BMenuItem(submenu), fCpuPercent(cpuPercent), fIcon(icon), fText(submenu->Name()) {}
 
     virtual ~BCpuBarMenuItem() override {
         delete fIcon; // Safely release bitmap memory when item is removed
     }
 
-    void UpdateMetrics(double newPercent, const char* newLabel) {
+    // true when what is drawn changed. (The text is not set as the item's label: SetLabel() lays out and invalidates the whole menu.)
+    bool UpdateMetrics(double newPercent, const char* newText) {
+        const bool changed = fText != newText || std::lround(newPercent * 10.0) != std::lround(fCpuPercent * 10.0);
         fCpuPercent = newPercent;
-        SetLabel(newLabel);
+        fText = newText;
+        return changed;
     }
+
+    void Redraw() { if (Menu() != nullptr) RedrawMenuRow(Menu(), Frame(), [this]() { Draw(); }); }
 
 protected:
     virtual void GetContentSize(float* width, float* height) override {
@@ -1820,7 +1874,7 @@ protected:
         }
 
         // 3. Render the Process Name string (clipped before the percentage column)
-        BString name(Label());
+        BString name(fText);
         menu->TruncateString(&name, B_TRUNCATE_END, textColumnLeft - nameColumnLeft - 8.0f);
         menu->MovePenTo(nameColumnLeft, fontBaseline);
         menu->DrawString(name.String());
@@ -1863,6 +1917,7 @@ protected:
 private:
     double fCpuPercent;
     BBitmap* fIcon;
+    BString fText;
 };
 
 
@@ -1885,13 +1940,15 @@ public:
     virtual void AttachedToWindow() override {
         BMenu::AttachedToWindow();
         Window()->SetPulseRate(500000);   // the numbers move twice a second
-        Refresh(true);
+        Refresh(false);   // (the menu is drawn as it opens)
     }
 
     virtual void Pulse() override {
         BMenu::Pulse();
         Refresh(true);
     }
+
+    HD_DRAW_MENU_AT_ONCE
 
 private:
     void Refresh(bool attached) {
@@ -1900,7 +1957,7 @@ private:
         const int64 committedKiB = static_cast<int64>(info.used_pages) * B_PAGE_SIZE / 1024;
 
         BSystemMemoryRowItem* system = dynamic_cast<BSystemMemoryRowItem*>(ItemAt(0));
-        if (system != nullptr && system->Update() && attached) Invalidate(system->Frame());
+        if (system != nullptr && system->Update() && attached) system->Redraw();
 
         // teams that are gone, and the numbers of those that are not
         for (int32 i = CountItems() - 1; i >= 1; i--) {
@@ -1911,7 +1968,7 @@ private:
                 RemoveItem(row);
                 delete row;
             } else if (changed && attached) {
-                Invalidate(row->Frame());
+                row->Redraw();
             }
         }
 
@@ -2081,8 +2138,9 @@ public:
             if (sub != nullptr && sub->Window() != nullptr) return;
         }
         _RefreshThreads();
-        Invalidate();
     }
+
+    HD_DRAW_MENU_AT_ONCE
 
 private:
     enum { kFirstThreadRow = 2, kMaxThreadRows = 60 };
@@ -2116,7 +2174,7 @@ private:
 
             BCpuBarMenuItem* item = dynamic_cast<BCpuBarMenuItem*>(ItemAt(index));
             if (item) {
-                item->UpdateMetrics(cpu, rowText);
+                if (item->UpdateMetrics(cpu, rowText)) item->Redraw();
                 BThreadPriorityMenu* priorities = dynamic_cast<BThreadPriorityMenu*>(item->Submenu());
                 if (priorities) priorities->SetThread(thInfo.thread);
             } else {
@@ -2228,6 +2286,7 @@ public:
     }
 
     virtual void Pulse() override;
+    HD_DRAW_MENU_AT_ONCE
 
 private:
     int32 fCpuCount;
@@ -2330,7 +2389,7 @@ void BRealtimeCpuMenu::Pulse() {
 
         BCpuBarMenuItem* item = dynamic_cast<BCpuBarMenuItem*>(ItemAt(index));
         if (item) {
-            item->UpdateMetrics(entry.calculatedCpu, rowText);
+            if (item->UpdateMetrics(entry.calculatedCpu, rowText)) item->Redraw();
             BTeamThreadsMenu* threads = dynamic_cast<BTeamThreadsMenu*>(item->Submenu());
             if (threads) {
                 threads->SetTeam(entry.teamId, entry.name);
@@ -2371,8 +2430,6 @@ void BRealtimeCpuMenu::Pulse() {
     while (CountItems() > index) {
         delete RemoveItem(index);
     }
-
-    Invalidate();
 }
 
 
@@ -2707,6 +2764,17 @@ static float TrayItemBaseWidth(const TrayItem& item) {
     return 16.0f;
 }
 
+// hdesktop's own graph shows when it is the chosen monitor, and in ProcessController's place while that cannot be shown
+// (the system tray is off, or ProcessController is not in the Deskbar): there is always one while "Show CPU Graph" is on.
+static bool CpuGraphShown() {
+    if (!fShowCpuGraph) return false;
+    if (gCpuMonitorStyle != kCpuMonitorProcessController || !showSystemTray) return true;
+    for (const auto& item : fLiveTrayItems) {
+        if (IsProcessControllerItem(item.name) && TrayItemIsDrawn(item)) return false;
+    }
+    return true;
+}
+
 // The tray in rows: a row holds the width of six icons (a wide item takes the room of several), the first row is at the
 // bottom and further ones stack on it, four rows at most; with more items than that, all four rows get wider, so none is
 // left out. Positions and sizes are in the unzoomed dock's units.
@@ -2859,8 +2927,8 @@ static GLuint SharpTrayIconTexture(const entry_ref& appRef) {
 // =============================================================================
 // hdesktop puts a small item of its own in the Deskbar's tray (tray_helper.cpp). Asked once a second by a thread here,
 // it lets the other items draw into bitmaps and sends those back; the dock shows them in place of the still icons. An item
-// that gives no picture keeps its still icon. The clock and ProcessController are left out (the dock has its own), and so
-// are the eyes (the dock draws its own). HDESKTOP_STILL_TRAY in the environment turns all of this off.
+// that gives no picture keeps its still icon. The clock is left out (the dock has its own), ProcessController too unless
+// it is the chosen CPU monitor, and so are the eyes (the dock draws its own). HDESKTOP_STILL_TRAY in the environment turns all of this off.
 
 struct LiveTrayPicture {
     int32 width;
@@ -2882,8 +2950,10 @@ static bool IsEyesItem(const std::string& name) {
 }
 
 static bool TrayItemIsLeftOut(const std::string& name) {
-    // (hdesktop has its own CPU graph and workspace switcher; the helper is not something to show)
-    return name == "ProcessController" || name == "ProcessControllerView" || name == HDESKTOP_TRAY_HELPER_NAME
+    // ProcessController shows when it is chosen in place of hdesktop's CPU graph
+    if (IsProcessControllerItem(name)) return !(fShowCpuGraph && gCpuMonitorStyle == kCpuMonitorProcessController);
+    // (hdesktop has its own workspace switcher; the helper is not something to show)
+    return name == HDESKTOP_TRAY_HELPER_NAME
         || strcasecmp(name.c_str(), "workspaces") == 0;
 }
 
@@ -3569,6 +3639,55 @@ static void CheckForOtherEyes() {
     if (DeskbarHasEyes()) AskWhichEyes();
 }
 
+// ----- ProcessController as the CPU monitor -----
+
+static bool DeskbarHasProcessController() {
+    BDeskbar deskbar;
+    return deskbar.HasItem("ProcessController") || deskbar.HasItem("ProcessControllerView");
+}
+
+static int32 gProcessControllerQuestionOpen = 0;
+
+static int32 ProcessControllerQuestionThread(void*) {
+    BAlert* alert = new BAlert("CPU Monitor",
+        "ProcessController is not in the Deskbar's tray. hDesktop shows the one that is there.\n\n"
+        "Add ProcessController to the Deskbar?",
+        "Cancel", "Add", nullptr, B_WIDTH_AS_USUAL, B_IDEA_ALERT);
+    alert->SetShortcut(0, B_ESCAPE);
+    alert->CenterOnScreen();
+    status_t status = B_CANCELED;
+    if (alert->Go() == 1) {
+        BPath path;
+        entry_ref ref;
+        status = find_directory(B_SYSTEM_APPS_DIRECTORY, &path);
+        if (status == B_OK) status = path.Append("ProcessController");
+        if (status == B_OK) status = get_ref_for_path(path.Path(), &ref);
+        const char* arguments[] = { "-deskbar" };
+        if (status == B_OK) status = be_roster->Launch(&ref, 1, arguments);
+        if (status == B_ALREADY_RUNNING) status = B_OK;
+        if (status != B_OK) {
+            BString text("ProcessController could not be started: ");
+            text << strerror(status);
+            (new BAlert("CPU Monitor", text.String(), "OK", nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go();
+        }
+    }
+    if (status != B_OK) {
+        gCpuMonitorStyle = kCpuMonitorGraph;
+        SaveConfiguration();
+        gConfigViewMessenger.SendMessage(MSG_CPUMONITOR_CHANGED);
+    }
+    atomic_set(&gProcessControllerQuestionOpen, 0);
+    return 0;
+}
+
+// Asks in a thread of its own so that the dock keeps drawing.
+static void AskToAddProcessController() {
+    if (atomic_get_and_set(&gProcessControllerQuestionOpen, 1) != 0) return;
+    const thread_id thread = spawn_thread(ProcessControllerQuestionThread, "hdesktop cpu monitor question",
+        B_NORMAL_PRIORITY, nullptr);
+    if (thread < 0 || resume_thread(thread) != B_OK) atomic_set(&gProcessControllerQuestionOpen, 0);
+}
+
 void SyncDynamicSystrayTextures() {
     bigtime_t currentTime = system_time();
     // Throttle: Only probe Deskbar twice per second (500,000 microseconds)
@@ -3996,6 +4115,7 @@ private:
     BCheckBox* fCpuGraphCheckbox;
     BCheckBox* fEyeballsCheckbox;
     BMenuField* fEyeballsPlaceField;
+    BMenuField* fCpuMonitorField;
     BMenuField* fDockLocationMenuField;
     BMenuField* fThumbnailModeField = nullptr;
     BMenuField* fEffectsMenuField;
@@ -4062,6 +4182,22 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fCpuGraphCheckbox->SetValue(fShowCpuGraph ? B_CONTROL_ON : B_CONTROL_OFF);
         AddChild(fCpuGraphCheckbox);
 
+        {
+            BPopUpMenu* monitorPopup = new BPopUpMenu("CPU Monitor");
+            BMenuItem* graph = new BMenuItem("hdesktop style", new BMessage(MSG_CPUMONITOR_GRAPH));
+            graph->SetMarked(gCpuMonitorStyle == kCpuMonitorGraph);
+            monitorPopup->AddItem(graph);
+            BMenuItem* controller = new BMenuItem("ProcessController (system tray)",
+                new BMessage(MSG_CPUMONITOR_PROCESSCONTROLLER));
+            controller->SetMarked(gCpuMonitorStyle == kCpuMonitorProcessController);
+            monitorPopup->AddItem(controller);
+            fCpuMonitorField = new BMenuField(BRect(300.0f, 420.0f, frame.Width() - 35.0f, 445.0f),
+                "cpu_monitor_field", nullptr, monitorPopup);
+            fCpuMonitorField->SetViewColor(B_TRANSPARENT_COLOR);
+            AddChild(fCpuMonitorField);
+            AddChild(new PillMenuFieldOverlay(fCpuMonitorField));
+        }
+
         fEyeballsCheckbox = new BCheckBox(BRect(290.0f, 362.0f, 310.0f, 378.0f), "eyeballs_cb", nullptr,
             new BMessage(MSG_EYEBALLS_TOGGLED));
         fEyeballsCheckbox->SetViewColor(rgb_color{24, 24, 28, 255});
@@ -4075,7 +4211,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             BMenuItem* besideClock = new BMenuItem("Beside Clock", new BMessage(MSG_EYEBALLS_BESIDE_CLOCK));
             besideClock->SetMarked(gEyeballsPlace == kEyeballsBesideClock);
             placePopup->AddItem(besideClock);
-            fEyeballsPlaceField = new BMenuField(BRect(145.0f, 390.0f, frame.Width() - 35.0f, 415.0f),
+            fEyeballsPlaceField = new BMenuField(BRect(300.0f, 390.0f, frame.Width() - 35.0f, 415.0f),
                 "eyeballs_place_field", nullptr, placePopup);
             fEyeballsPlaceField->SetViewColor(B_TRANSPARENT_COLOR);
             AddChild(fEyeballsPlaceField);
@@ -4422,11 +4558,13 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         // Widgets
         put(fClockCheckbox, 1, 35.0f, 14.0f);
         put(fVolumeCheckbox, 1, 290.0f, 14.0f);
-        put(fCpuGraphCheckbox, 1, 35.0f, 38.0f);
-        put(fWorkspaceSwitcherCheckbox, 1, 290.0f, 38.0f);
-        put(fSystemTrayCheckbox, 1, 35.0f, 62.0f);
-        put(fEyeballsCheckbox, 1, 290.0f, 62.0f);
-        putField(fEyeballsPlaceField, 1, 145.0f, 90.0f);
+        put(fWorkspaceSwitcherCheckbox, 1, 35.0f, 38.0f);
+        put(fSystemTrayCheckbox, 1, 290.0f, 38.0f);
+        // a widget and, beside it, the choice that goes with it
+        put(fCpuGraphCheckbox, 1, 35.0f, 70.0f);
+        putField(fCpuMonitorField, 1, 300.0f, 65.0f);
+        put(fEyeballsCheckbox, 1, 35.0f, 104.0f);
+        putField(fEyeballsPlaceField, 1, 300.0f, 99.0f);
         // Look
         put(fRoundedEdgesCheckbox, 2, 35.0f, 14.0f);
         put(fDrawerColorButton, 2, 76.0f, 52.0f);
@@ -4477,11 +4615,12 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             case 1:
                 text("Show Clock", 62.0f, 26.0f);
                 text("Show Volume", 317.0f, 26.0f);
-                text("Show CPU Graph", 62.0f, 50.0f);
-                text("Show Workspace Switcher", 317.0f, 50.0f);
-                text("Enable System Tray", 62.0f, 74.0f);
-                text("Show Eyeballs", 317.0f, 74.0f);
-                text("Eyeballs Location:", 35.0f, 107.0f);
+                text("Show Workspace Switcher", 62.0f, 50.0f);
+                text("Enable System Tray", 317.0f, 50.0f);
+                text("Show CPU Graph", 62.0f, 82.0f);
+                text("CPU Monitor:", 183.0f, 82.0f);
+                text("Show Eyeballs", 62.0f, 116.0f);
+                text("Eyeballs Location:", 183.0f, 116.0f);
                 break;
             case 2: {
                 text("Rounded Edges", 62.0f, 26.0f);
@@ -4757,6 +4896,7 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
         fCpuGraphCheckbox->SetTarget(this);
         fEyeballsCheckbox->SetTarget(this);
         fEyeballsPlaceField->Menu()->SetTargetForItems(this);
+        fCpuMonitorField->Menu()->SetTargetForItems(this);
         gConfigViewMessenger = BMessenger(this);
         fDockLocationMenuField->Menu()->SetTargetForItems(this);
         fEffectsMenuField->Menu()->SetTargetForItems(this);
@@ -4987,7 +5127,24 @@ ConfigView(BRect frame) : BView(frame, "ConfigView", B_FOLLOW_ALL, B_WILL_DRAW) 
             case MSG_CPUGRAPH_TOGGLED: {
                 fShowCpuGraph = (fCpuGraphCheckbox->Value() == B_CONTROL_ON);
                 SaveConfiguration();
+                if (fShowCpuGraph && gCpuMonitorStyle == kCpuMonitorProcessController && !DeskbarHasProcessController())
+                    AskToAddProcessController();
                 Invalidate();
+                break;
+            }
+
+            case MSG_CPUMONITOR_GRAPH:
+            case MSG_CPUMONITOR_PROCESSCONTROLLER: {
+                gCpuMonitorStyle = message->what == MSG_CPUMONITOR_GRAPH ? kCpuMonitorGraph : kCpuMonitorProcessController;
+                SaveConfiguration();
+                if (fShowCpuGraph && gCpuMonitorStyle == kCpuMonitorProcessController && !DeskbarHasProcessController())
+                    AskToAddProcessController();
+                break;
+            }
+
+            case MSG_CPUMONITOR_CHANGED: {
+                BMenuItem* item = fCpuMonitorField->Menu()->ItemAt(gCpuMonitorStyle);
+                if (item != nullptr) item->SetMarked(true);
                 break;
             }
 
@@ -10995,7 +11152,7 @@ void SyncDockWithRunningDeskbarApps() {
             // =========================================================================
             // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
-            if (fShowCpuGraph) {
+            if (CpuGraphShown()) {
                 // Proportional Separator
                 progressiveX += (clockSectionPadding * layoutSizeRatio);
 
@@ -12068,7 +12225,7 @@ void SyncDockWithRunningDeskbarApps() {
 	    // -------------------------------------------------------------------------
 	    // Evaluate Click Bounds for Graphical LED CPU Monitor Component
 	    // -------------------------------------------------------------------------
-	    if (fShowCpuGraph) {
+	    if (CpuGraphShown()) {
 	        currentX += clockSectionPadding;
 
 	        float dynamicGraphWidth = dynamicWidths[cpuSlotIdx];
@@ -12656,7 +12813,7 @@ void SyncDockWithRunningDeskbarApps() {
             // =========================================================================
             // PROCESS GRAPHICAL CPU MONITOR METRICS (2D SMOOTH FIX)
             // =========================================================================
-            if (fShowCpuGraph) {
+            if (CpuGraphShown()) {
                 // Proportional Separator
                 progressiveX += (clockSectionPadding * layoutSizeRatio);
 
@@ -14067,7 +14224,7 @@ void SyncDockWithRunningDeskbarApps() {
         // (declared outside the toggle below -- the workspace switcher uses it too)
         float sizeRatio = baseSize / 48.0f;
 
-        if (fShowCpuGraph) {
+        if (CpuGraphShown()) {
             glLineWidth(2.0f);
             currentX += clockSectionPadding;
 
@@ -15145,6 +15302,7 @@ void SaveConfiguration() {
             settingsMsg.AddBool("show_clock", fShowClock);
             settingsMsg.AddBool("show_volume", fShowVolume);
             settingsMsg.AddBool("show_cpu_graph", fShowCpuGraph);
+            settingsMsg.AddInt32("cpu_monitor_style", gCpuMonitorStyle);
             settingsMsg.AddBool("show_eyeballs", fShowEyeballs);
             settingsMsg.AddInt32("eyeballs_place", gEyeballsPlace);
             settingsMsg.AddBool("eyeballs_over_deskbar", gEyeballsOverOther);
@@ -15228,6 +15386,8 @@ void LoadConfiguration() {
                 if (settingsMsg.FindBool("show_clock", &valBool) == B_OK) fShowClock = valBool;
                 if (settingsMsg.FindBool("show_volume", &valBool) == B_OK) fShowVolume = valBool;
                 if (settingsMsg.FindBool("show_cpu_graph", &valBool) == B_OK) fShowCpuGraph = valBool;
+                if (settingsMsg.FindInt32("cpu_monitor_style", &valInt32) == B_OK)
+                    gCpuMonitorStyle = (valInt32 == kCpuMonitorProcessController) ? kCpuMonitorProcessController : kCpuMonitorGraph;
                 if (settingsMsg.FindBool("show_eyeballs", &valBool) == B_OK) fShowEyeballs = valBool;
                 if (settingsMsg.FindInt32("eyeballs_place", &valInt32) == B_OK)
                     gEyeballsPlace = (valInt32 == kEyeballsBesideClock) ? kEyeballsBesideClock : kEyeballsInTray;
